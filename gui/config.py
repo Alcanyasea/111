@@ -45,6 +45,11 @@ DEFAULTS = {
         "morning": {"time": "04:00", "enabled": True},
         "evening": {"time": "16:00", "enabled": True},
     },
+    "cleanup": {
+        "auto": True,          # 自动清理开关（控制台运行期间定期清理）
+        "interval_days": 7,    # 自动清理间隔（天）
+        "last_run": "",        # 上次清理时间 "YYYY-MM-DD HH:MM"，空 = 从未清理
+    },
 }
 
 

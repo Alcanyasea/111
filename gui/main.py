@@ -8,6 +8,7 @@ PySide6 + PyQt-Fluent-Widgets 实现的桌面 GUI，设计见 mockup.html。
 GUI 手动「立即运行」时传 -NoShutdown：手动运行即使全部成功也不自动关机。
 """
 import sys
+from datetime import datetime
 
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QColor, QFont, QIcon, QLinearGradient, QPainter, QPixmap
@@ -19,7 +20,7 @@ from qfluentwidgets import (FluentIcon, FluentWindow, InfoBar, InfoBarPosition,
 
 import config as appconfig
 import theme
-from core import logparse, runner, scheduler
+from core import cleanup, logparse, runner, scheduler
 from pages.accounts import AccountsPage
 from pages.dashboard import DashboardPage
 from pages.logs import LogsPage
@@ -132,7 +133,30 @@ class MainWindow(FluentWindow):
             self._task_info = scheduler.query()
             self._task_info_time = self._tick
 
+    def _maybe_auto_clean(self):
+        """自动清理到期检查（每 2 秒轮询中顺带执行，判断本身是纯字符串比较）。
+
+        只在空闲时清理（挂机中删除锁文件/截断日志会干扰运行）；
+        清理后立刻更新 last_run，避免本次会话内重复触发。
+        """
+        c = self.cfg.get("cleanup") or {}
+        if not c.get("auto", True):
+            return
+        if runner.is_running() or not cleanup.is_due(self.cfg):
+            return
+        items = cleanup.scan(self.cfg)
+        if items:
+            freed, ok_count, _ = cleanup.perform(items)
+            if ok_count:
+                InfoBar.info("已自动清理", "清除 %d 项，释放 %s"
+                             % (ok_count, cleanup.format_size(freed)),
+                             parent=self, position=InfoBarPosition.TOP_RIGHT,
+                             duration=4000)
+        c["last_run"] = datetime.now().strftime("%Y-%m-%d %H:%M")
+        appconfig.save(self.cfg)
+
     def refresh_status(self):
+        self._maybe_auto_clean()
         running = runner.is_running()
         if running:
             # 当前跑到哪个号、什么阶段（日志解析）

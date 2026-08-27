@@ -181,6 +181,55 @@ function Run-Switch($s) {
     return $code
 }
 
+# ---- 数据清理（16:00 下午班完整清理；凌晨班只清截图，见 MAIN）----
+# 与 GUI「运行设置 → 数据清理」一致：debug 目录 / 残留临时文件 / 测试遗留文件 /
+# 旧配置备份 / master_log.txt 超限截断（>1MB 保留尾部 512KB）。
+# 在运行开始阶段执行，清的是上一轮的残留，不影响本轮；master.lock 正在使用不删。
+function Clear-UnnecessaryData {
+    # 1) debug 目录（登录校验截图 + 捕获日志）
+    $debugDir = Join-Path $scriptDir "debug"
+    if (Test-Path $debugDir) {
+        Get-ChildItem $debugDir -File -ErrorAction SilentlyContinue |
+            Remove-Item -Force -ErrorAction SilentlyContinue
+    }
+    # 2) 残留临时文件（正常结束会自删，异常中断会残留）
+    foreach ($name in @("switch_output.tmp", "master.lock.tmp", "maa_done.signal")) {
+        Remove-Item (Join-Path $scriptDir $name) -Force -ErrorAction SilentlyContinue
+    }
+    # 3) 测试遗留文件（调试时 dump 的登录缓存，含 token）
+    foreach ($name in @("_t1.xml", "_t2.xml", "_t3.bin")) {
+        Remove-Item (Join-Path $scriptDir $name) -Force -ErrorAction SilentlyContinue
+    }
+    # 4) 旧配置备份
+    Remove-Item "D:\1\config.json.bak" -Force -ErrorAction SilentlyContinue
+    # 5) master_log.txt 超限截断（>1MB 保留尾部 512KB 并对齐行首；此刻无活动日志句柄，安全）
+    $logPath = Join-Path $scriptDir "master_log.txt"
+    if (Test-Path $logPath) {
+        $size = (Get-Item $logPath).Length
+        if ($size -gt 1048576) {
+            try {
+                $all = [System.IO.File]::ReadAllBytes($logPath)
+                $tail = $all[($all.Length - 524288)..($all.Length - 1)]
+                # 对齐行首；注意 PS 5.1 范围索引 $arr[5..-1] 会倒序，必须显式复制
+                $nl = [Array]::IndexOf($tail, [byte]10)
+                if ($nl -ge 0 -and $nl -lt $tail.Length - 1) {
+                    $keep = New-Object byte[] ($tail.Length - $nl - 1)
+                    [Array]::Copy($tail, $nl + 1, $keep, 0, $keep.Length)
+                    $tail = $keep
+                }
+                $note = [System.Text.Encoding]::UTF8.GetBytes(
+                    ("{0} - [清理] 旧日志已截断（原 {1} KB），仅保留最近部分`n" -f
+                     (Get-Date -Format "yyyy-MM-dd HH:mm:ss"), [int]($size / 1024)))
+                $out = New-Object byte[] ($note.Length + $tail.Length)
+                [Array]::Copy($note, 0, $out, 0, $note.Length)
+                [Array]::Copy($tail, 0, $out, $note.Length, $tail.Length)
+                [System.IO.File]::WriteAllBytes($logPath, $out)
+            } catch {}
+        }
+    }
+    Log "Cleaned up old debug data"
+}
+
 # config.accounts 非数组或为空 → 拒绝运行（防跑错号；旧 3 账号点击流程已废弃）
 if (-not $accountList -or $accountList.Count -eq 0) {
     Log "FATAL: config.accounts 缺失或不是数组格式，无法运行"
@@ -196,12 +245,17 @@ Log "MAA Auto Farm"
 Log "========================================"
 
 # Clean up debug screenshots from previous run (prevent disk bloat)
-$debugDir = "D:\1\scripts\debug"
-if (Test-Path $debugDir) {
-    try {
-        Remove-Item "$debugDir\*.png" -Force -ErrorAction SilentlyContinue
-        Log "Cleaned up old debug screenshots"
-    } catch {}
+# 16:00 下午班（Hour >= 12）→ 完整清理；凌晨班保持只清截图
+if ((Get-Date).Hour -ge 12) {
+    Clear-UnnecessaryData
+} else {
+    $debugDir = "D:\1\scripts\debug"
+    if (Test-Path $debugDir) {
+        try {
+            Remove-Item "$debugDir\*.png" -Force -ErrorAction SilentlyContinue
+            Log "Cleaned up old debug screenshots"
+        } catch {}
+    }
 }
 
 if (-not (Start-MuMu)) { Log "FATAL: MuMu failed to start"; Remove-Item $lockFile -Force -ErrorAction SilentlyContinue; exit 1 }

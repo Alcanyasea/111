@@ -1,15 +1,17 @@
 # -*- coding: utf-8 -*-
-"""运行设置：程序路径 / 连接与超时 / 行为开关。保存 → config.json + 计划任务同步。"""
+"""运行设置：程序路径 / 连接与超时 / 行为开关 / 数据清理。保存 → config.json + 计划任务同步。"""
+from datetime import datetime
+
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QFileDialog, QHBoxLayout, QLabel, QVBoxLayout, QWidget
 
 from qfluentwidgets import (BodyLabel, InfoBar, InfoBarPosition, LineEdit,
-                            PrimaryPushButton, PushButton, ScrollArea, SpinBox,
-                            SwitchButton)
+                            MessageBox, PrimaryPushButton, PushButton, ScrollArea,
+                            SpinBox, SwitchButton)
 
 import config as appconfig
 import theme
-from core import scheduler
+from core import cleanup, runner, scheduler
 from widgets import Card
 
 PATH_KEYS = (
@@ -83,6 +85,28 @@ class SettingsPage(ScrollArea):
         row.addWidget(self.behavior_card, 1)
         root.addLayout(row)
 
+        # ---- 数据清理 ----
+        self.clean_card = Card("数据清理")
+        self.clean_auto_sw = SwitchButton()
+        self._card_row(self.clean_card, "自动清理", self.clean_auto_sw,
+                       "控制台运行期间到期自动清理（挂机中不清理）")
+        self.clean_interval = SpinBox()
+        self.clean_interval.setRange(1, 30)
+        self._card_row(self.clean_card, "清理间隔", self.clean_interval, "天（默认 7）")
+        clean_row = QHBoxLayout()
+        clean_row.setSpacing(10)
+        clean_btn = PushButton("立即清理")
+        clean_btn.clicked.connect(self.on_clean)
+        clean_row.addWidget(_row_label("手动清理"))
+        clean_row.addWidget(clean_btn)
+        clean_row.addStretch(1)
+        self.clean_card.vbox.addLayout(clean_row)
+        self.clean_hint = BodyLabel("")
+        self.clean_hint.setStyleSheet("color: %s; font-size: 12px;" % theme.TEXT_3)
+        self.clean_card.vbox.addWidget(self.clean_hint)
+        self.clean_card.vbox.addSpacing(10)
+        root.addWidget(self.clean_card)
+
         # ---- 保存 ----
         self.action_card = Card()
         bar = QHBoxLayout()
@@ -124,6 +148,13 @@ class SettingsPage(ScrollArea):
         self.launch_spin.setValue(int(source["timeouts"].get("launch_wait_sec", 120)))
         self.close_emu_sw.setChecked(bool(source["behavior"].get("close_emulator", True)))
         self.shutdown_sw.setChecked(bool(source["behavior"].get("morning_shutdown", True)))
+        c = source.get("cleanup") or {}
+        self.clean_auto_sw.setChecked(bool(c.get("auto", True)))
+        self.clean_interval.setValue(int(c.get("interval_days", 7)))
+        self._refresh_clean_hint()
+
+    def _refresh_clean_hint(self):
+        self.clean_hint.setText(cleanup.last_run_text(self.cfg))
 
     def load_from_cfg(self):
         self._fill(self.cfg)
@@ -141,6 +172,9 @@ class SettingsPage(ScrollArea):
         self.cfg["timeouts"]["launch_wait_sec"] = self.launch_spin.value()
         self.cfg["behavior"]["close_emulator"] = self.close_emu_sw.isChecked()
         self.cfg["behavior"]["morning_shutdown"] = self.shutdown_sw.isChecked()
+        c = self.cfg.setdefault("cleanup", {})
+        c["auto"] = self.clean_auto_sw.isChecked()
+        c["interval_days"] = self.clean_interval.value()
 
         appconfig.save(self.cfg)
         ok, msg = scheduler.apply(self.cfg)
@@ -152,6 +186,48 @@ class SettingsPage(ScrollArea):
             InfoBar.warning("配置已保存，但计划任务未更新", msg,
                             parent=self.window(), position=InfoBarPosition.TOP_RIGHT,
                             duration=6000)
+
+    def on_clean(self):
+        if runner.is_running():
+            InfoBar.warning("挂机运行中", "运行期间不能清理，请停止后再试",
+                            parent=self.window(), position=InfoBarPosition.TOP_RIGHT,
+                            duration=4000)
+            return
+        items = cleanup.scan(self.cfg)
+        if not items:
+            InfoBar.info("无需清理", "没有发现可清理的数据",
+                         parent=self.window(), position=InfoBarPosition.TOP_RIGHT,
+                         duration=3000)
+            return
+        total = sum(i["size"] for i in items)
+        lines = []
+        for it in items:
+            lines.append("· %s（%s）" % (it["path"], cleanup.format_size(it["size"])))
+        box = MessageBox(
+            "清理数据",
+            "将清理 %d 项，释放约 %s：\n\n%s\n\n"
+            "不含账号登录数据（scripts\\accounts）。" % (
+                len(items), cleanup.format_size(total), "\n".join(lines)),
+            self)
+        box.yesButton.setText("清理")
+        box.cancelButton.setText("取消")
+        if not box.exec():
+            return
+        freed, ok_count, fail_count = cleanup.perform(items)
+        now = datetime.now().strftime("%Y-%m-%d %H:%M")
+        self.cfg.setdefault("cleanup", {})["last_run"] = now
+        appconfig.save(self.cfg)
+        self._refresh_clean_hint()
+        if fail_count:
+            InfoBar.warning("清理完成", "释放 %s（%d 项），%d 项删除失败"
+                            % (cleanup.format_size(freed), ok_count, fail_count),
+                            parent=self.window(), position=InfoBarPosition.TOP_RIGHT,
+                            duration=4000)
+        else:
+            InfoBar.success("清理完成", "释放 %s（%d 项）"
+                            % (cleanup.format_size(freed), ok_count),
+                            parent=self.window(), position=InfoBarPosition.TOP_RIGHT,
+                            duration=4000)
 
     def _browse(self, key):
         path, _ = QFileDialog.getOpenFileName(
