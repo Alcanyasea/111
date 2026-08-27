@@ -20,3 +20,6 @@ scripts/maa_done.signal
 # Python caches
 __pycache__/
 *.pyc
+
+# Runtime lock file
+scripts/master.lock

@@ -1,0 +1,60 @@
+{
+    "paths":  {
+                  "maa_official":  "D:\\软件\\MAA\\MAA-v6.11.1-win-x64\\MAA.exe",
+                  "maa_official_dir":  "D:\\软件\\MAA\\MAA-v6.11.1-win-x64",
+                  "maa_bilibili":  "D:\\软件\\MAA（b）\\MAA.exe",
+                  "maa_bilibili_dir":  "D:\\软件\\MAA（b）",
+                  "adb":  "D:\\软件\\MuMu模拟器\\MuMuPlayer\\nx_main\\adb.exe",
+                  "cli":  "D:\\软件\\MuMu模拟器\\MuMuPlayer\\nx_main\\mumu-cli.exe",
+                  "device":  "127.0.0.1:16384",
+                  "script_dir":  "D:\\1\\scripts",
+                  "log_file":  "D:\\1\\scripts\\master_log.txt"
+              },
+    "timeouts":  {
+                     "maa_min":  30,
+                     "launch_wait_sec":  120
+                 },
+    "accounts":  [
+                     {
+                         "id":  "official1",
+                         "label":  "官服 1",
+                         "server":  "official",
+                         "enabled":  true,
+                         "slot":  "official_1",
+                         "username":  "",
+                         "password":  ""
+                     },
+                     {
+                         "id":  "official2",
+                         "label":  "官服 2",
+                         "server":  "official",
+                         "enabled":  true,
+                         "slot":  "official_2",
+                         "username":  "",
+                         "password":  ""
+                     },
+                     {
+                         "id":  "bilibili",
+                         "label":  "B 服",
+                         "server":  "bilibili",
+                         "enabled":  true,
+                         "slot":  "bilibili_1",
+                         "username":  "",
+                         "password":  ""
+                     }
+                 ],
+    "behavior":  {
+                     "close_emulator":  true,
+                     "morning_shutdown":  true
+                 },
+    "schedule":  {
+                     "morning":  {
+                                     "time":  "04:00",
+                                     "enabled":  true
+                                 },
+                     "evening":  {
+                                     "time":  "16:00",
+                                     "enabled":  true
+                                 }
+                 }
+}
