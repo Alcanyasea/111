@@ -1,0 +1,489 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MAA 自动挂机控制台 — 界面草图</title>
+<style>
+  :root {
+    --bg: #f3f5f7;
+    --card: #ffffff;
+    --border: #e3e6ea;
+    --text: #1b1f24;
+    --text-2: #5b6470;
+    --text-3: #8b94a1;
+    --accent: #0078d4;
+    --accent-hover: #106ebe;
+    --accent-tint: #e8f2fb;
+    --ok: #107c10;
+    --ok-tint: #e6f4e6;
+    --err: #c42b1c;
+    --err-tint: #fdeceb;
+    --warn: #9d5d00;
+    --warn-tint: #fdf3e0;
+    --sidebar-bg: #20262e;
+    --sidebar-hover: #2a313b;
+    --sidebar-active: #2f3742;
+    --sidebar-text: #aeb7c2;
+    --radius: 10px;
+    --shadow: 0 1px 2px rgba(16,24,40,.05), 0 1px 6px rgba(16,24,40,.06);
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: "Segoe UI", "Microsoft YaHei UI", "Microsoft YaHei", sans-serif;
+    background: #dde1e6;
+    color: var(--text);
+    font-size: 14px;
+    padding: 28px;
+    -webkit-font-smoothing: antialiased;
+  }
+  .window {
+    max-width: 1160px;
+    margin: 0 auto;
+    background: var(--bg);
+    border-radius: 12px;
+    box-shadow: 0 12px 40px rgba(0,0,0,.18);
+    display: flex;
+    height: 720px;
+    overflow: hidden;
+  }
+
+  /* ============ 侧边栏 ============ */
+  .sidebar {
+    width: 216px;
+    background: var(--sidebar-bg);
+    display: flex;
+    flex-direction: column;
+    padding: 20px 12px;
+    flex-shrink: 0;
+  }
+  .logo { display: flex; align-items: center; gap: 10px; padding: 4px 10px 22px; }
+  .logo-badge {
+    width: 34px; height: 34px; border-radius: 9px;
+    background: linear-gradient(135deg, #2f7fd1, #1e5fa8);
+    color: #fff; font-size: 17px; font-weight: 700;
+    display: flex; align-items: center; justify-content: center;
+  }
+  .logo-title { color: #fff; font-size: 15px; font-weight: 600; }
+  .logo-sub { color: var(--sidebar-text); font-size: 11px; }
+  .nav-item {
+    display: flex; align-items: center; gap: 10px;
+    padding: 9px 12px; margin: 2px 0;
+    border-radius: 8px; border: none; background: none;
+    color: var(--sidebar-text); font-size: 13.5px; cursor: pointer;
+    font-family: inherit; text-align: left;
+    transition: background .12s, color .12s;
+  }
+  .nav-item:hover { background: var(--sidebar-hover); color: #dfe5ec; }
+  .nav-item.active { background: var(--sidebar-active); color: #fff; }
+  .nav-item svg { width: 17px; height: 17px; flex-shrink: 0; }
+  .sidebar-spacer { flex: 1; }
+  .side-status {
+    display: flex; align-items: center; gap: 8px;
+    padding: 10px 12px; border-radius: 8px;
+    background: rgba(255,255,255,.04);
+    color: var(--sidebar-text); font-size: 12px;
+  }
+  .dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+  .dot.idle { background: #4caf50; }
+  .dot.busy { background: #ffb900; animation: pulse 1.2s infinite; }
+  @keyframes pulse { 50% { opacity: .35; } }
+
+  /* ============ 主区域 ============ */
+  .main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+  .topbar {
+    display: flex; align-items: center; gap: 14px;
+    padding: 14px 24px;
+    background: rgba(255,255,255,.65);
+    border-bottom: 1px solid var(--border);
+  }
+  .topbar h1 { font-size: 17px; font-weight: 600; }
+  .chip {
+    display: inline-flex; align-items: center; gap: 6px;
+    font-size: 12px; padding: 3px 10px; border-radius: 99px;
+    background: var(--ok-tint); color: var(--ok); font-weight: 600;
+  }
+  .chip.busy { background: var(--accent-tint); color: var(--accent); }
+  .topbar-spacer { flex: 1; }
+  .content { flex: 1; overflow-y: auto; padding: 22px 24px; }
+  .page[hidden] { display: none; }
+
+  /* ============ 通用组件 ============ */
+  .card {
+    background: var(--card); border: 1px solid var(--border);
+    border-radius: var(--radius); box-shadow: var(--shadow);
+    padding: 18px 20px; margin-bottom: 16px;
+  }
+  .card h3 { font-size: 14.5px; font-weight: 600; margin-bottom: 14px; }
+  .card .hint { font-size: 12px; color: var(--text-3); font-weight: 400; margin-left: 8px; }
+  .row { display: flex; gap: 16px; flex-wrap: wrap; }
+  .row > .card { flex: 1; min-width: 260px; }
+
+  .btn {
+    font-family: inherit; font-size: 13px; font-weight: 600;
+    padding: 8px 16px; border-radius: 7px; cursor: pointer;
+    border: 1px solid transparent; transition: background .12s;
+  }
+  .btn-primary { background: var(--accent); color: #fff; }
+  .btn-primary:hover { background: var(--accent-hover); }
+  .btn-outline { background: #fff; border-color: #cfd5dc; color: var(--text); }
+  .btn-outline:hover { background: #f6f8fa; }
+  .btn-danger { background: #fff; border-color: #e5b7b1; color: var(--err); }
+  .btn-danger:hover { background: var(--err-tint); }
+
+  /* 开关 */
+  .switch { position: relative; display: inline-block; width: 38px; height: 20px; }
+  .switch input { opacity: 0; width: 0; height: 0; }
+  .slider {
+    position: absolute; inset: 0; background: #c6ccd3;
+    border-radius: 99px; cursor: pointer; transition: background .15s;
+  }
+  .slider::before {
+    content: ""; position: absolute; width: 14px; height: 14px;
+    left: 3px; top: 3px; background: #fff; border-radius: 50%;
+    transition: transform .15s; box-shadow: 0 1px 2px rgba(0,0,0,.2);
+  }
+  .switch input:checked + .slider { background: var(--accent); }
+  .switch input:checked + .slider::before { transform: translateX(18px); }
+
+  .form-row { display: flex; align-items: center; gap: 12px; padding: 7px 0; }
+  .form-row label { width: 150px; color: var(--text-2); font-size: 13px; flex-shrink: 0; }
+  .form-row .field { flex: 1; display: flex; gap: 8px; }
+  input[type=text], input[type=number] {
+    font-family: inherit; font-size: 13px; padding: 7px 10px;
+    border: 1px solid #cfd5dc; border-radius: 6px; background: #fff;
+    width: 100%; outline: none;
+  }
+  input[type=text]:focus, input[type=number]:focus { border-color: var(--accent); box-shadow: 0 0 0 2px rgba(0,120,212,.15); }
+  input[type=number] { width: 90px; }
+  .btn-sm { padding: 6px 12px; font-size: 12.5px; }
+
+  /* 状态徽章 */
+  .pill {
+    display: inline-flex; align-items: center; gap: 5px;
+    font-size: 11.5px; font-weight: 600; padding: 2.5px 9px; border-radius: 99px;
+  }
+  .pill.ok { background: var(--ok-tint); color: var(--ok); }
+  .pill.fail { background: var(--err-tint); color: var(--err); }
+  .pill.wait { background: #f0f2f5; color: var(--text-2); }
+  .pill.run { background: var(--accent-tint); color: var(--accent); }
+  .pill .dot { width: 6px; height: 6px; }
+
+  /* ============ 仪表盘 ============ */
+  .acc-grid { display: flex; gap: 16px; flex-wrap: wrap; }
+  .acc-card { flex: 1; min-width: 250px; }
+  .acc-head { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
+  .acc-icon {
+    width: 38px; height: 38px; border-radius: 10px; flex-shrink: 0;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 18px; color: #fff;
+  }
+  .acc-icon.o1 { background: linear-gradient(135deg, #3a7bd5, #2b5ea7); }
+  .acc-icon.o2 { background: linear-gradient(135deg, #4aa3a2, #2e7d7b); }
+  .acc-icon.b  { background: linear-gradient(135deg, #e07a9e, #c2527b); }
+  .acc-name { font-weight: 600; font-size: 14.5px; }
+  .acc-meta { color: var(--text-2); font-size: 12px; }
+  .kv { display: flex; justify-content: space-between; padding: 4.5px 0; font-size: 12.5px; }
+  .kv span:first-child { color: var(--text-2); }
+  .divider { border-top: 1px dashed var(--border); margin: 9px 0 7px; }
+  .big-num { font-size: 22px; font-weight: 700; }
+  .unit { font-size: 12px; color: var(--text-2); font-weight: 400; }
+
+  /* ============ 日志 ============ */
+  .log-toolbar { display: flex; gap: 10px; align-items: center; margin-bottom: 10px; }
+  .log-toolbar .spacer { flex: 1; }
+  .log-toolbar label { display: flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--text-2); }
+  .log-view {
+    background: #14171c; color: #c8d0da; border-radius: var(--radius);
+    padding: 14px 16px; font-family: Consolas, "Cascadia Mono", monospace;
+    font-size: 12px; line-height: 1.65; height: 460px; overflow-y: auto;
+  }
+  .log-view .t { color: #5d6a79; }
+  .log-view .ok { color: #6fcf6f; }
+  .log-view .err { color: #f0756a; }
+  .log-view .head { color: #7ab3e8; font-weight: 600; }
+
+  .footnote {
+    text-align: center; color: var(--text-3); font-size: 12px;
+    padding: 6px 0 2px;
+  }
+</style>
+</head>
+<body>
+<div class="window">
+
+  <!-- ================= 侧边栏 ================= -->
+  <nav class="sidebar">
+    <div class="logo">
+      <div class="logo-badge">M</div>
+      <div>
+        <div class="logo-title">MAA 挂机控制台</div>
+        <div class="logo-sub">明日方舟 · 自动农场 v4</div>
+      </div>
+    </div>
+
+    <button class="nav-item active" data-page="dashboard">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg>
+      仪表盘
+    </button>
+    <button class="nav-item" data-page="settings">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h.01a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51h.01a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v.01a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+      运行设置
+    </button>
+    <button class="nav-item" data-page="logs">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6M8 13h8M8 17h5"/></svg>
+      日志
+    </button>
+
+    <div class="sidebar-spacer"></div>
+    <div class="side-status">
+      <span class="dot idle"></span> 系统空闲 · 下次早班 04:00
+    </div>
+  </nav>
+
+  <!-- ================= 主区域 ================= -->
+  <div class="main">
+    <div class="topbar">
+      <h1>仪表盘</h1>
+      <span class="chip"><span class="dot" style="background:currentColor"></span>空闲</span>
+      <div class="topbar-spacer"></div>
+      <button class="btn btn-outline">✕ 停止</button>
+      <button class="btn btn-primary">▶ 立即运行</button>
+    </div>
+
+    <div class="content">
+
+      <!-- ============ 仪表盘 ============ -->
+      <section id="page-dashboard" class="page">
+        <div class="acc-grid">
+          <div class="card acc-card">
+            <div class="acc-head">
+              <div class="acc-icon o1">⚔</div>
+              <div>
+                <div class="acc-name">官服 1</div>
+                <div class="acc-meta">MAA 官服 · com.hypergryph.arknights</div>
+              </div>
+              <span class="pill ok" style="margin-left:auto"><span class="dot"></span>今日已完成</span>
+            </div>
+            <div class="kv"><span>今日耗时</span><span><span class="big-num">12.4</span> <span class="unit">分钟</span></span></div>
+            <div class="kv"><span>最近运行</span><span>今天 04:02 ✓</span></div>
+          </div>
+          <div class="card acc-card">
+            <div class="acc-head">
+              <div class="acc-icon o2">⚔</div>
+              <div>
+                <div class="acc-name">官服 2</div>
+                <div class="acc-meta">游戏内切号 · 列表第二个</div>
+              </div>
+              <span class="pill ok" style="margin-left:auto"><span class="dot"></span>今日已完成</span>
+            </div>
+            <div class="kv"><span>今日耗时</span><span><span class="big-num">11.8</span> <span class="unit">分钟</span></span></div>
+            <div class="kv"><span>最近运行</span><span>今天 04:18 ✓</span></div>
+          </div>
+          <div class="card acc-card">
+            <div class="acc-head">
+              <div class="acc-icon b">B</div>
+              <div>
+                <div class="acc-name">B 服</div>
+                <div class="acc-meta">MAA B服 · Bilibili 客户端</div>
+              </div>
+              <span class="pill run"><span class="dot" style="animation:pulse 1.2s infinite"></span>运行中</span>
+            </div>
+            <div class="kv"><span>当前进度</span><span>刷 1-7 · 第 2 轮</span></div>
+            <div class="kv"><span>已用时间</span><span><span class="big-num">6.1</span> <span class="unit">分钟</span></span></div>
+          </div>
+        </div>
+
+        <div class="row">
+          <div class="card">
+            <h3>班次计划</h3>
+            <div class="form-row">
+              <label>早班</label>
+              <div class="field">
+                <input type="text" value="04:00" style="width:90px">
+                <label class="switch"><input type="checkbox" checked><span class="slider"></span></label>
+                <span class="hint" style="align-self:center">完成后自动关机 ✓</span>
+              </div>
+            </div>
+            <div class="form-row">
+              <label>晚班</label>
+              <div class="field">
+                <input type="text" value="16:00" style="width:90px">
+                <label class="switch"><input type="checkbox" checked><span class="slider"></span></label>
+                <span class="hint" style="align-self:center">只关模拟器，不关机</span>
+              </div>
+            </div>
+            <div class="kv" style="margin-top:6px"><span>下次运行</span><span>晚班 · 今天 16:00</span></div>
+            <div class="kv"><span>计划任务</span><span>已创建 2 个 ✓</span></div>
+          </div>
+
+          <div class="card">
+            <h3>最近一次运行 <span class="hint">今天 04:02</span></h3>
+            <div class="kv"><span>官服 1</span><span class="pill ok"><span class="dot"></span>成功 · 12.4 分</span></div>
+            <div class="kv"><span>官服 2</span><span class="pill ok"><span class="dot"></span>成功 · 11.8 分</span></div>
+            <div class="kv"><span>B 服</span><span class="pill fail"><span class="dot"></span>超时 · 30 分</span></div>
+            <div class="divider"></div>
+            <div class="kv"><span>总耗时</span><span><span class="big-num">38.2</span> <span class="unit">分钟</span></span></div>
+            <div class="kv"><span>模拟器</span><span>已自动关闭 ✓</span></div>
+          </div>
+        </div>
+
+        <div class="card">
+          <h3>连接状态</h3>
+          <div class="kv" style="max-width:420px"><span>MuMu 模拟器</span><span class="pill wait"><span class="dot"></span>未启动</span></div>
+          <div class="kv" style="max-width:420px"><span>ADB (127.0.0.1:16384)</span><span class="pill ok"><span class="dot"></span>可连接</span></div>
+          <div class="kv" style="max-width:420px"><span>MAA 进程</span><span>运行中 (B服)</span></div>
+        </div>
+      </section>
+
+      <!-- ============ 运行设置 ============ -->
+      <section id="page-settings" class="page" hidden>
+        <div class="card">
+          <h3>程序路径</h3>
+          <div class="form-row">
+            <label>MAA 官服</label>
+            <div class="field">
+              <input type="text" value="D:\软件\MAA\MAA-v6.11.1-win-x64\MAA.exe">
+              <button class="btn btn-outline btn-sm">浏览…</button>
+            </div>
+          </div>
+          <div class="form-row">
+            <label>MAA B 服</label>
+            <div class="field">
+              <input type="text" value="D:\软件\MAA（b）\MAA.exe">
+              <button class="btn btn-outline btn-sm">浏览…</button>
+            </div>
+          </div>
+          <div class="form-row">
+            <label>ADB 程序</label>
+            <div class="field">
+              <input type="text" value="D:\软件\MuMu模拟器\MuMuPlayer\nx_main\adb.exe">
+              <button class="btn btn-outline btn-sm">浏览…</button>
+            </div>
+          </div>
+          <div class="form-row">
+            <label>MuMu CLI</label>
+            <div class="field">
+              <input type="text" value="D:\软件\MuMu模拟器\MuMuPlayer\nx_main\mumu-cli.exe">
+              <button class="btn btn-outline btn-sm">浏览…</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="row">
+          <div class="card">
+            <h3>连接与超时</h3>
+            <div class="form-row">
+              <label>ADB 地址</label>
+              <div class="field"><input type="text" value="127.0.0.1:16384"></div>
+            </div>
+            <div class="form-row">
+              <label>单号超时</label>
+              <div class="field"><input type="number" value="30"><span class="hint" style="align-self:center">分钟（默认 30）</span></div>
+            </div>
+            <div class="form-row">
+              <label>启动等待</label>
+              <div class="field"><input type="number" value="120"><span class="hint" style="align-self:center">秒（模拟器启动上限）</span></div>
+            </div>
+          </div>
+          <div class="card">
+            <h3>行为开关</h3>
+            <div class="form-row">
+              <label>官服 1</label><label class="switch"><input type="checkbox" checked><span class="slider"></span></label>
+              <span class="hint">禁用后跳过该号</span>
+            </div>
+            <div class="form-row">
+              <label>官服 2</label><label class="switch"><input type="checkbox" checked><span class="slider"></span></label>
+              <span class="hint">禁用后跳过该号</span>
+            </div>
+            <div class="form-row">
+              <label>B 服</label><label class="switch"><input type="checkbox" checked><span class="slider"></span></label>
+              <span class="hint">禁用后跳过该号</span>
+            </div>
+            <div class="form-row">
+              <label>完成后关模拟器</label><label class="switch"><input type="checkbox" checked><span class="slider"></span></label>
+            </div>
+            <div class="form-row">
+              <label>早班成功后关机</label><label class="switch"><input type="checkbox" checked><span class="slider"></span></label>
+              <span class="hint">60 秒倒计时</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="card" style="display:flex; gap:10px; align-items:center">
+          <button class="btn btn-primary">保存配置</button>
+          <button class="btn btn-outline">恢复默认</button>
+          <div class="topbar-spacer"></div>
+          <span class="hint">保存后计划任务自动更新，无需重启</span>
+        </div>
+      </section>
+
+      <!-- ============ 日志 ============ -->
+      <section id="page-logs" class="page" hidden>
+        <div class="log-toolbar">
+          <button class="btn btn-outline btn-sm">刷新</button>
+          <button class="btn btn-outline btn-sm">打开日志文件</button>
+          <button class="btn btn-danger btn-sm">清空</button>
+          <div class="spacer"></div>
+          <label><label class="switch"><input type="checkbox" checked><span class="slider"></span></label>自动滚动</label>
+        </div>
+        <div class="log-view">
+<span class="t">2026-08-26 16:10:00</span> - ========================================<br>
+<span class="t">2026-08-26 16:10:00</span> - <span class="head">MAA Auto Farm - 3 Accounts</span><br>
+<span class="t">2026-08-26 16:10:00</span> - ========================================<br>
+<span class="t">2026-08-26 16:10:00</span> - Cleaned up old debug screenshots<br>
+<span class="t">2026-08-26 16:10:00</span> - === Starting MuMu ===<br>
+<span class="t">2026-08-26 16:10:05</span> - <span class="ok">MuMu OK</span><br>
+<span class="t">2026-08-26 16:10:05</span> - <br>
+<span class="t">2026-08-26 16:10:05</span> - ********** [1/3] Official 1 **********<br>
+<span class="t">2026-08-26 16:10:23</span> - === Run MAA [Official] ===<br>
+<span class="t">2026-08-26 16:10:28</span> - Launching MAA...<br>
+<span class="t">2026-08-26 16:10:28</span> - Waiting for MAA tasks...<br>
+<span class="t">2026-08-26 16:22:52</span> - <span class="ok">MAA finished! 12.4 min</span><br>
+<span class="t">2026-08-26 16:22:55</span> - <span class="ok">MAA [Official] completed successfully</span><br>
+<span class="t">2026-08-26 16:22:55</span> - <br>
+<span class="t">2026-08-26 16:22:55</span> - ********** [2/3] Official 2 **********<br>
+<span class="t">2026-08-26 16:22:55</span> - Running: slot_switch.ps1 -Server official -Slot official_2<br>
+<span class="t">2026-08-26 16:23:30</span> -   [Switch script finished in 35.2s]<br>
+<span class="t">2026-08-26 16:23:33</span> - === Run MAA [Official] ===<br>
+<span class="t">2026-08-26 16:35:21</span> - <span class="ok">MAA finished! 11.8 min</span><br>
+<span class="t">2026-08-26 16:35:24</span> - <span class="ok">MAA [Official] completed successfully</span><br>
+<span class="t">2026-08-26 16:35:24</span> - <br>
+<span class="t">2026-08-26 16:35:24</span> - ********** [3/3] Bilibili **********<br>
+<span class="t">2026-08-26 16:35:24</span> - Running: switch_to_B服.ps1<br>
+<span class="t">2026-08-26 16:36:10</span> -   [Switch script finished in 46.3s]<br>
+<span class="t">2026-08-26 16:36:13</span> - === Run MAA [Bilibili] ===<br>
+<span class="t">2026-08-26 16:36:18</span> - Launching MAA...<br>
+<span class="t">2026-08-26 16:36:18</span> - Waiting for MAA tasks...<br>
+<span class="t">2026-08-26 17:06:18</span> - <span class="err">ERROR: MAA timeout</span><br>
+<span class="t">2026-08-26 17:06:18</span> - <span class="err">ERROR: MAA [Bilibili] FAILED or timed out</span><br>
+<span class="t">2026-08-26 17:06:18</span> - === Closing emulator ===<br>
+<span class="t">2026-08-26 17:06:28</span> - Emulator closed<br>
+<span class="t">2026-08-26 17:06:28</span> - <span class="head">SUMMARY</span><br>
+<span class="t">2026-08-26 17:06:28</span> -   [OK] Official 1 - 12.4 min<br>
+<span class="t">2026-08-26 17:06:28</span> -   [OK] Official 2 - 11.8 min<br>
+<span class="t">2026-08-26 17:06:28</span> -   [FAIL] Bilibili - 30 min<br>
+<span class="t">2026-08-26 17:06:28</span> - Total: 38.2 min | Passed: 2 | Failed: 1<br>
+<span class="t">2026-08-26 17:06:28</span> - <span class="err">WARNING: 1 account(s) FAILED!</span>
+        </div>
+      </section>
+
+      <div class="footnote">界面草图预览（HTML 模拟）— 正式版将用 PySide6 + PyQt-Fluent-Widgets 实现同等效果</div>
+    </div>
+  </div>
+</div>
+
+<script>
+  document.querySelectorAll('.nav-item').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      document.querySelectorAll('.nav-item').forEach(function (b) { b.classList.remove('active'); });
+      btn.classList.add('active');
+      var page = btn.getAttribute('data-page');
+      document.querySelectorAll('.page').forEach(function (p) { p.hidden = true; });
+      document.getElementById('page-' + page).hidden = false;
+      document.querySelector('.topbar h1').textContent = btn.textContent.trim();
+    });
+  });
+</script>
+</body>
+</html>

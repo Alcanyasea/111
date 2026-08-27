@@ -1,0 +1,22 @@
+﻿# Python virtual environment
+gui/.venv/
+
+# Local Claude workspace data
+.claude/
+
+# Local configuration (contains credentials)
+config.json
+config.json.bak
+
+# Game account data (contains login tokens/UIDs)
+scripts/accounts/
+scripts/_t*.*
+
+# Runtime logs and debug output
+scripts/debug/
+scripts/master_log.txt
+scripts/maa_done.signal
+
+# Python caches
+__pycache__/
+*.pyc
