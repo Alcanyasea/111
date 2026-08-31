@@ -11,7 +11,7 @@ from qfluentwidgets import (BodyLabel, InfoBar, InfoBarPosition, LineEdit,
 
 import config as appconfig
 import theme
-from core import cleanup, runner, scheduler
+from core import cleanup, maa_setup, runner, scheduler
 from widgets import Card
 
 PATH_KEYS = (
@@ -86,6 +86,30 @@ class SettingsPage(ScrollArea):
         self.behavior_card.vbox.addWidget(acc_hint)
         row.addWidget(self.behavior_card, 1)
         root.addLayout(row)
+
+        # ---- MAA 服务器配置 ----
+        self.maa_setup_card = Card("MAA 服务器配置")
+        hint = BodyLabel(
+            "一键修正对应服务器 MAA 的关键配置（客户端类型 / ADB / 直接运行 / "
+            "结束脚本 / 常用任务），目录缺失时自动从另一服复制一份。")
+        hint.setWordWrap(True)
+        hint.setStyleSheet("color: %s; font-size: 12px;" % theme.TEXT_3)
+        self.maa_setup_card.vbox.addWidget(hint)
+        self.maa_setup_card.vbox.addSpacing(10)
+        setup_row = QHBoxLayout()
+        setup_row.setSpacing(10)
+        self.maa_official_btn = PushButton("配置官服 MAA")
+        self.maa_official_btn.setToolTip("修正官服 MAA：客户端类型 Official、ADB、直接运行、结束脚本、常用任务")
+        self.maa_official_btn.clicked.connect(lambda: self._on_maa_setup("official"))
+        self.maa_bili_btn = PushButton("配置B服 MAA")
+        self.maa_bili_btn.setToolTip("修正B服 MAA：客户端类型 Bilibili、ADB、直接运行、结束脚本、常用任务")
+        self.maa_bili_btn.clicked.connect(lambda: self._on_maa_setup("bilibili"))
+        setup_row.addWidget(self.maa_official_btn)
+        setup_row.addWidget(self.maa_bili_btn)
+        setup_row.addStretch(1)
+        self.maa_setup_card.vbox.addLayout(setup_row)
+        self.maa_setup_card.vbox.addSpacing(10)
+        root.addWidget(self.maa_setup_card)
 
         # ---- 数据清理 ----
         self.clean_card = Card("数据清理")
@@ -235,6 +259,32 @@ class SettingsPage(ScrollArea):
                             % (cleanup.format_size(freed), ok_count),
                             parent=self.window(), position=InfoBarPosition.TOP_RIGHT,
                             duration=4000)
+
+    def _on_maa_setup(self, server):
+        name = "官服" if server == "official" else "B服"
+        client = "Official" if server == "official" else "Bilibili"
+        box = MessageBox(
+            "配置%s MAA" % name,
+            "将检查并修正 %s MAA 的关键配置：\n\n"
+            "· 客户端类型（%s）\n· ADB 路径与地址\n"
+            "· RunDirectly（直接运行）\n· 结束脚本 signal_done.bat\n"
+            "· 启用常用任务\n\n"
+            "若该服 MAA 目录不存在，会自动从另一服复制一份再修正。\n"
+            "修改前会先备份原配置文件。确定继续吗？" % (name, client),
+            self.window())
+        box.yesButton.setText("开始配置")
+        box.cancelButton.setText("取消")
+        if not box.exec():
+            return
+        ok, msg = maa_setup.apply_server_config(self.cfg, server)
+        if ok:
+            InfoBar.success("%s MAA 配置完成" % name, msg,
+                            parent=self.window(),
+                            position=InfoBarPosition.TOP_RIGHT, duration=6000)
+        else:
+            InfoBar.error("%s MAA 配置失败" % name, msg,
+                          parent=self.window(),
+                          position=InfoBarPosition.TOP_RIGHT, duration=8000)
 
     def _browse(self, key):
         path, _ = QFileDialog.getOpenFileName(
