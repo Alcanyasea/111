@@ -277,6 +277,25 @@ function Clear-UnnecessaryData {
     Log "Cleaned up old debug data"
 }
 
+function Clear-CacheData {
+    # Python 字节码缓存（__pycache__）与生成的基建计划文件：
+    # 都是运行前自动重建的临时产物，默认每次运行顺手清掉，避免本地残留。
+    # 只清项目代码目录，不碰 .venv（虚拟环境属运行环境）。
+    foreach ($root in @("D:\1\gui\core", "D:\1\gui\pages", "D:\1\plugins")) {
+        if (Test-Path $root) {
+            Get-ChildItem $root -Directory -Recurse -Filter "__pycache__" -ErrorAction SilentlyContinue |
+                Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+    Remove-Item "D:\1\gui\__pycache__" -Recurse -Force -ErrorAction SilentlyContinue
+    $plansDir = "D:\1\plugins\base_schedule\plans"
+    if (Test-Path $plansDir) {
+        Get-ChildItem $plansDir -File -Filter "*.json" -ErrorAction SilentlyContinue |
+            Remove-Item -Force -ErrorAction SilentlyContinue
+    }
+    Log "Cleaned Python caches and generated base schedule plans"
+}
+
 # config.accounts 非数组或为空 → 拒绝运行（防跑错号；旧 3 账号点击流程已废弃）
 if (-not $accountList -or $accountList.Count -eq 0) {
     Log "FATAL: config.accounts 缺失或不是数组格式，无法运行"
@@ -296,6 +315,9 @@ Log "========================================"
 $runHour = [int](Get-Date).Hour
 $isFourOClockRun = ($runHour -ge 4 -and $runHour -lt 16)
 $bsBatch = if ($isFourOClockRun) { "4点" } else { "16点" }
+
+# 每次运行前清理本地缓存/生成文件（默认自动，无需配置）
+Clear-CacheData
 
 # Clean up debug screenshots from previous run (prevent disk bloat)
 # 16:00 下午班（Hour >= 12）→ 完整清理；凌晨班保持只清截图

@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""数据清理：清除挂机过程产生的临时 / 调试数据。
+r"""数据清理：清除挂机过程产生的临时 / 调试数据。
 
 分类（kind）：
   debug     scripts/debug/ 下的登录校验截屏与捕获日志（login_check_*.png、capture_*.log）
@@ -7,20 +7,27 @@
   leftover  测试遗留文件（scripts/_t1.xml / _t2.xml / _t3.bin，登录缓存 dump，含 token）
   backup    旧配置备份（D:/1/config.json.bak）
   log       master_log.txt 超限截断（默认 >1MB 保留末尾 512KB，日志页只读尾部不受影响）
+  cache     项目内 Python 字节码缓存（__pycache__）与生成的基建计划文件
+            （plugins/base_schedule/plans/*.json，运行前会自动重建）
 
 安全规则：
   - 挂机运行中（runner.is_running()）必须拒绝清理，防止删掉活动的锁文件 / 正在追加的日志
   - 绝不触碰 scripts\accounts\（登录数据目录，清理会跑错号）
 """
+import os
+import shutil
 from datetime import datetime
 from pathlib import Path
 
 from core import runner
 
 SCRIPT_DIR = Path(r"D:\1\scripts")
+PROJECT_ROOT = SCRIPT_DIR.parent
 DEBUG_DIR = SCRIPT_DIR / "debug"
 LOG_FILE = SCRIPT_DIR / "master_log.txt"
 LOCK_FILE = SCRIPT_DIR / "master.lock"
+CACHE_ROOTS = (PROJECT_ROOT / "gui", PROJECT_ROOT / "plugins")
+PLANS_DIR = PROJECT_ROOT / "plugins" / "base_schedule" / "plans"
 
 # 日志截断阈值：超过 max_size 时保留末尾 keep_size 字节
 LOG_MAX_SIZE = 1_000_000
@@ -39,6 +46,7 @@ KIND_NAMES = {
     "leftover": "测试遗留数据（含登录缓存）",
     "backup": "旧配置备份",
     "log": "master_log.txt 截断",
+    "cache": "Python 缓存 / 生成的基建计划",
 }
 
 
@@ -113,6 +121,30 @@ def scan(cfg=None):
     if size > LOG_MAX_SIZE:
         items.append({"path": str(log_file), "kind": "log", "size": size - LOG_KEEP_SIZE})
 
+    # Python 字节码缓存（跳过 .venv，虚拟环境属运行环境不清理）
+    for root in CACHE_ROOTS:
+        if not root.is_dir():
+            continue
+        for dirpath, dirnames, _ in os.walk(root):
+            if dirpath == str(root) + os.sep + ".venv":
+                dirnames[:] = []
+                continue
+            if Path(dirpath).name == "__pycache__":
+                try:
+                    size = sum(p.stat().st_size for p in Path(dirpath).rglob("*")
+                               if p.is_file())
+                except OSError:
+                    size = 0
+                items.append({"path": dirpath, "kind": "cache", "size": size})
+                dirnames[:] = []
+
+    # 生成的基建计划文件（每次运行前会自动重新生成）
+    if PLANS_DIR.is_dir():
+        for f in sorted(PLANS_DIR.glob("*.json")):
+            it = _item(f, "cache")
+            if it:
+                items.append(it)
+
     return items
 
 
@@ -150,18 +182,28 @@ def perform(items):
     ok = 0
     fail = 0
     for it in items:
-        if it["kind"] == "log":
+        kind = it["kind"]
+        path = Path(it["path"])
+        n = 0
+        if kind == "log":
             n = _trim_log(it["path"])
-        else:
-            n = it["size"]
-            try:
-                Path(it["path"]).unlink()
-            except OSError:
-                n = 0
+            if n > 0:
+                freed += n
+                ok += 1
+            continue
+        try:
+            if kind == "cache" and path.is_dir():
+                n = it["size"]
+                shutil.rmtree(path)
+            else:
+                n = path.stat().st_size
+                path.unlink()
+        except OSError:
+            n = 0
         if n > 0:
             freed += n
             ok += 1
-        elif it["kind"] != "log":
+        else:
             fail += 1
     return freed, ok, fail
 
