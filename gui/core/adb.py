@@ -6,6 +6,8 @@
 import subprocess
 import time
 
+from core import proc
+
 CREATE_NO_WINDOW = 0x08000000
 
 
@@ -63,14 +65,12 @@ def tap(cfg, x, y):
 
 def maa_running():
     """MAA 进程是否在运行。"""
-    code, out, _ = _run(["tasklist", "/FI", "IMAGENAME eq MAA.exe"])
-    return code == 0 and "MAA.exe" in out.decode(errors="ignore")
+    return proc.process_running("MAA.exe")
 
 
 def emulator_running():
     """MuMu 主界面进程是否在运行。"""
-    code, out, _ = _run(["tasklist", "/FI", "IMAGENAME eq MuMuNxMain.exe"])
-    return code == 0 and "MuMuNxMain.exe" in out.decode(errors="ignore")
+    return proc.process_running("MuMuNxMain.exe")
 
 
 def launch_emulator(cfg):

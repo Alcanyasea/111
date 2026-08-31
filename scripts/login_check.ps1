@@ -6,6 +6,9 @@
 #   B服/无凭据/验证码：失败退出，master.ps1 将该号标记失败（防 MAA 对着登录界面空跑）
 # 用法：login_check.ps1 -Server official -Slot official_1 [-ScreenTimeoutSec 120] [-LoginTimeoutSec 180]
 # 退出码：0 已登录（或自动登录成功）；1 失败
+# 槽位自刷新：确认已登录后把设备上的最新登录数据拉回槽位（游戏处理完首次启动弹窗
+# 会写入 KEY_GLOBAL_VOICE_LANG / KEY_VOICE_LANG_PREF_DONTCG 等标记），否则下次切号
+# 推送旧槽位数据时，配音选择/首次启动弹窗会每次都重新弹出，卡住 MAA。
 # ============================================================
 param(
     [string]$Server = "official",
@@ -70,7 +73,14 @@ $loginMarkers = @("账号登录", "密码登录", "本机号码登录", "验证�
 $captchaMarkers = @("安全验证", "依次点击", "滑动验证", "拼图")
 # 主界面特征词（游戏内 UI，登录/标题/弹窗界面不会出现）：出现即已登录
 # 实测 B服 启动后不进标题画面直接进主界面，必须有不依赖标题的「已登录」判定
-$inGameMarkers = @("公开招募", "干员寻访", "理智", "终端", "采购中心")
+# 「寻访一次/寻访十次」为干员寻访页独有按钮：B服 启动公告弹窗盖住主界面时，
+# 盲点中央会点进寻访页（2026-08-28 实测卡死 240s 超时），此页无主界面特征词
+$inGameMarkers = @("公开招募", "干员寻访", "理智", "终端", "采购中心", "寻访一次", "寻访十次")
+# 启动公告弹窗页签（弹窗盖住主界面）：右上角 X 是纯图标、OCR 无文本，坐标实测固定
+# （2026-08-28 实测：点 (1215,75) 弹窗即关，主界面特征词立即出现）
+$announceMarkers = @("活动公告", "系统公告", "资讯速报")
+$announceCloseX = 1215
+$announceCloseY = 75
 
 function Invoke-Tap($x, $y) {
     & $adb -s $device shell "input tap $x $y" 2>$null | Out-Null
@@ -112,6 +122,54 @@ function Get-DeviceUid($ppName) {
     return $uid
 }
 
+function Update-SlotData([bool]$ExpectVoiceKeys) {
+    # 已确认登录后，把设备上最新的登录数据拉回槽位（镜像设备相对路径）：
+    # - 首次启动配音弹窗处理完，游戏会写入 KEY_GLOBAL_VOICE_LANG / KEY_VOICE_LANG_PREF_DONTCG；
+    # - 公告弹窗关掉后会写入按 uid 缓存的 key_home_annouce* 版本号。
+    # 不拉回的话，下次切号会用旧槽位数据覆盖设备，弹窗每次重新出现。
+    # 写入前校验设备 uid 与槽位 uid 一致（防跑错号）。
+    if (-not $slotDir) { return $false }
+    $pp = Get-PlayerPrefsName
+    if (-not $pp) { LogLine "WARN: 无法获取 playerprefs 文件名，跳过槽位刷新"; return $false }
+    $devUid = ""
+    for ($i = 0; $i -lt 6; $i++) {
+        $devUid = Get-DeviceUid $pp
+        if ($devUid) { break }
+        Start-Sleep 5
+    }
+    if (-not $devUid) { LogLine "WARN: 未读取到设备 uid，跳过槽位刷新"; return $false }
+    $uidFile = Join-Path $slotDir "uid.txt"
+    $expectUid = ""
+    if (Test-Path $uidFile) { $expectUid = (Get-Content $uidFile -Raw -ErrorAction SilentlyContinue).Trim() }
+    if ($expectUid -and ($devUid -ne $expectUid)) {
+        LogLine ("WARN: 设备 uid（{0}）与槽位 uid（{1}）不一致，拒绝刷新槽位" -f $devUid, $expectUid)
+        return $false
+    }
+    # 弹窗刚点掉时游戏写入语音标记可能有延迟：最多等 ~25 秒（标记出现即拉取）
+    $deadlineV = (Get-Date).AddSeconds(25)
+    while ($ExpectVoiceKeys -and ((Get-Date) -lt $deadlineV)) {
+        $tmpPp = Join-Path $env:TEMP "ark_refresh_pp.xml"
+        & $adb -s $device pull ("/data/data/{0}/shared_prefs/{1}" -f $pkg, $pp) $tmpPp 2>$null | Out-Null
+        if (Test-Path $tmpPp) {
+            $ppc = [System.IO.File]::ReadAllText($tmpPp, [System.Text.Encoding]::UTF8)
+            Remove-Item $tmpPp -Force -ErrorAction SilentlyContinue
+            if ($ppc -match 'KEY_VOICE_LANG_PREF_DONTCG') { break }
+        }
+        Start-Sleep 5
+    }
+    $dstShared = Join-Path $slotDir "shared_prefs"
+    $dstFiles = Join-Path $slotDir "files\zx"
+    New-Item -ItemType Directory -Force $dstShared, $dstFiles | Out-Null
+    & $adb -s $device pull ("/data/data/{0}/shared_prefs/{1}" -f $pkg, $pp) (Join-Path $dstShared $pp) 2>$null | Out-Null
+    & $adb -s $device pull "/data/data/$pkg/shared_prefs/HypergryphSdkPreferences.xml" (Join-Path $dstShared "HypergryphSdkPreferences.xml") 2>$null | Out-Null
+    # lc.cache 是可选缓存：登录后游戏可能还没写它（首次启动实测 zx 目录下无此文件）
+    & $adb -s $device pull "/data/data/$pkg/files/zx/lc.cache" (Join-Path $dstFiles "lc.cache") 2>$null | Out-Null
+    if (-not (Test-Path (Join-Path $dstFiles "lc.cache"))) { LogLine "WARN: 设备暂无 lc.cache（登录后尚未生成，忽略）" }
+    $devUid | Out-File $uidFile -Encoding ascii -NoNewline
+    LogLine ("[slot] 槽位数据已刷新（uid={0}）" -f $devUid)
+    return $true
+}
+
 function Find-Marker($words, $markers) {
     # 返回第一个命中的 {X,Y,Name}；无命中返回 $null
     foreach ($m in $markers) {
@@ -124,9 +182,11 @@ function Find-Marker($words, $markers) {
 LogLine ("=== Login check: {0} (slot: {1}) ===" -f $serverName, $(if ($Slot) { $Slot } else { "(无槽位)" }))
 
 # ---- 阶段 1：轮询屏幕，区分「已登录」与「登录界面」----
-# 判定顺序：验证码（失败）→ 登录标记（进入阶段 2）→ 主界面特征词（已登录放行）→
-# 首次启动弹窗（配音选择/确认/同意）→ 开始唤醒（点击后继续）→
-# 见过标题后连续 4 张稳定非登录画面（已登录放行）→ 盲点兜底。
+# 判定顺序：验证码（失败）→ 登录标记（进入阶段 2）→ 启动公告弹窗（优先点右上角 X 关闭）→
+# 主界面特征词（已登录放行）→ 首次启动弹窗（配音选择/确认/同意）→
+# 开始唤醒（点击后继续）→ 见过标题后连续 4 张稳定非登录画面（已登录放行）→
+# 盲点兜底（中央、右上角公告关闭位交替）。
+# 每轮只做最多一个动作，动作后下一轮必重新截图检测，不会连续盲点。
 # 「已登录」两条路径：主界面特征词（不依赖标题，B服 无标题直接进主界面）；
 # 标题画面「开始唤醒」登录/未登录都会出现，必须点掉后才能用稳定画面判断
 # （首次启动弹窗也是纯文字画面，不能误判）。
@@ -134,9 +194,12 @@ $reachedLogin = $false
 $loginHit = $null
 $sawTitle = $false
 $voiceKept = $false
+$dialogHandled = $false
 $stableCount = 0
 $posCount = 0
 $lastActionAt = (Get-Date)
+$lastAnnounceTapAt = (Get-Date).AddSeconds(-60)
+$blindPokeCount = 0
 $deadline = (Get-Date).AddSeconds($ScreenTimeoutSec)
 while ((Get-Date) -lt $deadline) {
     if (-not (Ocr-Screenshot $adb $device $png)) { Start-Sleep 5; continue }
@@ -153,15 +216,29 @@ while ((Get-Date) -lt $deadline) {
         if ($lmExact) { $lm = [PSCustomObject]@{ X = $lmExact.X; Y = $lmExact.Y; Name = "登录" } }
     }
     if ($lm) { $reachedLogin = $true; $loginHit = $lm; break }
+    # 启动公告弹窗：优先处理（盖住主界面时特征词不可见，且要求优先关弹窗再看主界面）。
+    # 点右上角 X 关闭；限频 8 秒防连点；不刷新 $lastActionAt，若 X 点不掉仍保留盲点兜底
+    $ann = Find-Marker $words $announceMarkers
+    if ($ann) {
+        $stableCount = 0
+        if (((Get-Date) - $lastAnnounceTapAt).TotalSeconds -ge 8) {
+            Invoke-Tap $announceCloseX $announceCloseY
+            $lastAnnounceTapAt = Get-Date
+            LogLine ("[dialog] 公告弹窗（{0}），点击右上角关闭" -f $ann.Name)
+        }
+        Start-Sleep 3
+        continue
+    }
     # 主界面特征词（B服 无标题直接进主界面；官服正常路径也能提前放行）
     $ig = Find-Marker $words $inGameMarkers
     if ($ig) {
         $posCount++
         if ($posCount -ge 2) {
             LogLine ("[screen] 检测到主界面（{0}），已登录" -f $ig.Name)
+            Update-SlotData $dialogHandled | Out-Null
             exit 0
         }
-        Start-Sleep 5
+        Start-Sleep 3
         continue
     }
     $posCount = 0
@@ -170,28 +247,31 @@ while ((Get-Date) -lt $deadline) {
     if ($voiceKeep -and (-not $voiceKept)) {
         Invoke-Tap $voiceKeep.X $voiceKeep.Y
         $voiceKept = $true
+        $dialogHandled = $true
         LogLine "[dialog] 勾选「维持原有配置」"
         $lastActionAt = Get-Date
         $stableCount = 0
-        Start-Sleep 5
+        Start-Sleep 3
         continue
     }
     $confirm = Find-OcrText $words "确认"
     if ($confirm) {
         Invoke-Tap $confirm.X $confirm.Y
+        $dialogHandled = $true
         LogLine "[dialog] 点击「确认」"
         $lastActionAt = Get-Date
         $stableCount = 0
-        Start-Sleep 5
+        Start-Sleep 3
         continue
     }
     $agree = Find-OcrText $words "同意并继续"
     if ($agree) {
         Invoke-Tap $agree.X $agree.Y
+        $dialogHandled = $true
         LogLine "[dialog] 点击「同意并继续」"
         $lastActionAt = Get-Date
         $stableCount = 0
-        Start-Sleep 5
+        Start-Sleep 3
         continue
     }
     $wake = Find-OcrText $words "开始唤醒"
@@ -201,26 +281,37 @@ while ((Get-Date) -lt $deadline) {
         $sawTitle = $true
         $lastActionAt = Get-Date
         $stableCount = 0
-        Start-Sleep 6
+        Start-Sleep 4
         continue
     }
     if ((@($words).Count -gt 0) -and $sawTitle) {
         $stableCount++
         if ($stableCount -ge 4) {
             LogLine "[screen] 已过标题且画面稳定无登录界面标记，视为已登录"
+            Update-SlotData $dialogHandled | Out-Null
             exit 0
         }
-        Start-Sleep 5
+        Start-Sleep 3
         continue
     }
     $stableCount = 0
-    # 无任何可识别动作（无文字/纯过渡画面/未见标题的无动作文字画面）：45 秒一次盲点
-    if (((Get-Date) - $lastActionAt).TotalSeconds -gt 45) {
-        Invoke-Tap 640 360
-        LogLine "[screen] 无可识别动作，盲点屏幕中央兜底"
+    # 无可识别动作时的盲点兜底。节奏分档：有文字画面（剧情对白/未知页面/公告弹窗
+    # 改版）20 秒一次，无文字画面（加载/过渡）45 秒一次。首次点中央（推进标题画面/
+    # 剧情对白，历史行为不变），之后中央、右上角 X 交替：公告弹窗页签文字若改版
+    # 识别不到，X 盲点仍能关掉常见弹窗（X 位置实测固定）
+    $pokeAfterSec = if ((@($words).Count -gt 0)) { 20 } else { 45 }
+    if (((Get-Date) - $lastActionAt).TotalSeconds -gt $pokeAfterSec) {
+        if ($blindPokeCount -gt 0 -and ($blindPokeCount % 2 -eq 0)) {
+            Invoke-Tap $announceCloseX $announceCloseY
+            LogLine "[screen] 无可识别动作，盲点右上角公告关闭位兜底"
+        } else {
+            Invoke-Tap 640 360
+            LogLine "[screen] 无可识别动作，盲点屏幕中央兜底"
+        }
+        $blindPokeCount++
         $lastActionAt = Get-Date
     }
-    Start-Sleep 6
+    Start-Sleep 4
 }
 if (-not $reachedLogin) {
     LogLine ("ERROR: {0} 秒内无法确认登录状态" -f $ScreenTimeoutSec)
@@ -384,17 +475,6 @@ if ($expectUid -and ($devUid -ne $expectUid)) {
     LogLine ("ERROR: 登录成功但 uid 与槽位不一致（device={0}, slot={1}）——凭据与槽位不匹配，拒绝刷新" -f $devUid, $expectUid)
     exit 1
 }
-if ($slotDir) {
-    $dstShared = Join-Path $slotDir "shared_prefs"
-    $dstFiles = Join-Path $slotDir "files\zx"
-    New-Item -ItemType Directory -Force $dstShared, $dstFiles | Out-Null
-    & $adb -s $device pull ("/data/data/{0}/shared_prefs/{1}" -f $pkg, $ppName) (Join-Path $dstShared $ppName) 2>$null | Out-Null
-    & $adb -s $device pull "/data/data/$pkg/shared_prefs/HypergryphSdkPreferences.xml" (Join-Path $dstShared "HypergryphSdkPreferences.xml") 2>$null | Out-Null
-    # lc.cache 是可选缓存：登录后游戏可能还没写它（首次启动实测 zx 目录下无此文件）
-    & $adb -s $device pull "/data/data/$pkg/files/zx/lc.cache" (Join-Path $dstFiles "lc.cache") 2>$null | Out-Null
-    if (-not (Test-Path (Join-Path $dstFiles "lc.cache"))) { LogLine "WARN: 设备暂无 lc.cache（登录后尚未生成，忽略）" }
-    $devUid | Out-File $uidFile -Encoding ascii -NoNewline
-    LogLine ("[login] 槽位数据已刷新（uid={0}）" -f $devUid)
-}
+Update-SlotData $true | Out-Null
 LogLine "=== Login check SUCCESS ==="
 exit 0

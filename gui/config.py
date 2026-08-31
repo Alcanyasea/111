@@ -11,6 +11,41 @@ from pathlib import Path
 
 CONFIG_PATH = Path(r"D:\1\config.json")
 
+
+def default_base_schedule(layout="333"):
+    """账号级「精确基建派驻」配置默认结构（与 plugins\base_schedule 一致）。
+
+    layout: 333 = 制造3台/贸易3台/发电3台；423 = 制造4台/贸易2台/发电3台。
+    batches 两个批次各含 6 类设施：
+        control    控制中枢 5 人（列表）
+        meeting    会客室   2 人（列表）
+        manufacture 制造站  3 人/台（二维列表，台数随 layout）
+        trading    贸易站  3 人/台（二维列表，台数随 layout）
+        power      发电站  1 人/台（二维列表，固定 3 台）
+        office     办公室  1 人（列表）
+        processing 加工站  1 人（列表，可选；留空时 MAA 在自定义模式下跳过加工站）
+    """
+    m = 4 if layout == "423" else 3
+    t = 2 if layout == "423" else 3
+
+    def batch():
+        return {
+            "control": [""] * 5,
+            "meeting": [""] * 2,
+            "manufacture": [[""] * 3 for _ in range(m)],
+            "trading": [[""] * 3 for _ in range(t)],
+            "power": [[""] for _ in range(3)],
+            "office": [""],
+            "processing": [""],
+        }
+
+    return {
+        "enabled": False,
+        "layout": layout,
+        "batches": {"4点": batch(), "16点": batch()},
+    }
+
+
 DEFAULTS = {
     "paths": {
         "maa_official": r"D:\软件\MAA\MAA-v6.11.1-win-x64\MAA.exe",
@@ -31,11 +66,14 @@ DEFAULTS = {
         # 账号数组（顺序即运行顺序）。slot = scripts\accounts\<slot> 登录数据目录
         # 旧版 {official1: bool, ...} 对象形式由 _migrate_accounts() 自动迁移
         {"id": "official1", "label": "官服 1", "server": "official",
-         "enabled": True, "slot": "official_1", "username": "", "password": ""},
+         "enabled": True, "slot": "official_1", "username": "", "password": "",
+         "base_schedule": default_base_schedule()},
         {"id": "official2", "label": "官服 2", "server": "official",
-         "enabled": True, "slot": "official_2", "username": "", "password": ""},
+         "enabled": True, "slot": "official_2", "username": "", "password": "",
+         "base_schedule": default_base_schedule()},
         {"id": "bilibili", "label": "B 服", "server": "bilibili",
-         "enabled": True, "slot": "bilibili_1", "username": "", "password": ""},
+         "enabled": True, "slot": "bilibili_1", "username": "", "password": "",
+         "base_schedule": default_base_schedule()},
     ],
     "behavior": {
         "close_emulator": True,   # 完成后关模拟器
@@ -95,6 +133,7 @@ def _migrate_accounts(cfg):
             a.setdefault("slot", "")
             a.setdefault("username", "")
             a.setdefault("password", "")
+            a.setdefault("base_schedule", default_base_schedule())
 
 
 def load() -> dict:

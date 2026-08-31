@@ -1,0 +1,290 @@
+# -*- coding: utf-8 -*-
+"""精确基建派驻配置弹窗。
+
+账号列表「基建」按钮打开此窗口：可切换 333/423 布局、4点/16点两个批次，
+逐个设施/槽位填写干员名；保存后写入 config.json 并调用插件重新生成
+MAA 自定义计划 JSON（master.ps1 启动 MAA 前会自动应用）。
+"""
+import copy
+import sys
+from pathlib import Path
+
+from PySide6.QtCore import Qt
+from PySide6.QtWidgets import (QDialog, QGridLayout, QHBoxLayout,
+                               QScrollArea, QStackedWidget, QVBoxLayout,
+                               QWidget)
+
+from qfluentwidgets import (BodyLabel, ComboBox, InfoBar, InfoBarPosition,
+                            LineEdit, MessageBox, PrimaryPushButton, PushButton)
+
+import config as appconfig
+import theme
+from widgets import Card
+
+PLUGIN_DIR = Path(r"D:\1\plugins\base_schedule")
+if str(PLUGIN_DIR) not in sys.path:
+    sys.path.insert(0, str(PLUGIN_DIR))
+import base_schedule as bsplugin
+
+BATCH_LABELS = {
+    "4点": "4点批（04:00 - 15:59 生效）",
+    "16点": "16点批（16:00 - 次日 03:59 生效）",
+}
+
+
+class BaseScheduleDialog(QDialog):
+    def __init__(self, cfg, acc, parent=None):
+        super().__init__(parent)
+        self.cfg = cfg
+        self.acc = acc
+        self.bs = bsplugin.normalize(acc.get("base_schedule"))
+        self.layout = self.bs["layout"]
+        self.data = {
+            b: copy.deepcopy(self.bs["batches"][b]) for b in bsplugin.BATCHES
+        }
+        self.edit_map = {}
+        self.pages = {}
+
+        self.setWindowTitle("精确基建派驻 - %s" % acc.get("label", ""))
+        self.setModal(True)
+        self.resize(880, 720)
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(22, 18, 22, 16)
+        root.setSpacing(12)
+
+        top = QHBoxLayout()
+        top.setSpacing(10)
+        top.addWidget(BodyLabel("布局:"))
+        self.layout_combo = ComboBox()
+        self.layout_combo.addItems([
+            "333 布局（制造3台 · 贸易3台 · 发电3台）",
+            "423 布局（制造4台 · 贸易2台 · 发电3台）",
+        ])
+        self.layout_combo.currentIndexChanged.connect(self._on_layout_changed)
+        self.layout_combo.blockSignals(True)
+        self.layout_combo.setCurrentIndex(0 if self.layout == "333" else 1)
+        self.layout_combo.blockSignals(False)
+        top.addWidget(self.layout_combo)
+        top.addStretch(1)
+        top.addWidget(BodyLabel("批次:"))
+        self.batch_combo = ComboBox()
+        self.batch_combo.addItems([BATCH_LABELS[b] for b in bsplugin.BATCHES])
+        self.batch_combo.currentIndexChanged.connect(self._on_batch_changed)
+        top.addWidget(self.batch_combo)
+        root.addLayout(top)
+
+        self.hint = BodyLabel()
+        self.hint.setWordWrap(True)
+        self.hint.setStyleSheet("color: %s; font-size: 12px;" % theme.TEXT_2)
+        root.addWidget(self.hint)
+
+        self.stack = QStackedWidget()
+        for i, b in enumerate(bsplugin.BATCHES):
+            page = self._build_page(b)
+            self.stack.addWidget(page)
+            self.pages[b] = page
+        root.addWidget(self.stack, 1)
+
+        btns = QHBoxLayout()
+        btns.setSpacing(10)
+        self.cancel_btn = PushButton("取消")
+        self.save_btn = PrimaryPushButton("保存并生成计划")
+        btns.addStretch(1)
+        btns.addWidget(self.cancel_btn)
+        btns.addWidget(self.save_btn)
+        root.addLayout(btns)
+
+        self.cancel_btn.clicked.connect(self.reject)
+        self.save_btn.clicked.connect(self._on_save)
+        self._refresh_hint()
+
+    # ---------- 界面构建 ----------
+
+    def _refresh_hint(self):
+        if self.bs.get("enabled"):
+            head = "该账号已启用精确基建：运行时按下面两批计划让 MAA 精确派驻干员。"
+        else:
+            head = "该账号当前未启用：请在账号列表打开「精确基建」开关后才会生效，否则仍使用 MAA 自带基建换班。"
+        now = bsplugin.current_batch()
+        head += " 现在是 %s 批时段（%s），MAA 当前会按这一批执行。" % (
+            now, BATCH_LABELS[now])
+        self.hint.setText(
+            head + " 干员名需与游戏内名称一致（MAA 靠截图识别干员）；"
+            "某一项全部留空时 MAA 会自动按默认算法补满；"
+            "只填了部分时，剩余位置会保持空着（MAA 不会自动补位）。")
+
+    @staticmethod
+    def _make_edits(values, placeholders):
+        edits = []
+        for i, val in enumerate(values):
+            e = LineEdit()
+            e.setText(str(val))
+            if i < len(placeholders):
+                e.setPlaceholderText(placeholders[i])
+            edits.append(e)
+        return edits
+
+    def _facility_card(self, title, rows):
+        card = Card(title)
+        grid = QGridLayout()
+        grid.setContentsMargins(0, 0, 0, 0)
+        grid.setHorizontalSpacing(10)
+        grid.setVerticalSpacing(8)
+        for r, (row_label, edits) in enumerate(rows):
+            if row_label:
+                lab = BodyLabel(row_label)
+                lab.setFixedWidth(52)
+                lab.setStyleSheet("color: %s; font-size: 12px;" % theme.TEXT_2)
+                grid.addWidget(lab, r, 0, Qt.AlignmentFlag.AlignVCenter)
+                start = 1
+            else:
+                start = 0
+            for c, e in enumerate(edits):
+                grid.addWidget(e, r, start + c)
+        grid.setColumnStretch(max(1, start + 8), 1)
+        card.vbox.addLayout(grid)
+        return card
+
+    def _build_page(self, batch):
+        data = self.data[batch]
+        em = {}
+        m = 4 if self.layout == "423" else 3
+        t = 2 if self.layout == "423" else 3
+
+        control = self._make_edits(
+            data["control"], ["干员 1", "干员 2", "干员 3", "干员 4", "干员 5"])
+        meeting = self._make_edits(data["meeting"], ["干员 1", "干员 2"])
+        office = self._make_edits(data["office"], ["干员 1"])
+        processing = self._make_edits(data["processing"], ["干员 1"])
+        manufacture = [
+            self._make_edits(row, ["干员 1", "干员 2", "干员 3"])
+            for row in self._take(data["manufacture"], m, 3)
+        ]
+        trading = [
+            self._make_edits(row, ["干员 1", "干员 2", "干员 3"])
+            for row in self._take(data["trading"], t, 3)
+        ]
+        power = [self._make_edits(row, ["干员"]) for row in data["power"]]
+
+        em["control"] = [control]
+        em["meeting"] = [meeting]
+        em["office"] = [office]
+        em["processing"] = [processing]
+        em["manufacture"] = manufacture
+        em["trading"] = trading
+        em["power"] = power
+        self.edit_map[batch] = em
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        inner = QWidget()
+        v = QVBoxLayout(inner)
+        v.setContentsMargins(2, 2, 2, 2)
+        v.setSpacing(12)
+
+        v.addWidget(self._facility_card("控制中枢（5 人）", [("", control)]))
+        v.addWidget(self._facility_card("会客室（2 人）", [("", meeting)]))
+        v.addWidget(self._facility_card(
+            "制造站（3 人 / 台，共 %d 台）" % len(manufacture),
+            [("%d号站" % (i + 1), row) for i, row in enumerate(manufacture)]))
+        v.addWidget(self._facility_card(
+            "贸易站（3 人 / 台，共 %d 台）" % len(trading),
+            [("%d号站" % (i + 1), row) for i, row in enumerate(trading)]))
+        v.addWidget(self._facility_card(
+            "发电站（1 人 / 台，共 %d 台）" % len(power),
+            [("%d号站" % (i + 1), row) for i, row in enumerate(power)]))
+        v.addWidget(self._facility_card("办公室（1 人）", [("", office)]))
+        v.addWidget(self._facility_card(
+            "加工站（1 人，可留空）",
+            [("", processing)],
+        ))
+        v.addStretch(1)
+
+        scroll.setWidget(inner)
+        return scroll
+
+    # ---------- 交互 ----------
+
+    def _on_batch_changed(self, index):
+        self.stack.setCurrentIndex(index)
+
+    def _on_layout_changed(self, index):
+        self.layout = "423" if index == 1 else "333"
+        for b in bsplugin.BATCHES:
+            self._capture(b)
+        self._rebuild_pages()
+        self._refresh_hint()
+
+    def _rebuild_pages(self):
+        for i, b in enumerate(bsplugin.BATCHES):
+            old = self.pages.pop(b)
+            self.stack.removeWidget(old)
+            old.deleteLater()
+            page = self._build_page(b)
+            self.stack.insertWidget(i, page)
+            self.pages[b] = page
+        self.stack.setCurrentIndex(self.batch_combo.currentIndex())
+
+    @staticmethod
+    def _take(rows, count, inner):
+        """取前 count 行展示，不足补齐空槽位（多余数据保留在 self.data 中）。"""
+        out = []
+        for i in range(count):
+            row = rows[i] if i < len(rows) else []
+            if not isinstance(row, list):
+                row = []
+            out.append((row + [""] * inner)[:inner])
+        return out
+
+    def _capture(self, batch):
+        em = self.edit_map[batch]
+        self.data[batch]["control"] = [e.text().strip() for e in em["control"][0]]
+        self.data[batch]["meeting"] = [e.text().strip() for e in em["meeting"][0]]
+        self.data[batch]["office"] = [e.text().strip() for e in em["office"][0]]
+        self.data[batch]["processing"] = [e.text().strip() for e in em["processing"][0]]
+        self.data[batch]["power"] = [
+            [e.text().strip() for e in row] for row in em["power"]]
+        for key in ("manufacture", "trading"):
+            shown = [
+                [e.text().strip() for e in row] for row in em[key]]
+            old = self.data[batch][key]
+            surplus = old[len(shown):] if isinstance(old, list) else []
+            self.data[batch][key] = shown + list(surplus)
+
+    def _on_save(self):
+        for b in bsplugin.BATCHES:
+            self._capture(b)
+        bs = {
+            "enabled": bool(self.bs.get("enabled")),
+            "layout": self.layout,
+            "batches": self.data,
+        }
+        bs = bsplugin.normalize(bs)
+        self.acc["base_schedule"] = bs
+        appconfig.save(self.cfg)
+        try:
+            bsplugin.regenerate_for_account(self.cfg, self.acc)
+        except Exception as exc:  # noqa: BLE001 - 保存失败要给用户明确提示
+            box = MessageBox(
+                "保存失败",
+                "配置已写入，但计划文件生成失败：\n%s" % exc,
+                self.window())
+            box.yesButton.setText("知道了")
+            box.cancelButton.hide()
+            box.exec()
+            return
+        self.accept()
+
+
+def show_base_schedule_dialog(cfg, acc, parent=None):
+    """打开配置弹窗；成功后返回 True，供账号行显示提示。"""
+    dlg = BaseScheduleDialog(cfg, acc, parent=parent)
+    if dlg.exec():
+        InfoBar.success(
+            "基建计划已保存",
+            "运行该账号时将按 4点/16点 两批精确派驻干员",
+            parent=parent.window() if parent is not None else None,
+            position=InfoBarPosition.TOP_RIGHT, duration=4000)
+        return True
+    return False

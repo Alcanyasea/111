@@ -47,6 +47,8 @@ $signalFile = "D:\1\scripts\maa_done.signal"
 $logFile = "D:\1\scripts\master_log.txt"
 $scriptDir = "D:\1\scripts"
 $maaTimeout = 1800
+$venvPython = "D:\1\gui\.venv\Scripts\python.exe"
+$baseSchedulePy = "D:\1\plugins\base_schedule\base_schedule.py"
 
 # ---- 读取 GUI 配置（D:\1\config.json），字段缺失时回退上面的硬编码默认 ----
 # config.json 由「MAA 挂机控制台」GUI 生成；文件不存在时流程与旧版完全一致。
@@ -179,6 +181,47 @@ function Run-Switch($s) {
     Log ("  [Switch script finished in " + $elapsed + "s, exit=" + $code + "]")
     Start-Sleep 3
     return $code
+}
+
+function Refresh-SlotData($Server, $Slot) {
+    # MAA 跑完后把设备上最新的登录数据拉回槽位：游戏在处理首次启动弹窗/公告弹窗后
+    # 会往 playerprefs 写入「已处理」标记（配音选择、公告版本号等），且写入有延迟。
+    # 不拉回的话，下次切号会推送旧槽位数据，弹窗每次重新出现，甚至卡住 MAA。
+    # 失败仅告警，不影响主流程；写入前校验设备 uid 与槽位 uid 一致（防跑错号）。
+    if (-not $Slot) { return }
+    $slotDir = Join-Path $scriptDir ("accounts\" + $Slot)
+    if (-not (Test-Path $slotDir)) { return }
+    $pkg = if ($Server -eq "bilibili") { "com.hypergryph.arknights.bilibili" } else { "com.hypergryph.arknights" }
+    $ppName = ""
+    try {
+        $out = (& $adb -s $device shell "ls /data/data/$pkg/shared_prefs/" 2>$null) -join "`n"
+        $ppName = ($out -split "`n" | Where-Object { $_ -match '\.v2\.playerprefs\.xml' } | Select-Object -First 1) -replace '\s+',''
+    } catch {}
+    if (-not $ppName) { Log "  [WARN] Refresh slot: playerprefs not found on device"; return }
+    $tmpPp = Join-Path $env:TEMP "ark_refresh_pp.xml"
+    & $adb -s $device pull ("/data/data/{0}/shared_prefs/{1}" -f $pkg, $ppName) $tmpPp 2>$null | Out-Null
+    if (-not (Test-Path $tmpPp)) { Log "  [WARN] Refresh slot: pull failed for $Slot"; return }
+    $devUid = ""
+    try {
+        $ppc = [System.IO.File]::ReadAllText($tmpPp, [System.Text.Encoding]::UTF8)
+        $m = [regex]::Match($ppc, 'name="u8sdk_cached_uid">([0-9]+)')
+        if ($m.Success) { $devUid = $m.Groups[1].Value }
+    } catch {}
+    Remove-Item $tmpPp -Force -ErrorAction SilentlyContinue
+    $uidFile = Join-Path $slotDir "uid.txt"
+    $expectUid = ""
+    if (Test-Path $uidFile) { $expectUid = (Get-Content $uidFile -Raw -ErrorAction SilentlyContinue).Trim() }
+    if (-not $devUid -or ($expectUid -and ($devUid -ne $expectUid))) {
+        Log ("  [WARN] Refresh slot: uid mismatch (device=" + $devUid + ", slot=" + $expectUid + "), skipped")
+        return
+    }
+    $dstShared = Join-Path $slotDir "shared_prefs"
+    $dstFiles = Join-Path $slotDir "files\zx"
+    New-Item -ItemType Directory -Force $dstShared, $dstFiles | Out-Null
+    & $adb -s $device pull ("/data/data/{0}/shared_prefs/{1}" -f $pkg, $ppName) (Join-Path $dstShared $ppName) 2>$null | Out-Null
+    & $adb -s $device pull "/data/data/$pkg/shared_prefs/HypergryphSdkPreferences.xml" (Join-Path $dstShared "HypergryphSdkPreferences.xml") 2>$null | Out-Null
+    & $adb -s $device pull "/data/data/$pkg/files/zx/lc.cache" (Join-Path $dstFiles "lc.cache") 2>$null | Out-Null
+    Log "  [Refresh] slot '$Slot' data updated from device"
 }
 
 # ---- 数据清理（16:00 下午班完整清理；凌晨班只清截图，见 MAIN）----
@@ -327,10 +370,26 @@ $total = $accountList.Count
             Log "  [TEST] -SkipMAA: 跳过 MAA，仅验证切号"
             $ok = $true
         } else {
+            # ---- 精确基建派驻插件：启动 MAA 前按账号写入自定义计划（未启用则恢复 Rotation）----
+            $accId = if ($null -ne $acc.id -and [string]$acc.id) { [string]$acc.id } else { "" }
+            if ($accId -and (Test-Path $venvPython) -and (Test-Path $baseSchedulePy)) {
+                $bsOut = & $venvPython $baseSchedulePy apply --config $configPath --account $accId --server $accServer 2>&1
+                $bsCode = $LASTEXITCODE
+                foreach ($bsLine in $bsOut) {
+                    if ($bsLine -and [string]$bsLine) { Log ("  [基建插件] " + [string]$bsLine) }
+                }
+                if ($bsCode -ne 0) {
+                    Log "  [WARN] 基建插件执行失败（exit $bsCode），继续按 MAA 原配置运行"
+                }
+            } else {
+                Log "  [WARN] 基建插件不可用（venv python 或脚本缺失），继续按 MAA 原配置运行"
+            }
             $maaExe = if ($accServer -eq "bilibili") { $maaBilibili } else { $maaOfficial }
             $maaDir = if ($accServer -eq "bilibili") { $maaBilibiliDir } else { $maaOfficialDir }
             $ok = Run-MAA $maaExe $maaDir $accLabel
         }
+        # 把设备上最新的登录数据（弹窗处理标记等）拉回槽位，避免下次切号弹窗重现
+        Refresh-SlotData $accServer $accSlot
         $dur = [math]::Round($sw.Elapsed.TotalMinutes, 1)
         $results += [PSCustomObject]@{ Account=$accLabel; OK=$ok; Duration="$dur min" }
     }

@@ -232,6 +232,7 @@ class CaptureDialog(QDialog):
             "slot": self._slot,
             "username": self.user_edit.text().strip(),
             "password": self.pass_edit.text(),
+            "base_schedule": appconfig.default_base_schedule(),
         }
         if self.acc is not None:
             self.acc.update(entry)
@@ -280,6 +281,16 @@ class AccountRow(Card):
         row.addStretch(1)
         self.uid_pill = Pill()
         row.addWidget(self.uid_pill)
+        self.base_sw = SwitchButton()
+        self.base_sw.setText("精确基建")
+        self.base_sw.setChecked(bool((acc.get("base_schedule") or {}).get("enabled", False)))
+        self.base_sw.setToolTip("启用精确基建派驻；关闭时使用 MAA 自带基建换班")
+        self.base_sw.checkedChanged.connect(self._on_base_toggle)
+        row.addWidget(self.base_sw)
+        self.base_btn = PushButton("基建")
+        self.base_btn.setToolTip("精确选择各设施进驻干员（4点/16点两批，支持333/423布局）")
+        self.base_btn.clicked.connect(self._on_base_config)
+        row.addWidget(self.base_btn)
         self.sw = SwitchButton()
         self.sw.setChecked(bool(acc.get("enabled", True)))
         self.sw.checkedChanged.connect(self._on_toggle)
@@ -306,6 +317,18 @@ class AccountRow(Card):
     def _on_toggle(self, checked):
         self.acc["enabled"] = bool(checked)
         appconfig.save(self.cfg)
+
+    def _on_base_toggle(self, checked):
+        bs = self.acc.get("base_schedule")
+        if not isinstance(bs, dict):
+            bs = appconfig.default_base_schedule()
+            self.acc["base_schedule"] = bs
+        bs["enabled"] = bool(checked)
+        appconfig.save(self.cfg)
+
+    def _on_base_config(self):
+        from pages.base_schedule_dialog import show_base_schedule_dialog
+        show_base_schedule_dialog(self.cfg, self.acc, parent=self)
 
     def _on_capture(self):
         dlg = CaptureDialog(self.cfg, self.acc, page=self.page, parent=self)

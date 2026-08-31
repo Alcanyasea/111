@@ -334,12 +334,14 @@ class ConnectionCard(Card):
         self.rd_val.setTextFormat(Qt.TextFormat.RichText)
         self.vbox.addWidget(kv_row("MAA 自动运行配置", self.rd_val))
 
-    def refresh(self, cfg):
+    def refresh(self, cfg, adb_ok):
         if adb.emulator_running():
             self.mumu_pill.set_state("ok", "已启动")
         else:
             self.mumu_pill.set_state("wait", "未启动")
-        if adb.is_connected(cfg):
+        if adb_ok is None:
+            self.adb_pill.set_state("wait", "检查中…")
+        elif adb_ok:
             self.adb_pill.set_state("ok", "可连接")
         else:
             self.adb_pill.set_state("wait", "未连接")
@@ -391,10 +393,15 @@ class DashboardPage(ScrollArea):
         self.acc_cards = []
         self.acc_sig = None
         self.tick = 0
+        self.adb_ok = None
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.refresh)
         self.timer.start(5000)
         self.refresh()
+
+    def set_adb_state(self, ok):
+        """后台线程回报的 ADB 在线状态。"""
+        self.adb_ok = ok
 
     def _acc_sig(self):
         return tuple((a.get("id"), a.get("label"), bool(a.get("enabled")),
@@ -431,10 +438,7 @@ class DashboardPage(ScrollArea):
         for card in self.acc_cards:
             card.refresh(run, stage, enabled_map.get(card.acc["key"], True))
         self.last_card.refresh(run)
-        self.conn_card.refresh(self.cfg)
-        # 计划任务状态 30 秒查一次（每次查询要拉起一个 powershell）
-        if self.tick % 6 == 1:
-            self.schedule_card.refresh_scheduler(scheduler.query())
+        self.conn_card.refresh(self.cfg, self.adb_ok)
         # 残留锁清理（上次运行中断）
         if runner.stale_lock() is not None:
             try:

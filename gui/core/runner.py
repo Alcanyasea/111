@@ -9,6 +9,8 @@ import json
 import subprocess
 from pathlib import Path
 
+from core import proc
+
 CREATE_NO_WINDOW = 0x08000000
 
 LOCK_FILE = Path(r"D:\1\scripts\master.lock")
@@ -34,8 +36,8 @@ def lock_pid():
 
 
 def _pid_alive(pid):
-    code, out, _ = _run(["tasklist", "/FI", "PID eq %d" % pid])
-    return code == 0 and str(pid) in out.decode(errors="ignore")
+    """进程是否存活：本地 API 毫秒级判断，避免 tasklist 卡住界面。"""
+    return proc.process_alive(pid)
 
 
 def is_running():

@@ -23,3 +23,6 @@ __pycache__/
 
 # Runtime lock file
 scripts/master.lock
+
+# Generated base schedule plan files
+plugins/base_schedule/plans/

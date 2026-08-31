@@ -14,13 +14,13 @@ from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QColor, QFont, QIcon, QLinearGradient, QPainter, QPixmap
 from PySide6.QtWidgets import QApplication, QHBoxLayout, QLabel, QVBoxLayout, QWidget
 
-from qfluentwidgets import (FluentIcon, FluentWindow, InfoBar, InfoBarPosition,
-                            MessageBox, PrimaryPushButton, PushButton, Theme,
-                            setTheme)
+from qfluentwidgets import (FluentIcon, FluentWindow, InfoBar, InfoBarManager,
+                            InfoBarPosition, MessageBox, PrimaryPushButton,
+                            PushButton, Theme, setTheme)
 
 import config as appconfig
 import theme
-from core import cleanup, logparse, runner, scheduler
+from core import cleanup, logparse, poller, runner, scheduler
 from pages.accounts import AccountsPage
 from pages.dashboard import DashboardPage
 from pages.logs import LogsPage
@@ -28,6 +28,12 @@ from pages.settings import SettingsPage
 from widgets import Pill
 
 PAGE_TITLES = ["仪表盘", "账号管理", "运行设置", "日志"]
+
+# 右上角提示默认贴窗口顶边（y=24），会盖住标题栏关闭按钮，导致「点了没反应」；
+# 把提示下移到顶部控制栏下方，不再遮挡任何按钮。
+_top_right_mgr = InfoBarManager.managers.get(InfoBarPosition.TOP_RIGHT)
+if _top_right_mgr is not None:
+    _top_right_mgr.margin = 126
 
 
 class HeaderBar(QWidget):
@@ -69,13 +75,22 @@ class HeaderBar(QWidget):
         self.stop_btn.setEnabled(running)
         self.run_btn.setEnabled(not running)
 
+    def mousePressEvent(self, event):
+        """按住控制栏空白处（除按钮外）即可拖动整个窗口。"""
+        if event.button() == Qt.MouseButton.LeftButton:
+            wnd = self.window().windowHandle()
+            if wnd is not None:
+                wnd.startSystemMove()
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
 
 class MainWindow(FluentWindow):
     def __init__(self):
         super().__init__()
         self.cfg = appconfig.load()
         self._task_info = None
-        self._task_info_time = 0
 
         setTheme(Theme.LIGHT)
         self.setWindowIcon(make_icon())
@@ -102,7 +117,8 @@ class MainWindow(FluentWindow):
         # 在内容区顶部插入运行控制栏（独立白卡，与标题栏/窗口边缘留间距）。
         # 注意：标题栏是悬浮在窗口顶部的覆盖层，内容区必须留出 48px 上边距
         # 让位，否则控制栏会钻到标题栏/关闭按钮下面（qfluentwidgets 布局特性）
-        self.hBoxLayout.removeWidget(self.stackedWidget)
+        # stackedWidget 原本在 widgetLayout 里，先摘出来再包进新容器。
+        self.widgetLayout.removeWidget(self.stackedWidget)
         self.header = HeaderBar()
         right = QWidget()
         v = QVBoxLayout(right)
@@ -111,27 +127,34 @@ class MainWindow(FluentWindow):
         v.addWidget(self.header)
         v.addWidget(self.stackedWidget)
         self.hBoxLayout.addWidget(right, 1)
+        # 原内容区布局已空，移除避免占位；新容器后加入会盖住标题栏，必须重新置顶
+        self.hBoxLayout.removeItem(self.widgetLayout)
+        self.titleBar.raise_()
         self.header.run_btn.clicked.connect(self.on_run)
         self.header.stop_btn.clicked.connect(self.on_stop)
         self.stackedWidget.currentChanged.connect(self._on_page_changed)
 
         # 状态轮询
-        self._tick = 0
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.refresh_status)
         self.timer.start(2000)
+        # 后台轮询：计划任务 / ADB 检查不走界面线程，避免点击卡顿
+        self.poller = poller.SchedulerPoller(self)
+        self.poller.result.connect(self._on_task_info)
+        self.poller.result.connect(self.dash.schedule_card.refresh_scheduler)
+        self.adb_poller = poller.AdbPoller(self.cfg, self)
+        self.adb_poller.result.connect(self.dash.set_adb_state)
+        self.poller.start()
+        self.adb_poller.start()
         self.refresh_status()
 
     def _on_page_changed(self, index):
         if 0 <= index < len(PAGE_TITLES):
             self.header.title.setText(PAGE_TITLES[index])
 
-    def _query_task_info(self):
-        """计划任务信息缓存 30 秒。"""
-        self._tick += 1
-        if self._task_info is None or self._tick - self._task_info_time >= 15:
-            self._task_info = scheduler.query()
-            self._task_info_time = self._tick
+    def _on_task_info(self, info):
+        """后台线程返回的计划任务信息。"""
+        self._task_info = info
 
     def _maybe_auto_clean(self):
         """自动清理到期检查（每 2 秒轮询中顺带执行，判断本身是纯字符串比较）。
@@ -169,10 +192,18 @@ class MainWindow(FluentWindow):
             else:
                 detail = "启动中，日志页查看实时进度"
         else:
-            self._query_task_info()
-            detail = "系统空闲 · 下次 %s" % scheduler.next_run_text(
-                self._task_info or {})
+            if self._task_info is None:
+                detail = "系统空闲 · 正在查询计划任务…"
+            else:
+                detail = "系统空闲 · 下次 %s" % scheduler.next_run_text(self._task_info)
         self.header.update_state(running, detail)
+
+    def closeEvent(self, event):
+        """关窗前停掉后台轮询线程，避免 QThread 泄漏告警。"""
+        for p in (self.poller, self.adb_poller):
+            p.stop()
+            p.wait(3000)
+        event.accept()
 
     def on_run(self):
         if runner.is_running():
