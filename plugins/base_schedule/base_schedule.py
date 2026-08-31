@@ -198,14 +198,17 @@ def _atomic_json_write(path, data):
     os.replace(tmp, path)
 
 
-def apply_maa_config(maa_dir, plan_path, log=print):
+def apply_maa_config(maa_dir, plan_path, plan_index=None, log=print):
     """把某套 MAA 当前配置的基建任务切到 Custom(plan) 或恢复 Rotation。
 
     修改 gui.new.json 的 InfrastTask（Mode/Filename/PlanSelect）与
     gui.json 的 Infrast.InfrastMode。返回改动的文件名列表。
+    plan_index：自定义模式下固定使用第几个计划（0=4点批，1=16点批）；
+    None 表示按时间自动（PlanSelect=-1）。
     """
     mode = "Custom" if plan_path else "Rotation"
     filename = str(plan_path) if plan_path else ""
+    plan_select = -1 if plan_index is None else int(plan_index)
     changed = []
 
     gui_new = Path(maa_dir) / "config" / "gui.new.json"
@@ -219,7 +222,7 @@ def apply_maa_config(maa_dir, plan_path, log=print):
                 if isinstance(task, dict) and task.get("$type") == "InfrastTask":
                     task["Mode"] = mode
                     task["Filename"] = filename
-                    task["PlanSelect"] = -1
+                    task["PlanSelect"] = plan_select
                     found = True
                     break
         if found:
@@ -280,11 +283,17 @@ def cmd_apply(args):
     enabled = bool(bs.get("enabled")) and not args.disable
     label = acc.get("label") or args.account
 
+    batch = args.batch
+    if batch in (None, "auto"):
+        batch = current_batch()
+
     plan_path = None
+    plan_index = None
     if enabled:
         plan_path = regenerate_for_account(cfg, acc)
-        _log_file(cfg, "账号「%s」启用精确基建，计划已生成：%s"
-                  % (label, plan_path.name))
+        plan_index = 0 if batch == "4点" else 1
+        _log_file(cfg, "账号「%s」启用精确基建（%s批），计划已生成：%s"
+                  % (label, batch, plan_path.name))
 
     maa_key = "maa_bilibili_dir" if server == "bilibili" else "maa_official_dir"
     maa_dir = (cfg.get("paths") or {}).get(maa_key)
@@ -295,11 +304,12 @@ def cmd_apply(args):
         return 0
 
     changed = apply_maa_config(
-        maa_dir, plan_path, log=lambda m: _log_file(cfg, m))
+        maa_dir, plan_path, plan_index=plan_index,
+        log=lambda m: _log_file(cfg, m))
     if enabled:
-        _log_file(cfg, "已切换 MAA 基建为自定义计划 %s（%s）"
-                  % (plan_path.name, ", ".join(changed) or "无改动"))
-        print("OK custom " + plan_path.name)
+        _log_file(cfg, "已切换 MAA 基建为自定义计划 %s（%s批，%s）"
+                  % (plan_path.name, batch, ", ".join(changed) or "无改动"))
+        print("OK custom %s plan=%d" % (plan_path.name, plan_index))
     else:
         _log_file(cfg, "已恢复 MAA 自带基建换班（Rotation，%s）"
                   % (", ".join(changed) or "无改动"))
@@ -326,6 +336,8 @@ def main(argv=None):
     a.add_argument("--config", default=str(DEFAULT_CONFIG))
     a.add_argument("--account", required=True)
     a.add_argument("--server", choices=["official", "bilibili"], default=None)
+    a.add_argument("--batch", choices=["4点", "16点", "auto"], default="auto",
+                   help="本次运行使用哪个批次（默认按当前时间自动判断）")
     a.add_argument("--disable", action="store_true",
                    help="即使账号已启用也恢复 Rotation（备用）")
     a.set_defaults(func=cmd_apply)

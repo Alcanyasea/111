@@ -106,9 +106,8 @@ class BaseScheduleDialog(QDialog):
             head = "该账号已启用精确基建：运行时按下面两批计划让 MAA 精确派驻干员。"
         else:
             head = "该账号当前未启用：请在账号列表打开「精确基建」开关后才会生效，否则仍使用 MAA 自带基建换班。"
-        now = bsplugin.current_batch()
-        head += " 现在是 %s 批时段（%s），MAA 当前会按这一批执行。" % (
-            now, BATCH_LABELS[now])
+        head += " 批次按本次运行时间绑定：4点班（04:00–16:00 启动）用 4点批，"
+        "16点班（16:00–次日 04:00 启动）用 16点批。"
         self.hint.setText(
             head + " 干员名需与游戏内名称一致（MAA 靠截图识别干员）；"
             "某一项全部留空时 MAA 会自动按默认算法补满；"

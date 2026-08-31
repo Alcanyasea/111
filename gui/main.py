@@ -105,6 +105,9 @@ class MainWindow(FluentWindow):
         self.accounts_p = AccountsPage(self.cfg)
         self.settings_p = SettingsPage(self.cfg)
         self.logs_p = LogsPage(self.cfg)
+        # 仪表盘班次卡片与运行设置页互相同步「关机」开关
+        self.dash.schedule_card.settings_page = self.settings_p
+        self.settings_p.dash_schedule = self.dash.schedule_card
         self.dash.setObjectName("dashboard")
         self.accounts_p.setObjectName("accounts")
         self.settings_p.setObjectName("settings")

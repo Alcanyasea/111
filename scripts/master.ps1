@@ -85,8 +85,12 @@ if ($config) {
     if ($null -ne $config.behavior -and $null -ne $config.behavior.morning_shutdown) {
         $morningShutdown = [bool]$config.behavior.morning_shutdown
     }
+    $eveningShutdown = $false
+    if ($null -ne $config.behavior -and $null -ne $config.behavior.evening_shutdown) {
+        $eveningShutdown = [bool]$config.behavior.evening_shutdown
+    }
 } else {
-    $closeEmulator = $true; $morningShutdown = $true
+    $closeEmulator = $true; $morningShutdown = $true; $eveningShutdown = $false
 }
 
 # ---- 账号列表：config.accounts 必须为数组（由控制台「账号管理」页维护）----
@@ -287,6 +291,12 @@ Log "========================================"
 Log "MAA Auto Farm"
 Log "========================================"
 
+# 本次运行属于哪一班：4点班（04:00-16:00 之间启动）还是 16点班（16:00-次日04:00 启动）。
+# 基建换班批次与关机选项都按这一班绑定，避免 MAA 实际执行基建时跨过整点导致选错批次。
+$runHour = [int](Get-Date).Hour
+$isFourOClockRun = ($runHour -ge 4 -and $runHour -lt 16)
+$bsBatch = if ($isFourOClockRun) { "4点" } else { "16点" }
+
 # Clean up debug screenshots from previous run (prevent disk bloat)
 # 16:00 下午班（Hour >= 12）→ 完整清理；凌晨班保持只清截图
 if ((Get-Date).Hour -ge 12) {
@@ -373,7 +383,7 @@ $total = $accountList.Count
             # ---- 精确基建派驻插件：启动 MAA 前按账号写入自定义计划（未启用则恢复 Rotation）----
             $accId = if ($null -ne $acc.id -and [string]$acc.id) { [string]$acc.id } else { "" }
             if ($accId -and (Test-Path $venvPython) -and (Test-Path $baseSchedulePy)) {
-                $bsOut = & $venvPython $baseSchedulePy apply --config $configPath --account $accId --server $accServer 2>&1
+                $bsOut = & $venvPython $baseSchedulePy apply --config $configPath --account $accId --server $accServer --batch $bsBatch 2>&1
                 $bsCode = $LASTEXITCODE
                 foreach ($bsLine in $bsOut) {
                     if ($bsLine -and [string]$bsLine) { Log ("  [基建插件] " + [string]$bsLine) }
@@ -448,11 +458,11 @@ if ($failed -eq 0) {
     $null = $wshell.Popup($body, 0, "MAA Auto Farm - 异常", 0x30)
 }
 
-# Morning run (4:00) -> shut down PC after successful run, no confirmation needed
-# On failure the popup above keeps the PC on so the failure can be reviewed
-# Afternoon run (16:00) unaffected
-# GUI 手动运行传 -NoShutdown 跳过；config: behavior.morning_shutdown=false 也可关闭
-if (-not $NoShutdown -and $morningShutdown -and (Get-Date).Hour -lt 12 -and $failed -eq 0) {
-    Log "Morning run finished - shutting down PC in 60s"
+# 4点班 / 16点班是否关机均可配置（behavior.morning_shutdown / evening_shutdown）；
+# 失败时保留弹窗便于查看，不关机；GUI 手动运行传 -NoShutdown 跳过
+$shutdownEnabled = if ($isFourOClockRun) { $morningShutdown } else { $eveningShutdown }
+if (-not $NoShutdown -and $shutdownEnabled -and $failed -eq 0) {
+    if ($isFourOClockRun) { Log "4点班成功 - 60秒后自动关机" }
+    else                  { Log "16点班成功 - 60秒后自动关机" }
     shutdown /s /t 60
 }

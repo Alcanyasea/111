@@ -168,20 +168,26 @@ class ScheduleCard(Card):
             edit.setFixedWidth(84)
             edit.setClearButtonEnabled(False)
             sw = SwitchButton()
+            sw.setText("启用")
+            shutdown_sw = SwitchButton()
+            shutdown_sw.setText("关机")
             hint = _label("", size="12px", color=theme.TEXT_3)
             row = QHBoxLayout()
             row.setSpacing(10)
             row.addWidget(lab)
             row.addWidget(edit)
             row.addWidget(sw)
+            row.addWidget(shutdown_sw)
             row.addWidget(hint)
             row.addStretch(1)
             self.vbox.addLayout(row)
             self.vbox.addSpacing(10)
-            return edit, sw, hint
+            return edit, sw, shutdown_sw, hint
 
-        self.morning_edit, self.morning_sw, self.morning_hint = make_row("早班")
-        self.evening_edit, self.evening_sw, self.evening_hint = make_row("晚班")
+        (self.morning_edit, self.morning_sw,
+         self.morning_shutdown_sw, self.morning_hint) = make_row("早班")
+        (self.evening_edit, self.evening_sw,
+         self.evening_shutdown_sw, self.evening_hint) = make_row("晚班")
         self.vbox.addSpacing(2)
 
         self.next_val = _label("—")
@@ -197,20 +203,33 @@ class ScheduleCard(Card):
         self.evening_edit.editingFinished.connect(lambda: self._on_time("evening"))
         self.morning_sw.checkedChanged.connect(self._on_switch)
         self.evening_sw.checkedChanged.connect(self._on_switch)
+        self.morning_shutdown_sw.checkedChanged.connect(
+            lambda c: self._on_shutdown("morning", c))
+        self.evening_shutdown_sw.checkedChanged.connect(
+            lambda c: self._on_shutdown("evening", c))
 
     def refresh_from_cfg(self):
         """从 cfg 回填控件（不改动文件）。"""
-        for key, edit, sw, hint, hint_text in (
-            ("morning", self.morning_edit, self.morning_sw, self.morning_hint, "完成后自动关机"),
-            ("evening", self.evening_edit, self.evening_sw, self.evening_hint, "只关模拟器，不关机"),
+        behavior = self.cfg.get("behavior") or {}
+        for key, edit, sw, shutdown_sw, hint in (
+            ("morning", self.morning_edit, self.morning_sw,
+             self.morning_shutdown_sw, self.morning_hint),
+            ("evening", self.evening_edit, self.evening_sw,
+             self.evening_shutdown_sw, self.evening_hint),
         ):
             item = self.cfg["schedule"][key]
+            shutdown_key = "morning_shutdown" if key == "morning" else "evening_shutdown"
+            shutdown = bool(behavior.get(shutdown_key, False))
+            hint_text = "成功后自动关机" if shutdown else "成功后不关机"
             edit.blockSignals(True)
             edit.setText(item["time"])
             edit.blockSignals(False)
             sw.blockSignals(True)
             sw.setChecked(item["enabled"])
             sw.blockSignals(False)
+            shutdown_sw.blockSignals(True)
+            shutdown_sw.setChecked(shutdown)
+            shutdown_sw.blockSignals(False)
             hint.setText(hint_text + (" ✓" if item["enabled"] else ""))
 
     def refresh_scheduler(self, info):
@@ -257,6 +276,19 @@ class ScheduleCard(Card):
                 break
         self.refresh_from_cfg()
         self._apply()
+
+    def _on_shutdown(self, key, checked):
+        """早班/晚班「关机」开关：立即保存，并同步运行设置页的开关。"""
+        behavior = self.cfg.setdefault("behavior", {})
+        behavior["morning_shutdown" if key == "morning" else "evening_shutdown"] = bool(checked)
+        appconfig.save(self.cfg)
+        self.refresh_from_cfg()
+        sp = getattr(self, "settings_page", None)
+        if sp is not None:
+            target = sp.shutdown_sw if key == "morning" else sp.evening_shutdown_sw
+            target.blockSignals(True)
+            target.setChecked(bool(checked))
+            target.blockSignals(False)
 
 
 class LastRunCard(Card):

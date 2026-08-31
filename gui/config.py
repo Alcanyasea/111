@@ -78,6 +78,7 @@ DEFAULTS = {
     "behavior": {
         "close_emulator": True,   # 完成后关模拟器
         "morning_shutdown": True, # 早班成功后 60 秒倒计时关机
+        "evening_shutdown": False, # 晚班成功后 60 秒倒计时关机（可选）
     },
     "schedule": {
         "morning": {"time": "04:00", "enabled": True},
