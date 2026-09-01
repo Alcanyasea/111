@@ -30,10 +30,12 @@ MAA 的 PlanSelect=-1 时，GUI 会按当前时间落在哪个 period 区间自�
 模式生效，自定义模式必须写在计划 JSON 里）。
 
 宿舍：填入的干员放入对应宿舍，剩余空位由 MAA 自动补满（autofill=true，全留空
-也自动安排）。与 MAA 官方排班一致：指定了干员的房间 sort=true（保证进驻顺序、
-避免暖机技能重排），全空房间 sort=false。MAA 按宿舍 1→4 顺序处理且 autofill
-会先消耗可用干员，因此生成计划时会把指定了干员的宿舍排在前面、空宿舍排在后面，
-避免前面的空宿舍提前把后面指定宿舍要用的干员选走。
+也自动安排）。宿舍一律 sort=false：MAA 对 sort=true 的宿舍会执行「清空→按序
+重选」，该路径在宿舍里实测会重选失败（MAA issue #5829/#9219，生产设施同样逻辑
+正常但宿舍无复核兜底），导致指定干员被清掉、补位按错误计数提前结束，宿舍留空位。
+MAA 按宿舍 1→4 顺序处理且 autofill 会先消耗可用干员，因此生成计划时会把指定了
+干员的宿舍排在前面、空宿舍排在后面，避免前面的空宿舍提前把后面指定宿舍要用的
+干员选走。
 
 用法（由 master.ps1 / 控制台调用）：
     python base_schedule.py apply   --config D:\1\config.json --account official1
@@ -279,13 +281,15 @@ def _dorm(ops):
     时调用 fill_dorm_slots 补满空位）；生产设施指定干员后走自定义名单路径，
     autofill 不生效，剩余位置保持空着。
 
-    与 MAA 官方排班一致：指定了干员的房间用 sort=true（保证进驻顺序，避免暖机
-    技能重排），全空房间用 sort=false。MAA 按宿舍 1→4 顺序处理且 autofill 会
-    先消耗可用干员，所以指定干员的宿舍要排在空宿舍前面（build_plan_document
-    里已重排），否则前面的空宿舍可能提前把指定干员选走，导致宿舍补不满。
+    宿舍一律 sort=false：MAA 对 sort=true 的宿舍会先清空再按序重选
+    （swipe_and_select_custom_opers 内的 click_clear_button + order_opers_selection），
+    该路径在宿舍实测会重选失败、且宿舍没有 select_opers_review 复核兜底，导致
+    指定干员被清掉、fill_dorm_slots 按错误计数提前结束，宿舍留下空位（MAA
+    issue #5829/#9219）。sort=false 则跳过这段，指定干员保持选中后正常补位。
+    宿舍休息不涉及生产设施的暖机顺序，排序无意义。
     """
     ops = [o for o in ops if o and o.strip()]
-    return {"skip": False, "operators": ops, "sort": bool(ops), "autofill": True}
+    return {"skip": False, "operators": ops, "sort": False, "autofill": True}
 
 
 def build_plan_document(bs, entries=None, title="自定义基建",
