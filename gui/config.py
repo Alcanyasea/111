@@ -6,43 +6,81 @@ GUI 与 PowerShell 脚本（master.ps1 / slot_switch.ps1 等）共享这份配�
 """
 import json
 import os
+import re
 from copy import deepcopy
 from pathlib import Path
 
 CONFIG_PATH = Path(r"D:\1\config.json")
 
 
-def default_base_schedule(layout="333"):
+def batch_name(time):
+    """HH:MM → 班次名：04:00 → 4点，00:00 → 24点。"""
+    m = re.fullmatch(r"([01]\d|2[0-3]):[0-5]\d", str(time))
+    if not m:
+        return str(time)
+    hour = int(m.group(1))
+    return "%d点" % (24 if hour == 0 else hour)
+
+
+def schedule_batches(cfg):
+    """当前配置里的班次名（按时间升序）；缺配置时回退 4点/16点。"""
+    sched = cfg.get("schedule") if isinstance(cfg, dict) else {}
+    times = sched.get("times") if isinstance(sched.get("times"), list) else []
+    order = []
+    seen = set()
+    for it in times:
+        if not isinstance(it, dict):
+            continue
+        t = str(it.get("time", "")).strip()
+        if t in seen or not re.fullmatch(r"([01]\d|2[0-3]):[0-5]\d", t):
+            continue
+        seen.add(t)
+        order.append((t, batch_name(t)))
+    order.sort()
+    return [name for _t, name in order] or ["4点", "16点"]
+
+
+def default_base_schedule(layout="333", batches=None):
     """账号级「精确基建派驻」配置默认结构（与 plugins\base_schedule 一致）。
 
-    layout: 333 = 制造3台/贸易3台/发电3台；423 = 制造4台/贸易2台/发电3台。
-    batches 两个批次各含 6 类设施：
+    layout 名称按「贸易站/制造站/发电站」顺序读：
+    333 = 贸易3台/制造3台/发电3台；243 = 贸易2台/制造4台/发电3台（旧名423）。
+    batches 每个班次各含 6 类设施：
         control    控制中枢 5 人（列表）
         meeting    会客室   2 人（列表）
-        manufacture 制造站  3 人/台（二维列表，台数随 layout）
-        trading    贸易站  3 人/台（二维列表，台数随 layout）
+        manufacture 制造站  3 人/台（每台 {product, operators}，台数随 layout；
+                    product: Pure Gold 赤金 / Originium Shard 原石碎片 /
+                    Battle Record 作战记录）
+        trading    贸易站  3 人/台（每台 {product, operators}；
+                    product: LMD 赤金订单 / Orundum 原石碎片订单）
         power      发电站  1 人/台（二维列表，固定 3 台）
+        dormitory  干员休整宿舍 5 人/间（二维列表，固定 4 间，留空自动安排）
         office     办公室  1 人（列表）
         processing 加工站  1 人（列表，可选；留空时 MAA 在自定义模式下跳过加工站）
     """
-    m = 4 if layout == "423" else 3
-    t = 2 if layout == "423" else 3
+    m = 4 if layout in ("423", "243") else 3
+    t = 2 if layout in ("423", "243") else 3
 
     def batch():
         return {
             "control": [""] * 5,
             "meeting": [""] * 2,
-            "manufacture": [[""] * 3 for _ in range(m)],
-            "trading": [[""] * 3 for _ in range(t)],
+            "manufacture": [
+                {"product": "Pure Gold", "operators": [""] * 3} for _ in range(m)],
+            "trading": [
+                {"product": "LMD", "operators": [""] * 3} for _ in range(t)],
             "power": [[""] for _ in range(3)],
+            "dormitory": [[""] * 5 for _ in range(4)],
             "office": [""],
             "processing": [""],
         }
 
+    if not batches:
+        batches = ["4点", "16点"]
     return {
         "enabled": False,
         "layout": layout,
-        "batches": {"4点": batch(), "16点": batch()},
+        "batches": {b: batch() for b in batches},
     }
 
 
@@ -77,12 +115,15 @@ DEFAULTS = {
     ],
     "behavior": {
         "close_emulator": True,   # 完成后关模拟器
-        "morning_shutdown": True, # 早班成功后 60 秒倒计时关机
-        "evening_shutdown": False, # 晚班成功后 60 秒倒计时关机（可选）
+        # 旧版早晚班关机开关（新格式迁移进 schedule.times 后不再使用，仅兼容回退）
+        "morning_shutdown": True,
+        "evening_shutdown": False,
     },
     "schedule": {
-        "morning": {"time": "04:00", "enabled": True},
-        "evening": {"time": "16:00", "enabled": True},
+        "times": [
+            {"time": "04:00", "enabled": True, "shutdown": True},
+            {"time": "16:00", "enabled": True, "shutdown": False},
+        ],
     },
     "cleanup": {
         "auto": True,          # 自动清理开关（控制台运行期间定期清理）
@@ -137,6 +178,56 @@ def _migrate_accounts(cfg):
             a.setdefault("base_schedule", default_base_schedule())
 
 
+def _migrate_schedule(cfg):
+    """旧版 schedule.morning/evening → schedule.times 列表，并规范化每项字段。
+
+    每项：{"time": "HH:MM", "enabled": bool, "shutdown": bool}。
+    shutdown 从旧 behavior.morning_shutdown / evening_shutdown 迁移。
+    """
+    sched = cfg.get("schedule")
+    if not isinstance(sched, dict):
+        cfg["schedule"] = deepcopy(DEFAULTS["schedule"])
+        return
+
+    # 旧格式优先：morning/evening 存在时按它重建
+    old = []
+    for key, tkey, def_shutdown in (
+        ("morning", "morning_shutdown", True),
+        ("evening", "evening_shutdown", False),
+    ):
+        item = sched.get(key)
+        if isinstance(item, dict):
+            t = str(item.get("time", "")).strip()
+            if re.fullmatch(r"([01]\d|2[0-3]):[0-5]\d", t):
+                old.append({
+                    "time": t,
+                    "enabled": bool(item.get("enabled", True)),
+                    "shutdown": bool((cfg.get("behavior") or {}).get(tkey, def_shutdown)),
+                })
+    if old:
+        sched["times"] = old
+        sched.pop("morning", None)
+        sched.pop("evening", None)
+        return
+
+    # 新格式：规范化 times 列表
+    times = []
+    for it in sched.get("times") if isinstance(sched.get("times"), list) else []:
+        if not isinstance(it, dict):
+            continue
+        t = str(it.get("time", "")).strip()
+        if re.fullmatch(r"([01]\d|2[0-3]):[0-5]\d", t):
+            times.append({
+                "time": t,
+                "enabled": bool(it.get("enabled", True)),
+                "shutdown": bool(it.get("shutdown", False)),
+            })
+    if not times:
+        times = deepcopy(DEFAULTS["schedule"]["times"])
+    sched["times"] = times
+    sched.pop("morning", None)
+    sched.pop("evening", None)
+
 def load() -> dict:
     """读取配置；文件缺失/损坏/字段缺失时用默认值补齐。"""
     cfg = deepcopy(DEFAULTS)
@@ -147,6 +238,7 @@ def load() -> dict:
         except (json.JSONDecodeError, OSError):
             pass  # 损坏时回退默认，不阻塞 GUI 启动
     _migrate_accounts(cfg)
+    _migrate_schedule(cfg)
     return cfg
 
 

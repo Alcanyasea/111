@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""计划任务管理：MAA_明日方舟自动挂机（单个任务，内含 04:00 / 16:00 两个每日触发）。
+"""计划任务管理：MAA_明日方舟自动挂机（单个任务，内含 config.schedule.times 全部每日触发）。
 
 原任务由管理员 schtasks 创建；查询无需管理员，修改（Set/Register/Enable/Disable）
 需要管理员权限——失败时返回可读错误，由界面弹 InfoBar 提示。
@@ -99,7 +99,12 @@ def query():
 def apply(cfg):
     """按 config 的 schedule 更新任务触发与启停。返回 (ok, message)。"""
     sched = cfg.get("schedule", {})
-    times = [v["time"] for v in sched.values() if v.get("enabled")]
+    if isinstance(sched, dict) and isinstance(sched.get("times"), list):
+        entries = sched["times"]
+    else:
+        # 旧版 {morning: {...}, evening: {...}} 兜底
+        entries = [v for v in sched.values() if isinstance(v, dict)]
+    times = [e["time"] for e in entries if isinstance(e, dict) and e.get("enabled")]
     times = [t for t in times if re.match(r"^([01]\d|2[0-3]):([0-5]\d)$", t)]
     enabled = bool(times)
 

@@ -8,12 +8,20 @@ r"""精确基建派驻插件（MAA 自定义基建计划生成 + 配置切换）
 设施与人数（按需求）：
     控制中枢 5 人、会客室 2 人、制造站 3 人/台、贸易站 3 人/台、
     发电站 1 人/台、办公室 1 人、加工站 1 人（可选，留空则跳过）
-    宿舍不手工指定：计划里固定 4 间并启用 autofill，由 MAA 默认算法安排休整。
-    布局 333 = 制造 3 台 / 贸易 3 台 / 发电 3 台
-    布局 423 = 制造 4 台 / 贸易 2 台 / 发电 3 台
-批次：
-    4点批  period = 04:00 - 15:59
-    16点批 period = 16:00 - 23:59 与 00:00 - 03:59（跨天两段）
+    干员休整（宿舍）：4 间 × 5 人，填入的干员放入，剩余空位（含全留空）
+    由 MAA 自动补满。
+    布局名称按「贸易站 / 制造站 / 发电站」顺序读：
+    布局 333 = 贸易 3 台 / 制造 3 台 / 发电 3 台
+    布局 243 = 贸易 2 台 / 制造 4 台 / 发电 3 台（旧名 423，仅改名、数量不变）
+制造站/贸易站按产品类别区分（写入计划 JSON 的 product 字段，MAA 据此匹配
+游戏内对应设施并设置配方）：
+    制造站：Pure Gold（赤金）/ Originium Shard（原石碎片）/ Battle Record（作战记录）
+    贸易站：LMD（赤金订单）/ Orundum（原石碎片订单）
+批次：随 config.schedule.times 动态生成——每个启用时间点一个批次，生效区间为
+「该时间点 → 下一个时间点」，末批跨零点收尾。例如 8点/12点/24点：
+    8点批  period = 08:00 - 11:59
+    12点批 period = 12:00 - 23:59
+    24点批 period = 00:00 - 07:59
 MAA 的 PlanSelect=-1 时，GUI 会按当前时间落在哪个 period 区间自动选计划。
 
 用法（由 master.ps1 / 控制台调用）：
@@ -34,18 +42,88 @@ PLANS_DIR = PLUGIN_DIR / "plans"
 DEFAULT_CONFIG = Path(r"D:\1\config.json")
 
 BATCHES = ["4点", "16点"]
+MANUFACTURE_PRODUCTS = ["Pure Gold", "Originium Shard", "Battle Record"]
+TRADING_PRODUCTS = ["LMD", "Orundum"]
+DEFAULT_MANUFACTURE_PRODUCT = "Pure Gold"
+DEFAULT_TRADING_PRODUCT = "LMD"
+
+
+def batch_name(time):
+    """HH:MM → 班次名：04:00 → 4点，00:00 → 24点。"""
+    m = re.fullmatch(r"([01]\d|2[0-3]):[0-5]\d", str(time))
+    if not m:
+        return str(time)
+    hour = int(m.group(1))
+    return "%d点" % (24 if hour == 0 else hour)
+
+
+def schedule_entries(cfg):
+    """config.schedule.times 中启用的时间点（升序、去重）。"""
+    sched = cfg.get("schedule") if isinstance(cfg, dict) else {}
+    times = sched.get("times") if isinstance(sched.get("times"), list) else []
+    out, seen = [], set()
+    for it in times:
+        if not isinstance(it, dict) or not it.get("enabled", True):
+            continue
+        t = str(it.get("time", "")).strip()
+        if t in seen or not re.fullmatch(r"([01]\d|2[0-3]):[0-5]\d", t):
+            continue
+        seen.add(t)
+        out.append({"time": t, "shutdown": bool(it.get("shutdown", False))})
+    out.sort(key=lambda e: e["time"])
+    return out
+
+
+def periods_for_times(entries):
+    """每个批次生效区间：从该时间点到下一个时间点；末批跨零点收尾。
+
+    与 MAA 自定义基建 period 语义一致：[[start,end], ...] 中任一区间命中即生效。
+    """
+    if not entries:
+        entries = [{"time": "04:00"}, {"time": "16:00"}]
+    times = [e["time"] for e in entries]
+
+    def minus1(t):
+        total = (int(t[:2]) * 60 + int(t[3:]) - 1) % 1440
+        return "%02d:%02d" % (total // 60, total % 60)
+
+    n = len(times)
+    out = []
+    for i, t in enumerate(times):
+        if i < n - 1:
+            out.append([[t, minus1(times[i + 1])]])
+        else:
+            segs = [[t, "23:59"]]
+            if times[0] != "00:00":
+                segs.append(["00:00", minus1(times[0])])
+            out.append(segs)
+    return out
+
+
+def schedule_spec(cfg):
+    """当前启用时间点 → (entries, 批次名列表, 各批次生效区间)；无配置回退 4点/16点。"""
+    entries = schedule_entries(cfg)
+    if not entries:
+        entries = [{"time": "04:00"}, {"time": "16:00"}]
+    names = [batch_name(e["time"]) for e in entries]
+    return entries, names, periods_for_times(entries)
 
 
 def default_batch(layout="333"):
     """一个批次的空模板（与界面/配置共用同一种结构）。"""
-    m = 4 if layout == "423" else 3
-    t = 2 if layout == "423" else 3
+    m = 4 if layout in ("423", "243") else 3
+    t = 2 if layout in ("423", "243") else 3
     return {
         "control": [""] * 5,
         "meeting": [""] * 2,
-        "manufacture": [[""] * 3 for _ in range(m)],
-        "trading": [[""] * 3 for _ in range(t)],
+        "manufacture": [
+            {"product": DEFAULT_MANUFACTURE_PRODUCT, "operators": [""] * 3}
+            for _ in range(m)],
+        "trading": [
+            {"product": DEFAULT_TRADING_PRODUCT, "operators": [""] * 3}
+            for _ in range(t)],
         "power": [[""] for _ in range(3)],
+        "dormitory": [[""] * 5 for _ in range(4)],
         "office": [""],
         "processing": [""],
     }
@@ -60,14 +138,19 @@ def default_base_schedule(layout="333"):
     }
 
 
-def normalize(bs):
-    """补齐/修正 base_schedule，保证生成器永远拿到完整结构。"""
+def normalize(bs, batches=None):
+    """补齐/修正 base_schedule，保证生成器永远拿到完整结构。
+
+    batches: 本次要使用的批次名（缺省 BATCHES 兜底）；配置里已有的其它批次一并
+    保留，避免调整启动时间后旧批次数据丢失。
+    """
     if not isinstance(bs, dict):
         bs = {}
-    layout = "423" if bs.get("layout") == "423" else "333"
-    m = 4 if layout == "423" else 3
-    t = 2 if layout == "423" else 3
-    batches = bs.get("batches") if isinstance(bs.get("batches"), dict) else {}
+    # 423 已改名为 243（数量不变：贸易2台/制造4台），兼容旧键
+    layout = "243" if bs.get("layout") in ("423", "243") else "333"
+    m = 4 if layout == "243" else 3
+    t = 2 if layout == "243" else 3
+    batches_src = bs.get("batches") if isinstance(bs.get("batches"), dict) else {}
     out = {"enabled": bool(bs.get("enabled")), "layout": layout, "batches": {}}
 
     def single(src, key, n):
@@ -90,16 +173,44 @@ def normalize(bs):
             rows.append((row + [""] * inner)[:inner])
         return rows
 
-    for b in BATCHES:
-        src = batches.get(b)
+    def stations(src, key, n, inner, default_product):
+        """制造站/贸易站：每台 {product, operators}；兼容旧版纯数组格式。"""
+        v = src.get(key)
+        if not isinstance(v, list):
+            v = []
+        rows = []
+        for i in range(n):
+            item = v[i] if i < len(v) else {}
+            if isinstance(item, list):  # 旧格式：[[干员...], ...] → 默认产品
+                item = {"product": default_product, "operators": item}
+            if not isinstance(item, dict):
+                item = {}
+            ops = item.get("operators")
+            if not isinstance(ops, list):
+                ops = []
+            ops = [str(x) for x in ops]
+            rows.append({
+                "product": str(item.get("product") or default_product),
+                "operators": (ops + [""] * inner)[:inner],
+            })
+        return rows
+
+    names = list(batches if batches else BATCHES)
+    for b in batches_src:
+        if b not in names:
+            names.append(b)
+    for b in names:
+        src = batches_src.get(b)
         if not isinstance(src, dict):
             src = {}
         out["batches"][b] = {
             "control": single(src, "control", 5),
             "meeting": single(src, "meeting", 2),
-            "manufacture": multi(src, "manufacture", m, 3),
-            "trading": multi(src, "trading", t, 3),
+            "manufacture": stations(src, "manufacture", m, 3,
+                                    DEFAULT_MANUFACTURE_PRODUCT),
+            "trading": stations(src, "trading", t, 3, DEFAULT_TRADING_PRODUCT),
             "power": multi(src, "power", 3, 1),
+            "dormitory": multi(src, "dormitory", 4, 5),
             "office": single(src, "office", 1),
             "processing": single(src, "processing", 1),
         }
@@ -112,18 +223,43 @@ def _entry(ops):
     return {"skip": False, "operators": ops, "sort": True, "autofill": not ops}
 
 
-def build_plan_document(bs, title="自定义基建", description="由 MAA 挂机控制台生成"):
-    """把账号的 base_schedule 转成 MAA 自定义计划 JSON 内容。"""
-    bs = normalize(bs)
+def _room(ops, product=None):
+    """制造站/贸易站条目：额外带 product（赤金/原石碎片/作战记录等），
+    MAA 据此匹配游戏内对应设施并设置配方。"""
+    entry = _entry(ops)
+    if product:
+        entry["product"] = product
+    return entry
+
+
+def _dorm(ops):
+    """干员休整（宿舍）条目：填入的干员放入，剩余空位（含全留空）由 MAA 自动补满。
+
+    MAA 核心只有宿舍任务消费 autofill 字段（InfrastDormTask 在 autofill=true
+    时调用 fill_dorm_slots 补满空位）；生产设施指定干员后走自定义名单路径，
+    autofill 不生效，剩余位置保持空着。
+    """
+    ops = [o for o in ops if o and o.strip()]
+    return {"skip": False, "operators": ops, "sort": True, "autofill": True}
+
+
+def build_plan_document(bs, entries=None, title="自定义基建",
+                        description="由 MAA 挂机控制台生成"):
+    """把账号的 base_schedule 转成 MAA 自定义计划 JSON 内容。
+
+    entries: 启用的启动时间点（升序），缺省 04:00/16:00；批次名与生效区间
+    按时间点自动推导，MAA 按当前时间自动选计划。
+    """
+    if not entries:
+        entries = [{"time": "04:00"}, {"time": "16:00"}]
+    names = [batch_name(e["time"]) for e in entries]
+    periods = periods_for_times(entries)
+    bs = normalize(bs, names)
     layout = bs["layout"]
-    m = 4 if layout == "423" else 3
-    t = 2 if layout == "423" else 3
-    spec = [
-        ("4点", [["04:00", "15:59"]]),
-        ("16点", [["16:00", "23:59"], ["00:00", "03:59"]]),
-    ]
+    m = 4 if layout == "243" else 3
+    t = 2 if layout == "243" else 3
     plans = []
-    for name, period in spec:
+    for name, period in zip(names, periods):
         b = bs["batches"][name]
         plans.append({
             "name": name + "批",
@@ -131,28 +267,26 @@ def build_plan_document(bs, title="自定义基建", description="由 MAA 挂机
             "rooms": {
                 "control": [_entry(b["control"])],
                 "meeting": [_entry(b["meeting"])],
-                "manufacture": [_entry(row) for row in b["manufacture"]],
-                "trading": [_entry(row) for row in b["trading"]],
+                "manufacture": [
+                    _room(st["operators"], st["product"]) for st in b["manufacture"]],
+                "trading": [
+                    _room(st["operators"], st["product"]) for st in b["trading"]],
                 "power": [_entry(row) for row in b["power"]],
                 "hire": [_entry(b["office"])],
                 # 加工站：留空时 MAA 会跳过，不会自动派干员（自定义模式限制）
                 "processing": [_entry(b["processing"])],
-                # 宿舍：固定 4 间全 autofill，交给 MAA 默认算法安排休整，
-                # 否则自定义模式下宿舍会被清空但不再补人
-                "dormitory": [
-                    {"skip": False, "operators": [], "sort": False, "autofill": True}
-                    for _ in range(4)
-                ],
+                # 干员休整（宿舍）：可指定干员，空位自动补；全留空则 MAA 默认算法安排
+                "dormitory": [_dorm(room) for room in b["dormitory"]],
             },
         })
     return {
         "author": "MAA 挂机控制台",
         "title": title,
         "description": description,
-        "planTimes": "2班",
+        "planTimes": "%d班" % len(names),
         "plans": plans,
         "scheduleType": {
-            "planTimes": 2,
+            "planTimes": len(names),
             "trading": t,
             "manufacture": m,
             "power": 3,
@@ -168,11 +302,12 @@ def plan_path_for_slot(slot):
 
 def regenerate_for_account(cfg, acc):
     """按账号配置重新生成计划 JSON，返回文件路径。"""
-    bs = normalize((acc or {}).get("base_schedule"))
+    entries, names, _periods = schedule_spec(cfg)
+    bs = normalize((acc or {}).get("base_schedule"), names)
     doc = build_plan_document(
-        bs,
+        bs, entries,
         title=(acc or {}).get("label") or "自定义基建",
-        description="由 MAA 挂机控制台生成（4点批 / 16点批）",
+        description="由 MAA 挂机控制台生成（%s）" % "、".join(names),
     )
     path = plan_path_for_slot((acc or {}).get("slot", (acc or {}).get("id", "account")))
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -182,14 +317,20 @@ def regenerate_for_account(cfg, acc):
     return path
 
 
-def current_batch(now=None):
-    """按当前时间返回生效批次（与 MAA period 判断一致）。"""
+def current_batch(now=None, entries=None):
+    """按当前时间返回最近一个启用时间点对应的批次名（与 MAA period 判断一致）。"""
+    if entries is None:
+        entries = [{"time": "04:00"}, {"time": "16:00"}]
     if now is None:
         now = datetime.now()
-    hhmm = now.strftime("%H:%M")
-    if "04:00" <= hhmm <= "15:59":
-        return "4点"
-    return "16点"
+    cur = now.strftime("%H:%M")
+    pick = entries[-1]
+    for e in entries:
+        if e["time"] <= cur:
+            pick = e
+        else:
+            break
+    return batch_name(pick["time"])
 
 
 def _atomic_json_write(path, data):
@@ -203,7 +344,7 @@ def apply_maa_config(maa_dir, plan_path, plan_index=None, log=print):
 
     修改 gui.new.json 的 InfrastTask（Mode/Filename/PlanSelect）与
     gui.json 的 Infrast.InfrastMode。返回改动的文件名列表。
-    plan_index：自定义模式下固定使用第几个计划（0=4点批，1=16点批）；
+    plan_index：自定义模式下固定使用第几个计划（0=第一个批次，按时间升序）；
     None 表示按时间自动（PlanSelect=-1）。
     """
     mode = "Custom" if plan_path else "Rotation"
@@ -218,13 +359,36 @@ def apply_maa_config(maa_dir, plan_path, plan_index=None, log=print):
         section = (data.get("Configurations") or {}).get(cur)
         found = False
         if isinstance(section, dict):
-            for task in section.get("TaskQueue") or []:
-                if isinstance(task, dict) and task.get("$type") == "InfrastTask":
-                    task["Mode"] = mode
-                    task["Filename"] = filename
-                    task["PlanSelect"] = plan_select
+            queue = section.get("TaskQueue")
+            if isinstance(queue, list):
+                infrast = [t for t in queue
+                           if isinstance(t, dict) and t.get("$type") == "InfrastTask"]
+                if infrast:
+                    # 撤除「一键休整」：只保留一个基建任务（清理旧版双任务残留）
+                    for extra in infrast[1:]:
+                        queue.remove(extra)
+                    first = infrast[0]
+                    # 恢复宿舍管理：设施列表补回 Dorm（一键休整版本移除过）
+                    rooms = first.get("RoomList")
+                    if isinstance(rooms, list):
+                        enabled_names = [r.get("Room") for r in rooms
+                                         if isinstance(r, dict)
+                                         and r.get("IsEnabled", True)]
+                        if "Dorm" not in enabled_names:
+                            # 先移除可能存在的禁用 Dorm 条目（MAA GUI 会自动补禁用的缺失设施）
+                            rooms[:] = [r for r in rooms
+                                        if not (isinstance(r, dict)
+                                                and r.get("Room") == "Dorm")]
+                            pos = len(rooms)
+                            for i, r in enumerate(rooms):
+                                if isinstance(r, dict) and r.get("Room") == "Office":
+                                    pos = i + 1
+                                    break
+                            rooms.insert(pos, {"Room": "Dorm"})
+                    first["Mode"] = mode
+                    first["Filename"] = filename
+                    first["PlanSelect"] = plan_select
                     found = True
-                    break
         if found:
             _atomic_json_write(gui_new, data)
             changed.append("gui.new.json")
@@ -279,19 +443,23 @@ def cmd_apply(args):
         return 2
 
     server = args.server or acc.get("server") or "official"
-    bs = normalize(acc.get("base_schedule"))
+    entries, names, _periods = schedule_spec(cfg)
+    bs = normalize(acc.get("base_schedule"), names)
     enabled = bool(bs.get("enabled")) and not args.disable
     label = acc.get("label") or args.account
 
     batch = args.batch
     if batch in (None, "auto"):
-        batch = current_batch()
+        batch = current_batch(entries=entries)
+    if batch not in names:
+        # 时间点刚改过 / 批次名对不上 → 按当前时间重新判定，保证计划索引正确
+        batch = current_batch(entries=entries)
 
     plan_path = None
     plan_index = None
     if enabled:
         plan_path = regenerate_for_account(cfg, acc)
-        plan_index = 0 if batch == "4点" else 1
+        plan_index = names.index(batch)
         _log_file(cfg, "账号「%s」启用精确基建（%s批），计划已生成：%s"
                   % (label, batch, plan_path.name))
 
@@ -336,8 +504,8 @@ def main(argv=None):
     a.add_argument("--config", default=str(DEFAULT_CONFIG))
     a.add_argument("--account", required=True)
     a.add_argument("--server", choices=["official", "bilibili"], default=None)
-    a.add_argument("--batch", choices=["4点", "16点", "auto"], default="auto",
-                   help="本次运行使用哪个批次（默认按当前时间自动判断）")
+    a.add_argument("--batch", default="auto",
+                   help="本次运行使用哪个批次（默认按当前时间自动判断，如 4点/8点/16点）")
     a.add_argument("--disable", action="store_true",
                    help="即使账号已启用也恢复 Rotation（备用）")
     a.set_defaults(func=cmd_apply)

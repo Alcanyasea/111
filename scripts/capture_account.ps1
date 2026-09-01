@@ -4,7 +4,10 @@
 #   停游戏 → 备份并移走 3 个登录数据文件 → 写入最小 SDK prefs → 启动游戏
 #   → OCR 循环点掉首次启动弹窗（配音包下载/选择）→ 标题画面 → 登录界面
 #   → 账号登录 → 密码登录 → 输入账号/密码 → 登录
-#   → 轮询 u8sdk_cached_uid 出现即成功 → 拉取文件到 accounts\<slot>\
+#   → 轮询 u8sdk_cached_uid 出现即登录成功 → 处理剩余首次启动弹窗（公告/配音
+#     选择等）并等标记写入 playerprefs → 拉取文件到 accounts\<slot>\
+#   （uid 出现只代表登录成功：配音选择/公告的「已处理」标记要进入主界面后才写入，
+#     不处理就拉取的话，下次切号会再次弹出首次启动弹窗）
 # 兜底：自动输入不可用（特殊字符密码）或登录失败时，转「人工登录」：
 #   提示用户在模拟器窗口手动完成登录，脚本轮询 uid，成功后自动拉取文件。
 # 失败时自动恢复备份的原登录态。
@@ -25,6 +28,7 @@ $ProgressPreference = "SilentlyContinue"
 
 $adb = "D:\软件\MuMu模拟器\MuMuPlayer\nx_main\adb.exe"
 $device = "127.0.0.1:16384"
+$cli = "D:\软件\MuMu模拟器\MuMuPlayer\nx_main\mumu-cli.exe"
 $scriptDir = "D:\1\scripts"
 $debugDir = "D:\1\scripts\debug"
 
@@ -36,11 +40,40 @@ if (Test-Path $configPath) {
         $cfg = $raw | ConvertFrom-Json
         if ($null -ne $cfg.paths -and $cfg.paths.adb)    { $adb = [string]$cfg.paths.adb }
         if ($null -ne $cfg.paths -and $cfg.paths.device) { $device = [string]$cfg.paths.device }
+        if ($null -ne $cfg.paths -and $cfg.paths.cli)    { $cli = [string]$cfg.paths.cli }
         if ($null -ne $cfg.paths -and $cfg.paths.script_dir) { $scriptDir = [string]$cfg.paths.script_dir }
         if ($null -ne $cfg.paths -and $cfg.paths.script_dir) { $debugDir = Join-Path ([string]$cfg.paths.script_dir) "debug" }
     } catch {}
 }
 $accountsDir = Join-Path $scriptDir "accounts"
+
+function Start-MuMu {
+    # 与 master.ps1 一致：模拟器未连接时自动启动并等待 ADB 就绪。
+    # 已连接时不做任何操作（避免影响正在运行的挂机任务）。
+    LogLine "检查模拟器连接..."
+    $r = & $adb connect $device 2>&1
+    if ($r -match "connected|already") {
+        LogLine "MuMu 已连接"
+        return $true
+    }
+    LogLine "模拟器未连接，正在启动 MuMu..."
+    & $adb kill-server 2>$null | Out-Null
+    Start-Sleep 1
+    & $cli control -v 0 launch 2>$null | Out-Null
+    Start-Sleep 5
+    $sw = [System.Diagnostics.Stopwatch]::StartNew()
+    while ($sw.Elapsed.TotalSeconds -lt 120) {
+        $r = & $adb connect $device 2>&1
+        if ($r -match "connected|already") {
+            LogLine "MuMu 已连接，等待游戏服务就绪"
+            Start-Sleep 15
+            return $true
+        }
+        Start-Sleep 3
+    }
+    LogLine "ERROR: MuMu 启动超时（120 秒内未连接 ADB）"
+    return $false
+}
 
 function Timestamp { Get-Date -Format "HH:mm:ss" }
 $captureLog = Join-Path $debugDir ("capture_{0}.log" -f $Slot)
@@ -136,13 +169,31 @@ function Restore-Backup($ppName) {
 # ================= 开始 =================
 LogLine ("=== Capture {0} -> slot '{1}' (uid target unknown) ===" -f $serverName, $Slot)
 
+# 模拟器未运行/ADB 未连接是「新增账号」失败的最常见原因：
+# playerprefs 属于游戏私有目录，设备不可达时直接报「找不到文件」。
+if (-not (Start-MuMu)) {
+    LogLine "ERROR: 无法连接模拟器（ADB 连接失败且启动超时）"
+    LogLine "ERROR: 请确认 MuMu 模拟器已安装、实例 0 可用；也可手动打开 MuMu 后重试"
+    exit 1
+}
+
 & $adb -s $device root 2>$null | Out-Null
 Start-Sleep 2
-& $adb -s $device connect $device 2>$null | Out-Null
-Start-Sleep 1
+
+# 游戏是否安装（未安装时游戏私有目录不存在，捕获无从谈起）
+$installed = (& $adb -s $device shell "pm list packages" 2>$null) -join "`n"
+if ($installed -notmatch [regex]::Escape($pkg)) {
+    LogLine ("ERROR: 设备上未安装 {0}（{1}），无法捕获" -f $pkg, $serverName)
+    LogLine "ERROR: 请先安装对应的明日方舟客户端（官服/B服）"
+    exit 1
+}
 
 $ppName = Get-PlayerPrefsName
-if (-not $ppName) { LogLine "ERROR: cannot find playerprefs name on device"; exit 1 }
+if (-not $ppName) {
+    LogLine "ERROR: 未找到游戏的登录数据文件（playerprefs）"
+    LogLine "ERROR: 请先手动启动一次游戏并进入主界面，再重试捕获"
+    exit 1
+}
 LogLine "playerprefs: $ppName"
 
 # ---- 停游戏 ----
@@ -328,6 +379,116 @@ if (-not $uid) {
     LogLine ("ERROR: {0} 分钟内未检测到登录成功，捕获失败" -f $ManualTimeoutMin)
     Restore-Backup $ppName
     exit 1
+}
+
+# ---- 登录成功：处理剩余首次启动弹窗并等主界面 ----
+# 与 login_check.ps1 的判定一致：公告弹窗点右上角 X，配音选择勾「维持原有配置」，
+# 再点确认/同意并继续/开始唤醒，直到主界面特征词出现（理智/公开招募等）。
+# 这样拉回来的 playerprefs 才带 KEY_GLOBAL_VOICE_LANG / KEY_VOICE_LANG_PREF_DONTCG
+# 与公告版本号等「已处理」标记，下次切号不会重复弹窗。
+$inGameMarkers = @("公开招募", "干员寻访", "理智", "终端", "采购中心", "寻访一次", "寻访十次")
+$announceMarkers = @("活动公告", "系统公告", "资讯速报")
+$announceCloseX = 1215
+$announceCloseY = 75
+$voiceKeptSettle = $false
+$settlePng = Join-Path $debugDir ("cap_{0}_settle.png" -f $Slot)
+$settleDeadline = (Get-Date).AddMinutes(3)
+$lastPokeAt = (Get-Date)
+$pokeCount = 0
+$settled = $false
+while ((Get-Date) -lt $settleDeadline) {
+    if (-not (Ocr-Screenshot $adb $device $settlePng)) { Start-Sleep 4; continue }
+    $w = Get-OcrWords $settlePng
+    # 主界面特征词（登录后仍在弹窗/加载时不会出现）
+    $igName = $null
+    foreach ($m in $inGameMarkers) {
+        $hit = Find-OcrText $w $m
+        if ($hit) { $igName = $m; break }
+    }
+    if ($igName) {
+        LogLine ("[settle] 检测到主界面（{0}），首次启动弹窗处理完成" -f $igName)
+        $settled = $true
+        break
+    }
+    $act = $null
+    # 公告弹窗：点右上角 X 关闭（纯图标，坐标实测固定）
+    $ann = $null
+    foreach ($m in $announceMarkers) {
+        $hit = Find-OcrText $w $m
+        if ($hit) { $ann = $hit; break }
+    }
+    if ($ann) {
+        Invoke-Tap $announceCloseX $announceCloseY
+        $act = "announce_close"
+        Start-Sleep 3
+    } else {
+        $vk = Find-OcrText $w "维持原有配置"
+        if ($vk -and (-not $voiceKeptSettle)) {
+            Invoke-Tap $vk.X $vk.Y
+            $voiceKeptSettle = $true
+            $act = "voice_keep"
+            Start-Sleep 3
+        } else {
+            $cf = Find-OcrText $w "确认"
+            if ($cf) {
+                Invoke-Tap $cf.X $cf.Y
+                $act = "confirm"
+                Start-Sleep 3
+            } else {
+                $ag = Find-OcrText $w "同意并继续"
+                if ($ag) {
+                    Invoke-Tap $ag.X $ag.Y
+                    $act = "agree"
+                    Start-Sleep 3
+                } else {
+                    $wk = Find-OcrText $w "开始唤醒"
+                    if ($wk) {
+                        Invoke-Tap $wk.X $wk.Y
+                        $act = "wake"
+                        Start-Sleep 4
+                    }
+                }
+            }
+        }
+    }
+    if ($act) {
+        LogLine ("[settle] " + $act)
+    } else {
+        # 无可识别动作：中央与右上角公告关闭位交替盲点兜底
+        if (((Get-Date) - $lastPokeAt).TotalSeconds -gt 20) {
+            if ($pokeCount -gt 0 -and ($pokeCount % 2 -eq 0)) {
+                Invoke-Tap $announceCloseX $announceCloseY
+                LogLine "[settle] 无可识别动作，盲点右上角公告关闭位兜底"
+            } else {
+                Invoke-Tap 640 360
+                LogLine "[settle] 无可识别动作，盲点屏幕中央兜底"
+            }
+            $pokeCount++
+            $lastPokeAt = Get-Date
+        }
+        Start-Sleep 4
+        continue
+    }
+    Start-Sleep 2
+}
+if (-not $settled) {
+    LogLine "WARN: 3 分钟内未识别到主界面（弹窗可能未完全处理），仍按当前状态拉取"
+}
+
+# 弹窗刚点掉时语音标记写入有延迟：最多等 ~25 秒，标记出现即拉取
+$deadlineV = (Get-Date).AddSeconds(25)
+while ((Get-Date) -lt $deadlineV) {
+    $tmpPp2 = Join-Path $env:TEMP "ark_cap_pp2.xml"
+    & $adb -s $device pull ("/data/data/{0}/shared_prefs/{1}" -f $pkg, $ppName) $tmpPp2 2>$null | Out-Null
+    if (Test-Path $tmpPp2) {
+        $ppc2 = [System.IO.File]::ReadAllText($tmpPp2, [System.Text.Encoding]::UTF8)
+        Remove-Item $tmpPp2 -Force -ErrorAction SilentlyContinue
+        if ($ppc2 -match 'KEY_VOICE_LANG_PREF_DONTCG') {
+            LogLine "首次启动语音标记已写入 playerprefs"
+            break
+        }
+    }
+    Start-Sleep 5
 }
 
 # ---- 拉取文件到槽位 ----

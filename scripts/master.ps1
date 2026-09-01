@@ -1,5 +1,5 @@
 ﻿# MAA Auto Farm v4 - Dual MAA + 槽位切号（非点击）
-# -NoShutdown: GUI 手动运行传入，跳过「早班成功后关机」；计划任务不传，行为不变
+# -NoShutdown: GUI 手动运行传入，跳过「成功后关机」；计划任务不传，行为不变
 # -SkipMAA: 测试切号流程用——跳过 MAA、结束时保留模拟器运行供检查
 param([switch]$NoShutdown, [switch]$SkipMAA)
 $ErrorActionPreference = "Continue"
@@ -310,17 +310,60 @@ Log "========================================"
 Log "MAA Auto Farm"
 Log "========================================"
 
-# 本次运行属于哪一班：4点班（04:00-16:00 之间启动）还是 16点班（16:00-次日04:00 启动）。
-# 基建换班批次与关机选项都按这一班绑定，避免 MAA 实际执行基建时跨过整点导致选错批次。
-$runHour = [int](Get-Date).Hour
-$isFourOClockRun = ($runHour -ge 4 -and $runHour -lt 16)
-$bsBatch = if ($isFourOClockRun) { "4点" } else { "16点" }
+# ---- 本次运行属于哪一班（动态）：config.schedule.times 里最近一个已到（或已过）的
+# 启用时间点决定批次名与关机选项。凌晨 00:00 - 最早时间点 之间属于昨天最后一班。
+# 无配置/全禁用时回退旧逻辑：4点班（04:00-16:00 启动）→ "4点"，否则 "16点"。
+$scheduleEntries = @()
+if ($config -and $null -ne $config.schedule -and $null -ne $config.schedule.times -and
+    $config.schedule.times -is [System.Array]) {
+    foreach ($t in $config.schedule.times) {
+        if ($t -and $t.time -and $t.enabled) {
+            $scheduleEntries += $t
+        }
+    }
+}
+# 旧格式兜底：config.json 尚未被 GUI 保存为新格式时，schedule.morning/evening 仍存在
+if ($scheduleEntries.Count -eq 0 -and $config -and $null -ne $config.schedule -and
+    $null -ne $config.schedule.morning -and $null -ne $config.schedule.evening) {
+    foreach ($kv in @(@("morning", "morning_shutdown"), @("evening", "evening_shutdown"))) {
+        $item = $config.schedule.($kv[0])
+        $t = [string]$item.time
+        if ($t -match '^([01]\d|2[0-3]):[0-5]\d$') {
+            $scheduleEntries += [pscustomobject]@{
+                time    = $t
+                enabled = [bool]$item.enabled
+                shutdown = [bool]$config.behavior.($kv[1])
+            }
+        }
+    }
+}
+
+$bsBatch = "16点"
+$shutdownEnabled = $false
+if ($scheduleEntries.Count -gt 0) {
+    $sorted = @($scheduleEntries | Sort-Object { $_.time })
+    $now = Get-Date
+    $runMin = $now.Hour * 60 + $now.Minute
+    $pick = $null
+    foreach ($t in $sorted) {
+        $mins = [int]$t.time.Substring(0, 2) * 60 + [int]$t.time.Substring(3, 2)
+        if ($mins -le $runMin) { $pick = $t } else { break }
+    }
+    if ($null -eq $pick) { $pick = $sorted[$sorted.Count - 1] }
+    $hh = [int]$pick.time.Substring(0, 2)
+    $bsBatch = if ($hh -eq 0) { "24点" } else { "$($hh)点" }
+    $shutdownEnabled = [bool]$pick.shutdown
+} else {
+    $isFourOClockRun = ((Get-Date).Hour -ge 4 -and (Get-Date).Hour -lt 16)
+    $bsBatch = if ($isFourOClockRun) { "4点" } else { "16点" }
+    $shutdownEnabled = if ($isFourOClockRun) { $morningShutdown } else { $eveningShutdown }
+}
 
 # 每次运行前清理本地缓存/生成文件（默认自动，无需配置）
 Clear-CacheData
 
 # Clean up debug screenshots from previous run (prevent disk bloat)
-# 16:00 下午班（Hour >= 12）→ 完整清理；凌晨班保持只清截图
+# 下午/晚间（Hour >= 12）→ 完整清理；凌晨班保持只清截图
 if ((Get-Date).Hour -ge 12) {
     Clear-UnnecessaryData
 } else {
@@ -480,11 +523,9 @@ if ($failed -eq 0) {
     $null = $wshell.Popup($body, 0, "MAA Auto Farm - 异常", 0x30)
 }
 
-# 4点班 / 16点班是否关机均可配置（behavior.morning_shutdown / evening_shutdown）；
+# 每个时间点的「关机」开关（schedule.times 每项 shutdown）决定本次运行是否关机；
 # 失败时保留弹窗便于查看，不关机；GUI 手动运行传 -NoShutdown 跳过
-$shutdownEnabled = if ($isFourOClockRun) { $morningShutdown } else { $eveningShutdown }
 if (-not $NoShutdown -and $shutdownEnabled -and $failed -eq 0) {
-    if ($isFourOClockRun) { Log "4点班成功 - 60秒后自动关机" }
-    else                  { Log "16点班成功 - 60秒后自动关机" }
+    Log "$bsBatch班成功 - 60秒后自动关机"
     shutdown /s /t 60
 }

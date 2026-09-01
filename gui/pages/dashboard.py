@@ -7,7 +7,7 @@ from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QVBoxLayout, QWidget
 
 from qfluentwidgets import (BodyLabel, InfoBar, InfoBarPosition, LineEdit,
-                            ScrollArea, SwitchButton)
+                            PushButton, ScrollArea, SwitchButton)
 
 import config as appconfig
 import theme
@@ -154,41 +154,31 @@ class AccountCard(Card):
 
 
 class ScheduleCard(Card):
-    """班次计划：早晚班时间 + 开关，修改即保存并更新计划任务。"""
+    """班次计划：启动时间列表（可增删改），每项可启用/关机，修改即保存并更新计划任务。"""
 
     def __init__(self, cfg):
         super().__init__("班次计划")
         self.cfg = cfg
+        self._row_widgets = []
+        self._edits = {}
 
-        def make_row(label_text):
-            lab = BodyLabel(label_text)
-            lab.setStyleSheet("color: %s; font-size: 13px;" % theme.TEXT_2)
-            lab.setFixedWidth(60)
-            edit = LineEdit()
-            edit.setFixedWidth(84)
-            edit.setClearButtonEnabled(False)
-            sw = SwitchButton()
-            sw.setText("启用")
-            shutdown_sw = SwitchButton()
-            shutdown_sw.setText("关机")
-            hint = _label("", size="12px", color=theme.TEXT_3)
-            row = QHBoxLayout()
-            row.setSpacing(10)
-            row.addWidget(lab)
-            row.addWidget(edit)
-            row.addWidget(sw)
-            row.addWidget(shutdown_sw)
-            row.addWidget(hint)
-            row.addStretch(1)
-            self.vbox.addLayout(row)
-            self.vbox.addSpacing(10)
-            return edit, sw, shutdown_sw, hint
+        # 列标题：与下方每行控件同宽对齐（60 班次 / 84 时间 / 84 启用 / 84 关机 / 64 操作）
+        head = QHBoxLayout()
+        head.setSpacing(10)
+        for text, w in (("班次", 60), ("时间", 84), ("启用", 84), ("关机", 84), ("操作", 64)):
+            hlab = _label(text, size="12px", color=theme.TEXT_3)
+            hlab.setFixedWidth(w)
+            head.addWidget(hlab)
+        head.addStretch(1)
+        self.vbox.addLayout(head)
+        self.vbox.addSpacing(4)
 
-        (self.morning_edit, self.morning_sw,
-         self.morning_shutdown_sw, self.morning_hint) = make_row("早班")
-        (self.evening_edit, self.evening_sw,
-         self.evening_shutdown_sw, self.evening_hint) = make_row("晚班")
-        self.vbox.addSpacing(2)
+        self.rows_host = QWidget()
+        self.rows_layout = QVBoxLayout(self.rows_host)
+        self.rows_layout.setContentsMargins(0, 0, 0, 0)
+        self.rows_layout.setSpacing(10)
+        self.vbox.addWidget(self.rows_host)
+        self.vbox.addSpacing(8)
 
         self.next_val = _label("—")
         self.next_val.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
@@ -197,49 +187,114 @@ class ScheduleCard(Card):
         self.task_val = _label("—")
         self.task_val.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         self.vbox.addWidget(kv_row("计划任务", self.task_val))
+        self.vbox.addSpacing(8)
+
+        bar = QHBoxLayout()
+        bar.setSpacing(10)
+        self.add_btn = PushButton("添加时间")
+        self.add_btn.setToolTip(
+            "新增一个启动时间点，加完后可修改为任意 HH:MM（如 08:00 / 00:00）。\n"
+            "新时间立即写入计划任务。")
+        self.add_btn.clicked.connect(self._on_add)
+        bar.addWidget(self.add_btn)
+        hint = _label("格式 HH:MM（00:00 即 24点）；增删改立即生效",
+                      size="12px", color=theme.TEXT_3)
+        bar.addWidget(hint)
+        bar.addStretch(1)
+        self.vbox.addLayout(bar)
 
         self.refresh_from_cfg()
-        self.morning_edit.editingFinished.connect(lambda: self._on_time("morning"))
-        self.evening_edit.editingFinished.connect(lambda: self._on_time("evening"))
-        self.morning_sw.checkedChanged.connect(self._on_switch)
-        self.evening_sw.checkedChanged.connect(self._on_switch)
-        self.morning_shutdown_sw.checkedChanged.connect(
-            lambda c: self._on_shutdown("morning", c))
-        self.evening_shutdown_sw.checkedChanged.connect(
-            lambda c: self._on_shutdown("evening", c))
+
+    # ---------- 行构建 ----------
+
+    def _entries(self):
+        """schedule.times 列表（不存在则创建）。"""
+        sched = self.cfg.setdefault("schedule", {})
+        times = sched.get("times")
+        if not isinstance(times, list):
+            times = []
+            sched["times"] = times
+        return times
+
+    def _clear_rows(self):
+        for w in self._row_widgets:
+            self.rows_layout.removeWidget(w)
+            w.deleteLater()
+        self._row_widgets = []
+        self._edits = {}
+
+    @staticmethod
+    def _update_hint(entry, hint):
+        parts = ["✓ 启用" if entry.get("enabled", True) else "停用"]
+        parts.append("关机" if entry.get("shutdown", False) else "不关机")
+        hint.setText(" · ".join(parts))
+
+    def _make_row(self, entry):
+        row_widget = QWidget()
+        row = QHBoxLayout(row_widget)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(10)
+
+        lab = BodyLabel(appconfig.batch_name(entry["time"]))
+        lab.setStyleSheet("color: %s; font-size: 13px;" % theme.TEXT_2)
+        lab.setFixedWidth(60)
+        edit = LineEdit()
+        edit.setFixedWidth(84)
+        edit.setClearButtonEnabled(False)
+        edit.setText(entry["time"])
+        edit.setToolTip("启动时间，HH:MM；00:00 显示为 24点")
+        sw = SwitchButton()
+        sw.setText("启用")
+        sw.setFixedWidth(84)
+        sw.setChecked(bool(entry.get("enabled", True)))
+        sw.setToolTip(
+            "开启：该时间点写入计划任务，到点自动开始挂机。\n"
+            "关闭：该时间点不触发（保留在列表，随时可重新打开）。\n"
+            "全部关闭时计划任务整体禁用。")
+        shutdown_sw = SwitchButton()
+        shutdown_sw.setText("关机")
+        shutdown_sw.setFixedWidth(84)
+        shutdown_sw.setChecked(bool(entry.get("shutdown", False)))
+        shutdown_sw.setToolTip(
+            "开启：该时间点运行成功后 60 秒自动关机（无需确认）。\n"
+            "关闭：跑完保持开机。失败时一律不关机，只弹窗提示。\n"
+            "手动点「立即运行」不受此开关影响，永不关机。")
+        del_btn = PushButton("删除")
+        del_btn.setFixedWidth(64)
+        del_btn.setToolTip(
+            "删除该时间点，计划任务中的对应触发立即移除。")
+        del_btn.setStyleSheet(
+            "PushButton { color: %s; border: 1px solid #e5b7b1; }" % theme.ERR)
+        hint = _label("", size="12px", color=theme.TEXT_3)
+        self._update_hint(entry, hint)
+
+        row.addWidget(lab)
+        row.addWidget(edit)
+        row.addWidget(sw)
+        row.addWidget(shutdown_sw)
+        row.addWidget(del_btn)
+        row.addWidget(hint)
+        row.addStretch(1)
+        self.rows_layout.addWidget(row_widget)
+        self._row_widgets.append(row_widget)
+        self._edits[id(entry)] = edit
+
+        edit.editingFinished.connect(lambda e=entry, ed=edit: self._on_time(e, ed))
+        sw.checkedChanged.connect(lambda c, e=entry: self._on_enabled(e, c))
+        shutdown_sw.checkedChanged.connect(lambda c, e=entry: self._on_shutdown(e, c))
+        del_btn.clicked.connect(lambda _=False, e=entry: self._on_delete(e))
+        return edit
 
     def refresh_from_cfg(self):
-        """从 cfg 回填控件（不改动文件）。"""
-        behavior = self.cfg.get("behavior") or {}
-        for key, edit, sw, shutdown_sw, hint in (
-            ("morning", self.morning_edit, self.morning_sw,
-             self.morning_shutdown_sw, self.morning_hint),
-            ("evening", self.evening_edit, self.evening_sw,
-             self.evening_shutdown_sw, self.evening_hint),
-        ):
-            item = self.cfg["schedule"][key]
-            shutdown_key = "morning_shutdown" if key == "morning" else "evening_shutdown"
-            shutdown = bool(behavior.get(shutdown_key, False))
-            hint_text = "成功后自动关机" if shutdown else "成功后不关机"
-            edit.blockSignals(True)
-            edit.setText(item["time"])
-            edit.blockSignals(False)
-            sw.blockSignals(True)
-            sw.setChecked(item["enabled"])
-            sw.blockSignals(False)
-            shutdown_sw.blockSignals(True)
-            shutdown_sw.setChecked(shutdown)
-            shutdown_sw.blockSignals(False)
-            hint.setText(hint_text + (" ✓" if item["enabled"] else ""))
+        """从 cfg 重建时间行（不改动文件）。"""
+        self._clear_rows()
+        for entry in self._entries():
+            self._make_row(entry)
 
-    def refresh_scheduler(self, info):
-        self.next_val.setText(scheduler.next_run_text(info))
-        if not info.get("exists"):
-            self.task_val.setText("未创建")
-        elif not info.get("enabled"):
-            self.task_val.setText("已禁用")
-        else:
-            self.task_val.setText("1 个任务 · %d 个触发 ✓" % len(info.get("times", [])))
+    # ---------- 交互 ----------
+
+    def _sort_entries(self):
+        self._entries().sort(key=lambda e: e.get("time", ""))
 
     def _apply(self):
         appconfig.save(self.cfg)
@@ -252,43 +307,80 @@ class ScheduleCard(Card):
             InfoBar.warning("配置已保存，但计划任务未更新", msg, parent=self.window(),
                             position=InfoBarPosition.TOP_RIGHT, duration=6000)
 
-    def _on_time(self, key):
-        edit = self.morning_edit if key == "morning" else self.evening_edit
+    def refresh_scheduler(self, info):
+        self.next_val.setText(scheduler.next_run_text(info))
+        if not info.get("exists"):
+            self.task_val.setText("未创建")
+        elif not info.get("enabled"):
+            self.task_val.setText("已禁用")
+        else:
+            self.task_val.setText("1 个任务 · %d 个触发 ✓" % len(info.get("times", [])))
+
+    def _on_time(self, entry, edit):
         text = edit.text().strip()
         if not TIME_RE.match(text):
             InfoBar.warning("时间格式应为 HH:MM",
-                            "已还原为 %s" % self.cfg["schedule"][key]["time"],
+                            "已还原为 %s" % entry["time"],
                             parent=self.window(), position=InfoBarPosition.TOP_RIGHT,
                             duration=3000)
             edit.blockSignals(True)
-            edit.setText(self.cfg["schedule"][key]["time"])
+            edit.setText(entry["time"])
             edit.blockSignals(False)
             return
-        if text == self.cfg["schedule"][key]["time"]:
+        if text == entry["time"]:
             return
-        self.cfg["schedule"][key]["time"] = text
+        if any(e is not entry and e.get("time") == text for e in self._entries()):
+            InfoBar.warning("时间重复", "已还原为 %s" % entry["time"],
+                            parent=self.window(), position=InfoBarPosition.TOP_RIGHT,
+                            duration=3000)
+            edit.blockSignals(True)
+            edit.setText(entry["time"])
+            edit.blockSignals(False)
+            return
+        entry["time"] = text
+        self._sort_entries()
         self._apply()
-
-    def _on_switch(self, checked):
-        for key, sw in (("morning", self.morning_sw), ("evening", self.evening_sw)):
-            if sw is self.sender():
-                self.cfg["schedule"][key]["enabled"] = bool(checked)
-                break
         self.refresh_from_cfg()
-        self._apply()
 
-    def _on_shutdown(self, key, checked):
-        """早班/晚班「关机」开关：立即保存，并同步运行设置页的开关。"""
-        behavior = self.cfg.setdefault("behavior", {})
-        behavior["morning_shutdown" if key == "morning" else "evening_shutdown"] = bool(checked)
+    def _on_enabled(self, entry, checked):
+        entry["enabled"] = bool(checked)
+        self._apply()  # 触发列表变化，需同步计划任务
+        self.refresh_from_cfg()
+
+    def _on_shutdown(self, entry, checked):
+        """某时间点「关机」开关：立即保存（无需同步计划任务）。"""
+        entry["shutdown"] = bool(checked)
         appconfig.save(self.cfg)
         self.refresh_from_cfg()
-        sp = getattr(self, "settings_page", None)
-        if sp is not None:
-            target = sp.shutdown_sw if key == "morning" else sp.evening_shutdown_sw
-            target.blockSignals(True)
-            target.setChecked(bool(checked))
-            target.blockSignals(False)
+
+    def _on_delete(self, entry):
+        times = self._entries()
+        if entry in times:
+            times.remove(entry)
+        self._apply()
+        self.refresh_from_cfg()
+
+    def _on_add(self):
+        times = self._entries()
+        used = {e.get("time") for e in times}
+        default = None
+        for mins in range(8 * 60, 8 * 60 + 24 * 60, 30):
+            hh, mm = divmod(mins % 1440, 60)
+            cand = "%02d:%02d" % (hh, mm)
+            if cand not in used:
+                default = cand
+                break
+        if default is None:
+            default = "08:00"
+        entry = {"time": default, "enabled": True, "shutdown": False}
+        times.append(entry)
+        self._sort_entries()
+        self._apply()
+        self.refresh_from_cfg()
+        new_edit = self._edits.get(id(entry))
+        if new_edit is not None:
+            new_edit.setFocus()
+            new_edit.selectAll()
 
 
 class LastRunCard(Card):

@@ -1,8 +1,9 @@
 # -*- coding: utf-8 -*-
 """精确基建派驻配置弹窗。
 
-账号列表「基建」按钮打开此窗口：可切换 333/423 布局、4点/16点两个批次，
-逐个设施/槽位填写干员名；保存后写入 config.json 并调用插件重新生成
+账号列表「基建」按钮打开此窗口：可切换 333/243 布局、按启动时间自动划分的批次
+（如 8点/12点/24点），制造站/贸易站每台可先选择产品类别（赤金/原石碎片/作战记录），
+再逐个设施/槽位填写干员名；保存后写入 config.json 并调用插件重新生成
 MAA 自定义计划 JSON（master.ps1 启动 MAA 前会自动应用）。
 """
 import copy
@@ -26,10 +27,25 @@ if str(PLUGIN_DIR) not in sys.path:
     sys.path.insert(0, str(PLUGIN_DIR))
 import base_schedule as bsplugin
 
-BATCH_LABELS = {
-    "4点": "4点批（04:00 - 15:59 生效）",
-    "16点": "16点批（16:00 - 次日 03:59 生效）",
-}
+MANUFACTURE_OPTIONS = [
+    ("赤金", "Pure Gold"),
+    ("原石碎片", "Originium Shard"),
+    ("作战记录", "Battle Record"),
+]
+TRADING_OPTIONS = [
+    ("赤金（龙门币订单）", "LMD"),
+    ("原石碎片（合成玉订单）", "Orundum"),
+]
+
+
+def _batch_labels(cfg):
+    """按当前启动时间生成批次标签：如「8点批（08:00 - 11:59 生效）」。"""
+    entries, names, periods = bsplugin.schedule_spec(cfg)
+    return {
+        name: "%s批（%s 生效）" % (
+            name, "、".join("%s - %s" % (s[0], s[1]) for s in segs))
+        for name, segs in zip(names, periods)
+    }
 
 
 class BaseScheduleDialog(QDialog):
@@ -37,10 +53,12 @@ class BaseScheduleDialog(QDialog):
         super().__init__(parent)
         self.cfg = cfg
         self.acc = acc
-        self.bs = bsplugin.normalize(acc.get("base_schedule"))
+        self.batches = appconfig.schedule_batches(cfg)
+        self.batch_labels = _batch_labels(cfg)
+        self.bs = bsplugin.normalize(acc.get("base_schedule"), self.batches)
         self.layout = self.bs["layout"]
         self.data = {
-            b: copy.deepcopy(self.bs["batches"][b]) for b in bsplugin.BATCHES
+            b: copy.deepcopy(self.bs["batches"][b]) for b in self.batches
         }
         self.edit_map = {}
         self.pages = {}
@@ -58,8 +76,8 @@ class BaseScheduleDialog(QDialog):
         top.addWidget(BodyLabel("布局:"))
         self.layout_combo = ComboBox()
         self.layout_combo.addItems([
-            "333 布局（制造3台 · 贸易3台 · 发电3台）",
-            "423 布局（制造4台 · 贸易2台 · 发电3台）",
+            "333 布局（贸易3台 · 制造3台 · 发电3台）",
+            "243 布局（贸易2台 · 制造4台 · 发电3台）",
         ])
         self.layout_combo.currentIndexChanged.connect(self._on_layout_changed)
         self.layout_combo.blockSignals(True)
@@ -69,7 +87,7 @@ class BaseScheduleDialog(QDialog):
         top.addStretch(1)
         top.addWidget(BodyLabel("批次:"))
         self.batch_combo = ComboBox()
-        self.batch_combo.addItems([BATCH_LABELS[b] for b in bsplugin.BATCHES])
+        self.batch_combo.addItems([self.batch_labels[b] for b in self.batches])
         self.batch_combo.currentIndexChanged.connect(self._on_batch_changed)
         top.addWidget(self.batch_combo)
         root.addLayout(top)
@@ -80,7 +98,7 @@ class BaseScheduleDialog(QDialog):
         root.addWidget(self.hint)
 
         self.stack = QStackedWidget()
-        for i, b in enumerate(bsplugin.BATCHES):
+        for i, b in enumerate(self.batches):
             page = self._build_page(b)
             self.stack.addWidget(page)
             self.pages[b] = page
@@ -103,15 +121,18 @@ class BaseScheduleDialog(QDialog):
 
     def _refresh_hint(self):
         if self.bs.get("enabled"):
-            head = "该账号已启用精确基建：运行时按下面两批计划让 MAA 精确派驻干员。"
+            head = "该账号已启用精确基建：运行时按下面各批次计划让 MAA 精确派驻干员。"
         else:
             head = "该账号当前未启用：请在账号列表打开「精确基建」开关后才会生效，否则仍使用 MAA 自带基建换班。"
-        head += " 批次按本次运行时间绑定：4点班（04:00–16:00 启动）用 4点批，"
-        "16点班（16:00–次日 04:00 启动）用 16点批。"
+        head += (" 批次随启动时间自动划分：本次运行发生在哪个时间点之后，"
+                 "就使用对应批次（如 8点/12点/24点）。")
         self.hint.setText(
-            head + " 干员名需与游戏内名称一致（MAA 靠截图识别干员）；"
-            "某一项全部留空时 MAA 会自动按默认算法补满；"
-            "只填了部分时，剩余位置会保持空着（MAA 不会自动补位）。")
+            head + " 制造站/贸易站每台先选产品类别（制造：赤金/原石碎片/作战记录；"
+            "贸易：赤金/原石碎片订单），MAA 应用计划时会按类别匹配游戏内对应设施"
+            "并设置配方。干员休整（宿舍）：填入的干员放入，剩余空位自动补满"
+            "（全部留空也自动安排）。其他设施：全部留空时 MAA 自动补满；"
+            "只填了部分时，剩余位置保持空着（MAA 自定义模式不支持自动补位）。"
+            "干员名需与游戏内名称一致（MAA 靠截图识别干员）。")
 
     @staticmethod
     def _make_edits(values, placeholders):
@@ -145,11 +166,31 @@ class BaseScheduleDialog(QDialog):
         card.vbox.addLayout(grid)
         return card
 
+    def _station_card(self, title, stations):
+        """制造站/贸易站卡片：每行 = 站号 + 产品下拉框 + 3 个干员输入框。"""
+        card = Card(title)
+        grid = QGridLayout()
+        grid.setContentsMargins(0, 0, 0, 0)
+        grid.setHorizontalSpacing(10)
+        grid.setVerticalSpacing(8)
+        for r, st in enumerate(stations):
+            lab = BodyLabel("%d号站" % (r + 1))
+            lab.setFixedWidth(52)
+            lab.setStyleSheet("color: %s; font-size: 12px;" % theme.TEXT_2)
+            grid.addWidget(lab, r, 0, Qt.AlignmentFlag.AlignVCenter)
+            st["combo"].setMinimumWidth(150)
+            grid.addWidget(st["combo"], r, 1, Qt.AlignmentFlag.AlignVCenter)
+            for c, e in enumerate(st["edits"]):
+                grid.addWidget(e, r, 2 + c)
+        grid.setColumnStretch(5, 1)
+        card.vbox.addLayout(grid)
+        return card
+
     def _build_page(self, batch):
         data = self.data[batch]
         em = {}
-        m = 4 if self.layout == "423" else 3
-        t = 2 if self.layout == "423" else 3
+        m = 4 if self.layout in ("423", "243") else 3
+        t = 2 if self.layout in ("423", "243") else 3
 
         control = self._make_edits(
             data["control"], ["干员 1", "干员 2", "干员 3", "干员 4", "干员 5"])
@@ -157,14 +198,20 @@ class BaseScheduleDialog(QDialog):
         office = self._make_edits(data["office"], ["干员 1"])
         processing = self._make_edits(data["processing"], ["干员 1"])
         manufacture = [
-            self._make_edits(row, ["干员 1", "干员 2", "干员 3"])
-            for row in self._take(data["manufacture"], m, 3)
+            self._make_station(row, MANUFACTURE_OPTIONS)
+            for row in self._take(data["manufacture"], m, 3,
+                                  bsplugin.DEFAULT_MANUFACTURE_PRODUCT)
         ]
         trading = [
-            self._make_edits(row, ["干员 1", "干员 2", "干员 3"])
-            for row in self._take(data["trading"], t, 3)
+            self._make_station(row, TRADING_OPTIONS)
+            for row in self._take(data["trading"], t, 3,
+                                  bsplugin.DEFAULT_TRADING_PRODUCT)
         ]
         power = [self._make_edits(row, ["干员"]) for row in data["power"]]
+        dormitory = [
+            self._make_edits(row, ["干员 1", "干员 2", "干员 3", "干员 4", "干员 5"])
+            for row in self._pad_rows(data.get("dormitory", []), 4, 5)
+        ]
 
         em["control"] = [control]
         em["meeting"] = [meeting]
@@ -173,6 +220,7 @@ class BaseScheduleDialog(QDialog):
         em["manufacture"] = manufacture
         em["trading"] = trading
         em["power"] = power
+        em["dormitory"] = dormitory
         self.edit_map[batch] = em
 
         scroll = QScrollArea()
@@ -184,15 +232,18 @@ class BaseScheduleDialog(QDialog):
 
         v.addWidget(self._facility_card("控制中枢（5 人）", [("", control)]))
         v.addWidget(self._facility_card("会客室（2 人）", [("", meeting)]))
-        v.addWidget(self._facility_card(
-            "制造站（3 人 / 台，共 %d 台）" % len(manufacture),
-            [("%d号站" % (i + 1), row) for i, row in enumerate(manufacture)]))
-        v.addWidget(self._facility_card(
+        v.addWidget(self._station_card(
             "贸易站（3 人 / 台，共 %d 台）" % len(trading),
-            [("%d号站" % (i + 1), row) for i, row in enumerate(trading)]))
+            trading))
+        v.addWidget(self._station_card(
+            "制造站（3 人 / 台，共 %d 台）" % len(manufacture),
+            manufacture))
         v.addWidget(self._facility_card(
             "发电站（1 人 / 台，共 %d 台）" % len(power),
             [("%d号站" % (i + 1), row) for i, row in enumerate(power)]))
+        v.addWidget(self._facility_card(
+            "干员休整（宿舍，5 人 / 间，共 %d 间，留空自动安排）" % len(dormitory),
+            [("宿舍 %d" % (i + 1), row) for i, row in enumerate(dormitory)]))
         v.addWidget(self._facility_card("办公室（1 人）", [("", office)]))
         v.addWidget(self._facility_card(
             "加工站（1 人，可留空）",
@@ -209,14 +260,14 @@ class BaseScheduleDialog(QDialog):
         self.stack.setCurrentIndex(index)
 
     def _on_layout_changed(self, index):
-        self.layout = "423" if index == 1 else "333"
-        for b in bsplugin.BATCHES:
+        self.layout = "243" if index == 1 else "333"
+        for b in self.batches:
             self._capture(b)
         self._rebuild_pages()
         self._refresh_hint()
 
     def _rebuild_pages(self):
-        for i, b in enumerate(bsplugin.BATCHES):
+        for i, b in enumerate(self.batches):
             old = self.pages.pop(b)
             self.stack.removeWidget(old)
             old.deleteLater()
@@ -225,16 +276,56 @@ class BaseScheduleDialog(QDialog):
             self.pages[b] = page
         self.stack.setCurrentIndex(self.batch_combo.currentIndex())
 
+    def _make_station(self, row, options):
+        """一行制造/贸易站：产品下拉框 + 干员输入框。"""
+        combo = ComboBox()
+        for text, data in options:
+            combo.addItem(text, userData=data)
+        idx = combo.findData(row.get("product"))
+        combo.setCurrentIndex(idx if idx >= 0 else 0)
+        edits = self._make_edits(row.get("operators", []), ["干员 1", "干员 2", "干员 3"])
+        return {"combo": combo, "edits": edits}
+
     @staticmethod
-    def _take(rows, count, inner):
-        """取前 count 行展示，不足补齐空槽位（多余数据保留在 self.data 中）。"""
+    def _pad_rows(rows, count, inner):
+        """取前 count 行、每行补到 inner 个元素；不足补空列表。"""
         out = []
         for i in range(count):
             row = rows[i] if i < len(rows) else []
             if not isinstance(row, list):
                 row = []
+            row = [str(x) for x in row]
             out.append((row + [""] * inner)[:inner])
         return out
+
+    @staticmethod
+    def _take(rows, count, inner, default_product):
+        """取前 count 台展示，不足补齐空槽位（多余数据保留在 self.data 中）。"""
+        out = []
+        for i in range(count):
+            item = rows[i] if i < len(rows) else {}
+            if isinstance(item, list):  # 旧格式兼容
+                item = {"product": default_product, "operators": item}
+            if not isinstance(item, dict):
+                item = {}
+            ops = item.get("operators")
+            if not isinstance(ops, list):
+                ops = []
+            ops = [str(x) for x in ops]
+            out.append({
+                "product": item.get("product") or default_product,
+                "operators": (ops + [""] * inner)[:inner],
+            })
+        return out
+
+    @staticmethod
+    def _capture_stations(em_key):
+        """从界面控件读回制造/贸易站：{product, operators}。"""
+        return [
+            {"product": st["combo"].currentData(),
+             "operators": [e.text().strip() for e in st["edits"]]}
+            for st in em_key
+        ]
 
     def _capture(self, batch):
         em = self.edit_map[batch]
@@ -244,22 +335,23 @@ class BaseScheduleDialog(QDialog):
         self.data[batch]["processing"] = [e.text().strip() for e in em["processing"][0]]
         self.data[batch]["power"] = [
             [e.text().strip() for e in row] for row in em["power"]]
+        self.data[batch]["dormitory"] = [
+            [e.text().strip() for e in row] for row in em["dormitory"]]
         for key in ("manufacture", "trading"):
-            shown = [
-                [e.text().strip() for e in row] for row in em[key]]
+            shown = self._capture_stations(em[key])
             old = self.data[batch][key]
             surplus = old[len(shown):] if isinstance(old, list) else []
             self.data[batch][key] = shown + list(surplus)
 
     def _on_save(self):
-        for b in bsplugin.BATCHES:
+        for b in self.batches:
             self._capture(b)
         bs = {
             "enabled": bool(self.bs.get("enabled")),
             "layout": self.layout,
             "batches": self.data,
         }
-        bs = bsplugin.normalize(bs)
+        bs = bsplugin.normalize(bs, self.batches)
         self.acc["base_schedule"] = bs
         appconfig.save(self.cfg)
         try:
@@ -280,9 +372,10 @@ def show_base_schedule_dialog(cfg, acc, parent=None):
     """打开配置弹窗；成功后返回 True，供账号行显示提示。"""
     dlg = BaseScheduleDialog(cfg, acc, parent=parent)
     if dlg.exec():
+        names = bsplugin.schedule_spec(cfg)[1]
         InfoBar.success(
             "基建计划已保存",
-            "运行该账号时将按 4点/16点 两批精确派驻干员",
+            "运行该账号时将按 %s 各批精确派驻干员" % "、".join(names),
             parent=parent.window() if parent is not None else None,
             position=InfoBarPosition.TOP_RIGHT, duration=4000)
         return True

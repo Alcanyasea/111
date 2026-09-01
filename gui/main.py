@@ -62,10 +62,16 @@ class HeaderBar(QWidget):
         lay.addWidget(self.detail)
         lay.addStretch(1)
         self.stop_btn = PushButton("✕ 停止")
+        self.stop_btn.setToolTip(
+            "停止当前挂机（结束 master.ps1 与 MAA 进程），\n"
+            "并取消已排定的自动关机。空闲时不可用。")
         self.stop_btn.setStyleSheet(
             "PushButton { color: %s; border: 1px solid #e5b7b1; background: #fff; }"
             "PushButton:hover { background: %s; }" % (theme.ERR, theme.ERR_TINT))
         self.run_btn = PrimaryPushButton("▶ 立即运行")
+        self.run_btn.setToolTip(
+            "手动运行一次完整挂机流程（启动模拟器 → 切号 → 跑 MAA → 关模拟器）。\n"
+            "手动运行即使成功也不会自动关机。")
         lay.addWidget(self.stop_btn)
         lay.addWidget(self.run_btn)
 
@@ -105,9 +111,6 @@ class MainWindow(FluentWindow):
         self.accounts_p = AccountsPage(self.cfg)
         self.settings_p = SettingsPage(self.cfg)
         self.logs_p = LogsPage(self.cfg)
-        # 仪表盘班次卡片与运行设置页互相同步「关机」开关
-        self.dash.schedule_card.settings_page = self.settings_p
-        self.settings_p.dash_schedule = self.dash.schedule_card
         self.dash.setObjectName("dashboard")
         self.accounts_p.setObjectName("accounts")
         self.settings_p.setObjectName("settings")

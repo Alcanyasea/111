@@ -48,13 +48,17 @@
                      "morning_shutdown":  true
                  },
     "schedule":  {
-                     "morning":  {
-                                     "time":  "04:00",
-                                     "enabled":  true
-                                 },
-                     "evening":  {
-                                     "time":  "16:00",
-                                     "enabled":  true
-                                 }
+                     "times":  [
+                                  {
+                                      "time":  "04:00",
+                                      "enabled":  true,
+                                      "shutdown":  true
+                                  },
+                                  {
+                                      "time":  "16:00",
+                                      "enabled":  true,
+                                      "shutdown":  false
+                                  }
+                              ]
                  }
 }

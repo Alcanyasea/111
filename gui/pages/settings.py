@@ -77,10 +77,12 @@ class SettingsPage(ScrollArea):
         self.behavior_card = Card("行为开关")
         self.close_emu_sw = SwitchButton()
         self._card_row(self.behavior_card, "完成后关模拟器", self.close_emu_sw)
-        self.shutdown_sw = SwitchButton()
-        self._card_row(self.behavior_card, "早班成功后关机", self.shutdown_sw, "60 秒倒计时")
-        self.evening_shutdown_sw = SwitchButton()
-        self._card_row(self.behavior_card, "晚班成功后关机", self.evening_shutdown_sw, "60 秒倒计时")
+        shutdown_hint = BodyLabel(
+            "每个启动时间的「关机」开关在仪表盘「班次计划」中设置（60 秒倒计时）")
+        shutdown_hint.setStyleSheet("color: %s; font-size: 12px;" % theme.TEXT_3)
+        shutdown_hint.setWordWrap(True)
+        self.behavior_card.vbox.addWidget(shutdown_hint)
+        self.behavior_card.vbox.addSpacing(10)
         acc_hint = BodyLabel("账号增删 / 启用 / 捕获请到「账号管理」页")
         acc_hint.setStyleSheet("color: %s; font-size: 12px;" % theme.TEXT_3)
         self.behavior_card.vbox.addWidget(acc_hint)
@@ -173,8 +175,6 @@ class SettingsPage(ScrollArea):
         self.maa_spin.setValue(int(source["timeouts"].get("maa_min", 30)))
         self.launch_spin.setValue(int(source["timeouts"].get("launch_wait_sec", 120)))
         self.close_emu_sw.setChecked(bool(source["behavior"].get("close_emulator", True)))
-        self.shutdown_sw.setChecked(bool(source["behavior"].get("morning_shutdown", True)))
-        self.evening_shutdown_sw.setChecked(bool(source["behavior"].get("evening_shutdown", False)))
         c = source.get("cleanup") or {}
         self.clean_auto_sw.setChecked(bool(c.get("auto", True)))
         self.clean_interval.setValue(int(c.get("interval_days", 7)))
@@ -198,16 +198,11 @@ class SettingsPage(ScrollArea):
         self.cfg["timeouts"]["maa_min"] = self.maa_spin.value()
         self.cfg["timeouts"]["launch_wait_sec"] = self.launch_spin.value()
         self.cfg["behavior"]["close_emulator"] = self.close_emu_sw.isChecked()
-        self.cfg["behavior"]["morning_shutdown"] = self.shutdown_sw.isChecked()
-        self.cfg["behavior"]["evening_shutdown"] = self.evening_shutdown_sw.isChecked()
         c = self.cfg.setdefault("cleanup", {})
         c["auto"] = self.clean_auto_sw.isChecked()
         c["interval_days"] = self.clean_interval.value()
 
         appconfig.save(self.cfg)
-        ds = getattr(self, "dash_schedule", None)
-        if ds is not None:
-            ds.refresh_from_cfg()  # 同步仪表盘班次卡片的关机开关与提示
         ok, msg = scheduler.apply(self.cfg)
         if ok:
             InfoBar.success("配置已保存", "计划任务已同步更新",

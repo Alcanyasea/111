@@ -196,8 +196,9 @@ class CaptureDialog(QDialog):
         self._append_log(">>> 开始捕获：%s（%s）槽位 %s" % (label, SERVER_LABELS[server], self._slot))
         self._append_log(">>> 正在启动捕获脚本...")
         self.hint_label.setText(
-            "捕获进行中：清空登录态 → 重启游戏 → 点掉弹窗 → 输入账号密码 → 拉取数据。"
-            "特殊字符密码或验证码时请留意提示，在模拟器窗口手动登录。")
+            "捕获进行中：自动启动模拟器（如未运行）→ 清空登录态 → 重启游戏 → "
+            "点掉弹窗 → 输入账号密码 → 拉取数据。特殊字符密码或验证码时请留意提示，"
+            "在模拟器窗口手动登录。")
         self.hint_label.setStyleSheet("color: %s; font-size: 12px;" % theme.TEXT_3)
 
         self.worker = CaptureWorker(args, parent=self)
@@ -232,7 +233,8 @@ class CaptureDialog(QDialog):
             "slot": self._slot,
             "username": self.user_edit.text().strip(),
             "password": self.pass_edit.text(),
-            "base_schedule": appconfig.default_base_schedule(),
+            "base_schedule": appconfig.default_base_schedule(
+                batches=appconfig.schedule_batches(self.cfg)),
         }
         if self.acc is not None:
             self.acc.update(entry)
@@ -288,7 +290,7 @@ class AccountRow(Card):
         self.base_sw.checkedChanged.connect(self._on_base_toggle)
         row.addWidget(self.base_sw)
         self.base_btn = PushButton("基建")
-        self.base_btn.setToolTip("精确选择各设施进驻干员（4点/16点两批，支持333/423布局）")
+        self.base_btn.setToolTip("精确选择各设施进驻干员（批次随启动时间，支持333/243布局）")
         self.base_btn.clicked.connect(self._on_base_config)
         row.addWidget(self.base_btn)
         self.sw = SwitchButton()
@@ -321,7 +323,8 @@ class AccountRow(Card):
     def _on_base_toggle(self, checked):
         bs = self.acc.get("base_schedule")
         if not isinstance(bs, dict):
-            bs = appconfig.default_base_schedule()
+            bs = appconfig.default_base_schedule(
+                batches=appconfig.schedule_batches(self.cfg))
             self.acc["base_schedule"] = bs
         bs["enabled"] = bool(checked)
         appconfig.save(self.cfg)
