@@ -125,6 +125,26 @@ function Get-DeviceUid($ppName) {
     return $uid
 }
 
+function Ensure-InfraGuideViewed($ppPath) {
+    # 基建「建筑管理」引导标记：新账号首次进基建会弹引导
+    # （key_GB_viewed#BUILDING_STATION_MANAGE），缺失时每次进基建都重弹。
+    # 这里在槽位 playerprefs 上补写该标记（与游戏自身写入一致），保证
+    # 切号/MAA 运行不再出现首次提示。返回 $true 表示已确保存在。
+    if (-not (Test-Path $ppPath)) { return $false }
+    try {
+        $xml = [System.IO.File]::ReadAllText($ppPath, [System.Text.Encoding]::UTF8)
+        if ($xml.Contains('key_GB_viewed%23BUILDING_STATION_MANAGE')) { return $true }
+        $m = [regex]::Match($xml, 'name="u8sdk_cached_uid">([0-9]+)')
+        if (-not $m.Success) { return $false }
+        $key = $m.Groups[1].Value + '%23key_GB_viewed%23BUILDING_STATION_MANAGE'
+        $marker = '<int name="' + $key + '" value="1" />'
+        if (-not $xml.Contains('</map>')) { return $false }
+        $xml = $xml.Replace('</map>', $marker + "`n</map>")
+        [System.IO.File]::WriteAllText($ppPath, $xml, (New-Object System.Text.UTF8Encoding($false)))
+        return $true
+    } catch { return $false }
+}
+
 function Update-SlotData([bool]$ExpectVoiceKeys) {
     # 已确认登录后，把设备上最新的登录数据拉回槽位（镜像设备相对路径）：
     # - 首次启动配音弹窗处理完，游戏会写入 KEY_GLOBAL_VOICE_LANG / KEY_VOICE_LANG_PREF_DONTCG；
@@ -168,6 +188,8 @@ function Update-SlotData([bool]$ExpectVoiceKeys) {
     # lc.cache 是可选缓存：登录后游戏可能还没写它（首次启动实测 zx 目录下无此文件）
     & $adb -s $device pull "/data/data/$pkg/files/zx/lc.cache" (Join-Path $dstFiles "lc.cache") 2>$null | Out-Null
     if (-not (Test-Path (Join-Path $dstFiles "lc.cache"))) { LogLine "WARN: 设备暂无 lc.cache（登录后尚未生成，忽略）" }
+    # 基建引导标记：补写进槽位 playerprefs，避免首次进基建弹提示、之后每次都重弹
+    Ensure-InfraGuideViewed (Join-Path $dstShared $pp) | Out-Null
     $devUid | Out-File $uidFile -Encoding ascii -NoNewline
     LogLine ("[slot] 槽位数据已刷新（uid={0}）" -f $devUid)
     return $true

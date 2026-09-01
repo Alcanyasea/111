@@ -144,6 +144,26 @@ function Get-PlayerPrefsName {
     return ($name -replace '\s+','')
 }
 
+function Ensure-InfraGuideViewed($ppPath) {
+    # 基建「建筑管理」引导标记：新账号首次进基建会弹引导
+    # （key_GB_viewed#BUILDING_STATION_MANAGE），缺失时每次进基建都重弹。
+    # 这里在槽位 playerprefs 上补写该标记（与游戏自身写入一致），保证
+    # 切号/MAA 运行不再出现首次提示。返回 $true 表示已确保存在。
+    if (-not (Test-Path $ppPath)) { return $false }
+    try {
+        $xml = [System.IO.File]::ReadAllText($ppPath, [System.Text.Encoding]::UTF8)
+        if ($xml.Contains('key_GB_viewed%23BUILDING_STATION_MANAGE')) { return $true }
+        $m = [regex]::Match($xml, 'name="u8sdk_cached_uid">([0-9]+)')
+        if (-not $m.Success) { return $false }
+        $key = $m.Groups[1].Value + '%23key_GB_viewed%23BUILDING_STATION_MANAGE'
+        $marker = '<int name="' + $key + '" value="1" />'
+        if (-not $xml.Contains('</map>')) { return $false }
+        $xml = $xml.Replace('</map>', $marker + "`n</map>")
+        [System.IO.File]::WriteAllText($ppPath, $xml, (New-Object System.Text.UTF8Encoding($false)))
+        return $true
+    } catch { return $false }
+}
+
 function Write-FileRemote($localPath, $remotePath, $mode) {
     # 推送到设备并修正 owner/权限/上下文
     $uidStr = (& $adb -s $device shell "stat -c %u:%g /data/data/$pkg" 2>$null | Select-Object -First 1)
@@ -502,6 +522,12 @@ New-Item -ItemType Directory -Force $dstShared, $dstFiles | Out-Null
 & $adb -s $device pull "/data/data/$pkg/files/zx/lc.cache" (Join-Path $dstFiles "lc.cache") 2>$null | Out-Null
 if (-not (Test-Path (Join-Path $dstFiles "lc.cache"))) {
     LogLine "WARN: 设备上暂无 lc.cache（登录后尚未生成，属正常现象，忽略）"
+}
+# 基建引导标记：补写进槽位 playerprefs，避免新账号首次进基建弹引导、之后每次都重弹
+if (Ensure-InfraGuideViewed (Join-Path $dstShared $ppName)) {
+    LogLine "已确保基建引导标记写入槽位（首次进基建不再弹提示）"
+} else {
+    LogLine "WARN: 未能补写基建引导标记（槽位数据可能不完整）"
 }
 $uid | Out-File (Join-Path $slotDir "uid.txt") -Encoding ascii -NoNewline
 $label | Out-File (Join-Path $slotDir "label.txt") -Encoding utf8
