@@ -1,5 +1,5 @@
 ﻿# ============================================================
-# 登录校验 v1 — 槽位切号后、MAA 启动前：屏幕级确认游戏已登录
+# 登录校验 v2 — 槽位切号后、MAA 启动前：屏幕级确认游戏已登录
 # 已登录（无登录界面标记）→ 直接放行；检测到登录界面 →
 #   官服：自动输入账号密码登录（凭据取自 config.accounts，不经命令行传递），
 #         成功后校验 uid 与槽位一致并刷新槽位数据（token 续期）
@@ -9,6 +9,9 @@
 # 槽位自刷新：确认已登录后把设备上的最新登录数据拉回槽位（游戏处理完首次启动弹窗
 # 会写入 KEY_GLOBAL_VOICE_LANG / KEY_VOICE_LANG_PREF_DONTCG 等标记），否则下次切号
 # 推送旧槽位数据时，配音选择/首次启动弹窗会每次都重新弹出，卡住 MAA。
+# v2 优化：OCR 引擎全程复用（引擎创建是单次识别最慢的部分）；画面未变化时跳过重复
+# 识别；轮询节奏自适应（动作后 2 秒、有文字 3 秒、纯加载 6 秒）；已过标题的稳定确认
+# 由 4 帧减为 3 帧——成功路径每号可省 10~25 秒，失败路径判定不变。
 # ============================================================
 param(
     [string]$Server = "official",
@@ -184,7 +187,7 @@ LogLine ("=== Login check: {0} (slot: {1}) ===" -f $serverName, $(if ($Slot) { $
 # ---- 阶段 1：轮询屏幕，区分「已登录」与「登录界面」----
 # 判定顺序：验证码（失败）→ 登录标记（进入阶段 2）→ 启动公告弹窗（优先点右上角 X 关闭）→
 # 主界面特征词（已登录放行）→ 首次启动弹窗（配音选择/确认/同意）→
-# 开始唤醒（点击后继续）→ 见过标题后连续 4 张稳定非登录画面（已登录放行）→
+# 开始唤醒（点击后继续）→ 见过标题后连续 3 张稳定非登录画面（已登录放行）→
 # 盲点兜底（中央、右上角公告关闭位交替）。
 # 每轮只做最多一个动作，动作后下一轮必重新截图检测，不会连续盲点。
 # 「已登录」两条路径：主界面特征词（不依赖标题，B服 无标题直接进主界面）；
@@ -200,10 +203,21 @@ $posCount = 0
 $lastActionAt = (Get-Date)
 $lastAnnounceTapAt = (Get-Date).AddSeconds(-60)
 $blindPokeCount = 0
+$lastPngHash = ""
+$lastWords = $null
 $deadline = (Get-Date).AddSeconds($ScreenTimeoutSec)
 while ((Get-Date) -lt $deadline) {
     if (-not (Ocr-Screenshot $adb $device $png)) { Start-Sleep 5; continue }
-    $words = Get-OcrWords $png
+    # 画面与上一轮完全相同（静态加载/弹窗/表单）→ 复用上一轮 OCR 结果，
+    # 跳过最耗时的重复识别；画面一变立即重新识别。
+    $pngHash = (Get-FileHash $png -Algorithm MD5 -ErrorAction SilentlyContinue).Hash
+    if ($pngHash -and ($pngHash -eq $lastPngHash) -and ($null -ne $lastWords)) {
+        $words = $lastWords
+    } else {
+        $words = Get-OcrWords $png
+        $lastPngHash = $pngHash
+        $lastWords = $words
+    }
     $cap = Find-Marker $words $captchaMarkers
     if ($cap) {
         LogLine ("ERROR: 检测到验证码界面（{0}），无人值守无法处理" -f $cap.Name)
@@ -238,7 +252,7 @@ while ((Get-Date) -lt $deadline) {
             Update-SlotData $dialogHandled | Out-Null
             exit 0
         }
-        Start-Sleep 3
+        Start-Sleep 2
         continue
     }
     $posCount = 0
@@ -286,7 +300,7 @@ while ((Get-Date) -lt $deadline) {
     }
     if ((@($words).Count -gt 0) -and $sawTitle) {
         $stableCount++
-        if ($stableCount -ge 4) {
+        if ($stableCount -ge 3) {
             LogLine "[screen] 已过标题且画面稳定无登录界面标记，视为已登录"
             Update-SlotData $dialogHandled | Out-Null
             exit 0
@@ -311,7 +325,9 @@ while ((Get-Date) -lt $deadline) {
         $blindPokeCount++
         $lastActionAt = Get-Date
     }
-    Start-Sleep 4
+    # 轮询节奏自适应：无动作且画面有文字 → 3 秒（弹窗/对白可能变化，保持较快响应）；
+    # 画面完全没有文字（加载/过渡）→ 6 秒（游戏本身需要时间，频繁识别没有收益）
+    if ((@($words).Count -gt 0)) { Start-Sleep 3 } else { Start-Sleep 6 }
 }
 if (-not $reachedLogin) {
     LogLine ("ERROR: {0} 秒内无法确认登录状态" -f $ScreenTimeoutSec)
@@ -397,7 +413,7 @@ $loggedIn = $false
 $stableCount2 = 0
 $deadline5 = (Get-Date).AddSeconds($LoginTimeoutSec)
 while ((Get-Date) -lt $deadline5) {
-    Start-Sleep 6
+    Start-Sleep 5
     if (-not (Ocr-Screenshot $adb $device $png)) { continue }
     $w = Get-OcrWords $png
 

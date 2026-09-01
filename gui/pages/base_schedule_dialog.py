@@ -16,7 +16,8 @@ from PySide6.QtWidgets import (QDialog, QGridLayout, QHBoxLayout,
                                QWidget)
 
 from qfluentwidgets import (BodyLabel, ComboBox, InfoBar, InfoBarPosition,
-                            LineEdit, MessageBox, PrimaryPushButton, PushButton)
+                            LineEdit, MessageBox, PrimaryPushButton, PushButton,
+                            SwitchButton)
 
 import config as appconfig
 import theme
@@ -92,6 +93,37 @@ class BaseScheduleDialog(QDialog):
         top.addWidget(self.batch_combo)
         root.addLayout(top)
 
+        drones_row = QHBoxLayout()
+        drones_row.setSpacing(10)
+        drones_row.addWidget(BodyLabel("无人机:"))
+        self.drones_switch = SwitchButton()
+        self.drones_switch.setText("启用")
+        self.drones_switch.setChecked(bool(self.bs.get("drones", {}).get("enable")))
+        drones_row.addWidget(self.drones_switch)
+        drones_row.addSpacing(8)
+        drones_row.addWidget(BodyLabel("目标"))
+        self.drones_room_combo = ComboBox()
+        self.drones_room_combo.addItem("制造站", userData="manufacture")
+        self.drones_room_combo.addItem("贸易站", userData="trading")
+        room = self.bs.get("drones", {}).get("room", "manufacture")
+        idx = self.drones_room_combo.findData(room)
+        self.drones_room_combo.setCurrentIndex(idx if idx >= 0 else 0)
+        self.drones_room_combo.currentIndexChanged.connect(self._refresh_drones_index)
+        drones_row.addWidget(self.drones_room_combo)
+        self.drones_index_combo = ComboBox()
+        drones_row.addWidget(self.drones_index_combo)
+        drones_row.addWidget(BodyLabel("时机"))
+        self.drones_order_combo = ComboBox()
+        self.drones_order_combo.addItem("换班前投放", userData="pre")
+        self.drones_order_combo.addItem("换班后投放", userData="post")
+        order = self.bs.get("drones", {}).get("order", "pre")
+        oidx = self.drones_order_combo.findData(order)
+        self.drones_order_combo.setCurrentIndex(oidx if oidx >= 0 else 0)
+        drones_row.addWidget(self.drones_order_combo)
+        drones_row.addStretch(1)
+        root.addLayout(drones_row)
+        self._refresh_drones_index()
+
         self.hint = BodyLabel()
         self.hint.setWordWrap(True)
         self.hint.setStyleSheet("color: %s; font-size: 12px;" % theme.TEXT_2)
@@ -132,7 +164,8 @@ class BaseScheduleDialog(QDialog):
             "并设置配方。干员休整（宿舍）：填入的干员放入，剩余空位自动补满"
             "（全部留空也自动安排）。其他设施：全部留空时 MAA 自动补满；"
             "只填了部分时，剩余位置保持空着（MAA 自定义模式不支持自动补位）。"
-            "干员名需与游戏内名称一致（MAA 靠截图识别干员）。")
+            "干员名需与游戏内名称一致（MAA 靠截图识别干员）。"
+            "无人机：顶部开启后，每个班次换班时都会按设置向目标站台投放无人机。")
 
     @staticmethod
     def _make_edits(values, placeholders):
@@ -259,11 +292,30 @@ class BaseScheduleDialog(QDialog):
     def _on_batch_changed(self, index):
         self.stack.setCurrentIndex(index)
 
+    def _refresh_drones_index(self, *_):
+        """按目标设施与布局刷新无人机站号下拉（制造 3/4 台，贸易 2/3 台）。"""
+        room = self.drones_room_combo.currentData()
+        if room == "trading":
+            n = 2 if self.layout in ("423", "243") else 3
+        else:
+            n = 4 if self.layout in ("423", "243") else 3
+        cur = self.drones_index_combo.currentData()
+        self.drones_index_combo.blockSignals(True)
+        self.drones_index_combo.clear()
+        for i in range(1, n + 1):
+            self.drones_index_combo.addItem("%d号站" % i, userData=i)
+        if cur is not None:
+            idx = self.drones_index_combo.findData(cur)
+            if idx >= 0:
+                self.drones_index_combo.setCurrentIndex(idx)
+        self.drones_index_combo.blockSignals(False)
+
     def _on_layout_changed(self, index):
         self.layout = "243" if index == 1 else "333"
         for b in self.batches:
             self._capture(b)
         self._rebuild_pages()
+        self._refresh_drones_index()
         self._refresh_hint()
 
     def _rebuild_pages(self):
@@ -349,6 +401,12 @@ class BaseScheduleDialog(QDialog):
         bs = {
             "enabled": bool(self.bs.get("enabled")),
             "layout": self.layout,
+            "drones": {
+                "room": self.drones_room_combo.currentData(),
+                "index": int(self.drones_index_combo.currentData() or 1),
+                "enable": self.drones_switch.isChecked(),
+                "order": self.drones_order_combo.currentData(),
+            },
             "batches": self.data,
         }
         bs = bsplugin.normalize(bs, self.batches)

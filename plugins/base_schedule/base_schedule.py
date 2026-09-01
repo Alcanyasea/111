@@ -24,6 +24,17 @@ r"""精确基建派驻插件（MAA 自定义基建计划生成 + 配置切换）
     24点批 period = 00:00 - 07:59
 MAA 的 PlanSelect=-1 时，GUI 会按当前时间落在哪个 period 区间自动选计划。
 
+无人机：由 base_schedule.drones 配置（目标设施 manufacture/trading、站号 1 起、
+是否启用、时机 pre/post），写入每个批次计划的 drones 字段，MAA 在自定义模式下
+按该字段在换班前/后投放无人机（GUI 的「无人机用途」下拉只对 MAA 自带 Rotation
+模式生效，自定义模式必须写在计划 JSON 里）。
+
+宿舍：填入的干员放入对应宿舍，剩余空位由 MAA 自动补满（autofill=true，全留空
+也自动安排）。与 MAA 官方排班一致：指定了干员的房间 sort=true（保证进驻顺序、
+避免暖机技能重排），全空房间 sort=false。MAA 按宿舍 1→4 顺序处理且 autofill
+会先消耗可用干员，因此生成计划时会把指定了干员的宿舍排在前面、空宿舍排在后面，
+避免前面的空宿舍提前把后面指定宿舍要用的干员选走。
+
 用法（由 master.ps1 / 控制台调用）：
     python base_schedule.py apply   --config D:\1\config.json --account official1
     python base_schedule.py generate --config D:\1\config.json --account official1
@@ -134,6 +145,12 @@ def default_base_schedule(layout="333"):
     return {
         "enabled": False,
         "layout": layout,
+        "drones": {
+            "room": "manufacture",
+            "index": 1,
+            "enable": False,
+            "order": "pre",
+        },
         "batches": {b: default_batch(layout) for b in BATCHES},
     }
 
@@ -152,6 +169,29 @@ def normalize(bs, batches=None):
     t = 2 if layout == "243" else 3
     batches_src = bs.get("batches") if isinstance(bs.get("batches"), dict) else {}
     out = {"enabled": bool(bs.get("enabled")), "layout": layout, "batches": {}}
+
+    # 无人机（全局，作用于每个批次）：目标制造站/贸易站、站号（1 起）、启用、时机
+    drones = bs.get("drones")
+    if not isinstance(drones, dict):
+        drones = {}
+    room = str(drones.get("room") or "manufacture")
+    if room not in ("manufacture", "trading"):
+        room = "manufacture"
+    order = str(drones.get("order") or "pre")
+    if order not in ("pre", "post"):
+        order = "pre"
+    try:
+        index = int(drones.get("index") or 1)
+    except (TypeError, ValueError):
+        index = 1
+    if index < 1:
+        index = 1
+    out["drones"] = {
+        "room": room,
+        "index": index,
+        "enable": bool(drones.get("enable")),
+        "order": order,
+    }
 
     def single(src, key, n):
         v = src.get(key)
@@ -238,9 +278,14 @@ def _dorm(ops):
     MAA 核心只有宿舍任务消费 autofill 字段（InfrastDormTask 在 autofill=true
     时调用 fill_dorm_slots 补满空位）；生产设施指定干员后走自定义名单路径，
     autofill 不生效，剩余位置保持空着。
+
+    与 MAA 官方排班一致：指定了干员的房间用 sort=true（保证进驻顺序，避免暖机
+    技能重排），全空房间用 sort=false。MAA 按宿舍 1→4 顺序处理且 autofill 会
+    先消耗可用干员，所以指定干员的宿舍要排在空宿舍前面（build_plan_document
+    里已重排），否则前面的空宿舍可能提前把指定干员选走，导致宿舍补不满。
     """
     ops = [o for o in ops if o and o.strip()]
-    return {"skip": False, "operators": ops, "sort": True, "autofill": True}
+    return {"skip": False, "operators": ops, "sort": bool(ops), "autofill": True}
 
 
 def build_plan_document(bs, entries=None, title="自定义基建",
@@ -261,7 +306,11 @@ def build_plan_document(bs, entries=None, title="自定义基建",
     plans = []
     for name, period in zip(names, periods):
         b = bs["batches"][name]
-        plans.append({
+        dorms = [_dorm(room) for room in b["dormitory"]]
+        # MAA 按宿舍 1→4 顺序处理：指定了干员的宿舍放前面、空宿舍放后面，
+        # 避免前面的空宿舍自动补位时提前选走后面指定宿舍要用的干员。
+        dorms.sort(key=lambda d: 0 if d["operators"] else 1)
+        plan = {
             "name": name + "批",
             "period": period,
             "rooms": {
@@ -276,9 +325,18 @@ def build_plan_document(bs, entries=None, title="自定义基建",
                 # 加工站：留空时 MAA 会跳过，不会自动派干员（自定义模式限制）
                 "processing": [_entry(b["processing"])],
                 # 干员休整（宿舍）：可指定干员，空位自动补；全留空则 MAA 默认算法安排
-                "dormitory": [_dorm(room) for room in b["dormitory"]],
+                "dormitory": dorms,
             },
-        })
+        }
+        drones = bs.get("drones") or {}
+        if drones.get("enable"):
+            plan["drones"] = {
+                "room": drones.get("room") or "manufacture",
+                "index": int(drones.get("index") or 1),
+                "enable": True,
+                "order": drones.get("order") or "pre",
+            }
+        plans.append(plan)
     return {
         "author": "MAA 挂机控制台",
         "title": title,

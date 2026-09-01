@@ -12,6 +12,8 @@ Add-Type -AssemblyName System.Runtime.WindowsRuntime
 $script:asTaskGeneric = ([System.WindowsRuntimeSystemExtensions].GetMethods() | Where-Object {
     $_.Name -eq 'AsTask' -and $_.GetParameters().Count -eq 1 -and $_.GetParameters()[0].ParameterType.Name -eq 'IAsyncOperation`1'
 })[0]
+# OCR 引擎创建很慢（WinRT 语言包初始化），全程只建一次，大幅降低每轮截图识别耗时
+$script:ocrEngine = $null
 
 function Await-WinRt($WinRtTask, $ResultType) {
     $asTask = $script:asTaskGeneric.MakeGenericMethod($ResultType)
@@ -28,8 +30,10 @@ function Get-OcrResult($path) {
     $stream = Await-WinRt ($file.OpenAsync([Windows.Storage.FileAccessMode]::Read)) ([Windows.Storage.Streams.IRandomAccessStream])
     $decoder = Await-WinRt ([Windows.Graphics.Imaging.BitmapDecoder]::CreateAsync($stream)) ([Windows.Graphics.Imaging.BitmapDecoder])
     $bmp = Await-WinRt ($decoder.GetSoftwareBitmapAsync()) ([Windows.Graphics.Imaging.SoftwareBitmap])
-    $engine = [Windows.Media.Ocr.OcrEngine]::TryCreateFromUserProfileLanguages()
-    return Await-WinRt ($engine.RecognizeAsync($bmp)) ([Windows.Media.Ocr.OcrResult])
+    if ($null -eq $script:ocrEngine) {
+        $script:ocrEngine = [Windows.Media.Ocr.OcrEngine]::TryCreateFromUserProfileLanguages()
+    }
+    return Await-WinRt ($script:ocrEngine.RecognizeAsync($bmp)) ([Windows.Media.Ocr.OcrResult])
 }
 
 function Get-OcrWords($path) {

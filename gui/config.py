@@ -57,6 +57,9 @@ def default_base_schedule(layout="333", batches=None):
         dormitory  干员休整宿舍 5 人/间（二维列表，固定 4 间，留空自动安排）
         office     办公室  1 人（列表）
         processing 加工站  1 人（列表，可选；留空时 MAA 在自定义模式下跳过加工站）
+    drones      无人机（全局，每个批次都投放）：
+        {room: manufacture/trading, index: 站号 1 起,
+         enable: 是否启用, order: pre 换班前/post 换班后}
     """
     m = 4 if layout in ("423", "243") else 3
     t = 2 if layout in ("423", "243") else 3
@@ -80,6 +83,12 @@ def default_base_schedule(layout="333", batches=None):
     return {
         "enabled": False,
         "layout": layout,
+        "drones": {
+            "room": "manufacture",
+            "index": 1,
+            "enable": False,
+            "order": "pre",
+        },
         "batches": {b: batch() for b in batches},
     }
 
