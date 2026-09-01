@@ -319,3 +319,21 @@ A: 这是「基建站管理」的首次引导弹窗，同样是因为槽位数�
 
 **Q: 如何手动切回官服？**
 A: 运行 `D:\1\scripts\switch_to_官服.ps1`
+
+## 构建安装包（可选）
+
+仓库附带自解压安装包构建脚本（7-Zip SFX：引导程序 + 压缩的项目文件 +
+`setup.bat` → `install.ps1` 安装逻辑）。安装包只包含程序文件，不包含 MuMu/MAA
+和 Python 虚拟环境（安装时自动创建并装依赖）。
+
+- 本地构建：
+  ```powershell
+  powershell -ExecutionPolicy Bypass -File build\build_installer.ps1
+  ```
+  版本号默认取最近的 git 标签（如 `v1.1.3` → `1.1.3`），也可 `-Version 1.1.3`
+  指定。首次运行会自动引导 7-Zip（无需管理员：官方 MSI 用 `msiexec /a` 解压到
+  `build\tools`，自解压模块 7zS.sfx 从官方 Extra 包下载）。产物在
+  `build\dist\MAA-Farm-Console-v<版本>-Setup.exe`。
+- 自动构建（推荐）：推送 `v*.*.*` 标签后，GitHub Actions（`.github/workflows/release.yml`）
+  会在 Windows 构建机上自动打包，并把 `Setup.exe` 挂到对应 Release；也可在
+  Actions 页手动触发（workflow_dispatch，填要挂载的标签名）。

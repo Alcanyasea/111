@@ -26,3 +26,7 @@ scripts/master.lock
 
 # Generated base schedule plan files
 plugins/base_schedule/plans/
+
+# Installer build cache and output
+build/tools/
+build/dist/
