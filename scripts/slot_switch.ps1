@@ -4,6 +4,10 @@
 #   shared_prefs\<包名>.v2.playerprefs.xml + HypergryphSdkPreferences.xml
 #   files\zx\lc.cache
 # 需要 adb root（MuMu 12 自带），推送后修正 owner/permission/SELinux 上下文。
+# 容错：shared_prefs（登录态核心）推送失败才判失败；files/lc.cache 是可选的
+# 登录缓存，失败只告警不中断；每个文件重试一次，重试前重新读取设备 uid/上下文
+# （模拟器刚启动时 SELinux 上下文可能未带齐分类后缀），并先建好 /data/local/tmp
+# 暂存目录（模拟器重启会清空该目录）。
 # 用法：slot_switch.ps1 -Server official -Slot official_2 [-WaitSec 25] [-NoVerify]
 #   -Server: official | bilibili
 #   -Slot:   槽位目录名；目录不存在时仅做客户端切换（不推数据）
@@ -76,22 +80,47 @@ if ($slotDir -and (Test-Path $slotDir)) {
     $files = Get-ChildItem $slotDir -Recurse -File | Where-Object {
         $_.FullName.Substring($slotDir.Length + 1) -match '^(shared_prefs|files)[\\/]'
     }
+    $pushed = 0
     foreach ($f in $files) {
         $rel = $f.FullName.Substring($slotDir.Length + 1) -replace '\\','/'
+        # shared_prefs 是登录态核心（推送失败判账号失败）；files 下（lc.cache）
+        # 是可选的登录缓存，失败只告警不中断——捕获/刷新流程同样容忍其缺失。
+        $core = $rel -like "shared_prefs/*"
         $remoteTmp = "/data/local/tmp/ark_switch/" + $rel
         $remoteDst = "/data/data/$pkg/" + $rel
         $remoteDir = Split-Path $remoteDst
         # 权限：shared_prefs 660，files 下 600（与游戏自身写入一致）
-        $mode = if ($rel -like "shared_prefs/*") { "660" } else { "600" }
-        & $adb -s $device push $f.FullName $remoteTmp 2>$null | Out-Null
-        & $adb -s $device shell "mkdir -p $remoteDir; cp $remoteTmp $remoteDst; chown $uidStr $remoteDst; chmod $mode $remoteDst; chcon $ctx $remoteDst" 2>$null | Out-Null
-        if ($LASTEXITCODE -ne 0) {
+        $mode = if ($core) { "660" } else { "600" }
+        $fileOk = $false
+        foreach ($attempt in 1..2) {
+            # 重试前重新读取 uid/上下文：模拟器刚启动时包目录的 SELinux 上下文
+            # 可能还没带齐分类后缀（实测首轮读到 s0、就绪后为 s0:c44,...），
+            # 重读能拿到就绪后的完整上下文
+            if ($attempt -gt 1) {
+                Start-Sleep 2
+                $uidStr = (& $adb -s $device shell "stat -c %u:%g /data/data/$pkg" 2>$null | Select-Object -First 1)
+                $ctx = (& $adb -s $device shell "stat -c %C /data/data/$pkg/shared_prefs" 2>$null | Select-Object -First 1)
+                if (-not $uidStr -or $uidStr -notmatch '^\d+:\d+') { $uidStr = "10044:10044" }
+                if (-not $ctx -or $ctx -notmatch '^u:') { $ctx = "u:object_r:app_data_file:s0" }
+            }
+            # 模拟器重启会清空 /data/local/tmp，先建好暂存目录再推
+            $tmpDir = Split-Path $remoteTmp
+            & $adb -s $device shell "mkdir -p $tmpDir; mkdir -p $remoteDir" 2>$null | Out-Null
+            & $adb -s $device push $f.FullName $remoteTmp 2>$null | Out-Null
+            & $adb -s $device shell "cp $remoteTmp $remoteDst; chown $uidStr $remoteDst; chmod $mode $remoteDst; chcon $ctx $remoteDst" 2>$null | Out-Null
+            if ($LASTEXITCODE -eq 0) { $fileOk = $true; break }
+        }
+        if ($fileOk) {
+            $pushed++
+        } elseif ($core) {
             Write-Output ("$(Timestamp) [Switch] ERROR: push failed for $rel")
             $slotOk = $false
             break
+        } else {
+            Write-Output ("$(Timestamp) [Switch] WARN: push failed for $rel（可选缓存，忽略，不影响切号）")
         }
     }
-    if ($slotOk) { Write-Output ("$(Timestamp) [Switch] Slot files pushed ({0} files)" -f $files.Count) }
+    if ($slotOk) { Write-Output ("$(Timestamp) [Switch] Slot files pushed ($pushed files)") }
 } else {
     Write-Output ("$(Timestamp) [Switch] Slot dir not found, keeping current data: $slotDir")
 }
