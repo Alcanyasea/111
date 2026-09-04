@@ -12,6 +12,7 @@ from qfluentwidgets import (BodyLabel, MessageBox, PushButton, SwitchButton,
 
 import theme
 from core import logparse, runner
+from widgets import set_switch_checked_gray
 
 MAX_LINES = 3000
 
@@ -36,7 +37,7 @@ class LogsPage(QWidget):
         open_btn.clicked.connect(self._open_file)
         clear_btn = PushButton("清空")
         clear_btn.setStyleSheet(
-            "PushButton { color: %s; border: 1px solid #e5b7b1; background: %s; }"
+            "PushButton { color: %s; border: 1px solid #9aa1ab; background: %s; }"
             "PushButton:hover { background: %s; }"
             % (theme.ERR, theme.CARD, theme.ERR_TINT))
         clear_btn.clicked.connect(self._clear)
@@ -46,7 +47,7 @@ class LogsPage(QWidget):
         bar.addStretch(1)
         autoscroll_label = BodyLabel("自动滚动")
         autoscroll_label.setStyleSheet("color: %s; font-size: 12.5px;" % theme.TEXT_2)
-        self.autoscroll = SwitchButton()
+        self.autoscroll = set_switch_checked_gray(SwitchButton())
         self.autoscroll.setChecked(True)
         bar.addWidget(autoscroll_label)
         bar.addWidget(self.autoscroll)

@@ -12,7 +12,7 @@ from qfluentwidgets import (BodyLabel, InfoBar, InfoBarPosition, LineEdit,
 import config as appconfig
 import theme
 from core import cleanup, maa_setup, runner, scheduler
-from widgets import Card
+from widgets import Card, set_switch_checked_gray
 
 PATH_KEYS = (
     ("maa_official", "MAA 官服"),
@@ -61,14 +61,7 @@ class SettingsPage(ScrollArea):
             self.path_edits[key] = edit
         root.addWidget(self.path_card)
 
-        # ---- 连接与超时 / 行为开关（宽窗口并排，窄窗口上下堆叠）----
-        self.mid_vbox = QVBoxLayout()
-        self.mid_vbox.setSpacing(16)
-        root.addLayout(self.mid_vbox)
-        self.mid_hbox = QHBoxLayout()
-        self.mid_hbox.setSpacing(16)
-        self.mid_vbox.addLayout(self.mid_hbox)
-
+        # ---- 连接与超时 / 行为开关：固定上下两张通栏卡片，不随宽度重排 ----
         self.conn_card = Card("连接与超时")
         self.device_edit = LineEdit()
         self.device_edit.setClearButtonEnabled(False)
@@ -83,12 +76,10 @@ class SettingsPage(ScrollArea):
         self.update_spin.setRange(5, 360)
         self._card_row(self.conn_card, "更新等待上限", self.update_spin,
                        "分钟（游戏更新下载/安装最长等待，默认 90）")
-        self.mid_hbox.addWidget(self.conn_card, 1)
-
         self.behavior_card = Card("行为开关")
-        self.close_emu_sw = SwitchButton()
+        self.close_emu_sw = set_switch_checked_gray(SwitchButton())
         self._card_row(self.behavior_card, "完成后关模拟器", self.close_emu_sw)
-        self.wait_update_sw = SwitchButton()
+        self.wait_update_sw = set_switch_checked_gray(SwitchButton())
         self._card_row(self.behavior_card, "游戏更新检测", self.wait_update_sw,
                        "检测到游戏更新时先等更新完成，再开始登录检测")
         shutdown_hint = BodyLabel(
@@ -100,8 +91,8 @@ class SettingsPage(ScrollArea):
         acc_hint = BodyLabel("账号增删 / 启用 / 捕获请到「账号管理」页")
         acc_hint.setStyleSheet("color: %s; font-size: 12px;" % theme.TEXT_3)
         self.behavior_card.vbox.addWidget(acc_hint)
-        self.mid_hbox.addWidget(self.behavior_card, 1)
-        self._mid_stacked = False
+        root.addWidget(self.conn_card)
+        root.addWidget(self.behavior_card)
 
         # ---- MAA 服务器配置 ----
         self.maa_setup_card = Card("MAA 服务器配置")
@@ -138,7 +129,7 @@ class SettingsPage(ScrollArea):
         upd_hint.setStyleSheet("color: %s; font-size: 12px;" % theme.TEXT_3)
         self.upd_card.vbox.addWidget(upd_hint)
         self.upd_card.vbox.addSpacing(10)
-        self.use_vpn_sw = SwitchButton()
+        self.use_vpn_sw = set_switch_checked_gray(SwitchButton())
         self._card_row(self.upd_card, "Clash 代理", self.use_vpn_sw,
                        "关闭后 MAA 更新直连下载（不推荐，GitHub 直连不稳）")
         self.vpn_edit = LineEdit()
@@ -165,7 +156,7 @@ class SettingsPage(ScrollArea):
 
         # ---- 数据清理 ----
         self.clean_card = Card("数据清理")
-        self.clean_auto_sw = SwitchButton()
+        self.clean_auto_sw = set_switch_checked_gray(SwitchButton())
         self._card_row(self.clean_card, "自动清理", self.clean_auto_sw,
                        "控制台运行期间到期自动清理（挂机中不清理）")
         self.clean_interval = SpinBox()
@@ -204,32 +195,6 @@ class SettingsPage(ScrollArea):
         root.addStretch(1)
 
         self.load_from_cfg()
-
-    @staticmethod
-    def _detach_widget(layout, widget):
-        for i in reversed(range(layout.count())):
-            if layout.itemAt(i).widget() is widget:
-                layout.takeAt(i)
-
-    def _apply_mid_stack(self, stack):
-        """宽窗口「连接与超时 / 行为开关」并排；窄窗口上下堆叠。"""
-        if stack == self._mid_stacked:
-            return
-        self._mid_stacked = stack
-        cards = (self.conn_card, self.behavior_card)
-        for w in cards:
-            self._detach_widget(self.mid_hbox, w)
-            self._detach_widget(self.mid_vbox, w)
-        if stack:
-            for w in cards:
-                self.mid_vbox.addWidget(w)
-        else:
-            for w in cards:
-                self.mid_hbox.addWidget(w, 1)
-
-    def resizeEvent(self, event):
-        self._apply_mid_stack(self.viewport().width() < 900)
-        super().resizeEvent(event)
 
     def _card_row(self, card, label, widget, hint=None):
         row = QHBoxLayout()

@@ -3,6 +3,7 @@ gui/.venv/
 
 # Local Claude workspace data
 .claude/
+.scratch/
 
 # Local configuration (contains credentials)
 config.json

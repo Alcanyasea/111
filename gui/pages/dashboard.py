@@ -14,7 +14,8 @@ from qfluentwidgets import (BodyLabel, InfoBar, InfoBarPosition, LineEdit,
 import config as appconfig
 import theme
 from core import adb, logparse, maa_update, runner, scheduler
-from widgets import Card, IconBadge, Pill, big_number, kv_row
+from widgets import (Card, IconBadge, Pill, big_number, kv_row,
+                     set_switch_checked_gray)
 
 LEGACY_LOG_NAMES = {"official1": "Official 1", "official2": "Official 2",
                     "bilibili": "Bilibili"}
@@ -26,8 +27,6 @@ def account_specs(cfg):
     for i, a in enumerate(cfg.get("accounts", [])):
         server = a.get("server", "official")
         label = a.get("label") or ("账号 %d" % (i + 1))
-        colors = (theme.ACCENT_B if server == "bilibili"
-                  else (theme.ACCENT_O1 if i % 2 == 0 else theme.ACCENT_O2))
         legacy = LEGACY_LOG_NAMES.get(a.get("id", ""))
         specs.append({
             "key": a.get("id") or label,
@@ -36,7 +35,6 @@ def account_specs(cfg):
             "meta": ("MAA B服 · Bilibili 客户端" if server == "bilibili"
                      else "MAA 官服 · 槽位切号"),
             "char": str(i + 1),
-            "colors": colors,
         })
     return specs
 
@@ -73,7 +71,7 @@ class AccountCard(Card):
         self.acc = acc
         head = QHBoxLayout()
         head.setSpacing(10)
-        head.addWidget(IconBadge(acc["char"], acc["colors"]))
+        head.addWidget(IconBadge(acc["char"]))
         name_box = QVBoxLayout()
         name_box.setSpacing(1)
         name_box.addWidget(_label(acc["name"], size="14.5px", weight="600"))
@@ -245,7 +243,7 @@ class ScheduleCard(Card):
         edit.setClearButtonEnabled(False)
         edit.setText(entry["time"])
         edit.setToolTip("启动时间，HH:MM；00:00 显示为 24点")
-        sw = SwitchButton()
+        sw = set_switch_checked_gray(SwitchButton())
         sw.setText("启用")
         sw.setFixedWidth(75)
         sw.setChecked(bool(entry.get("enabled", True)))
@@ -253,7 +251,7 @@ class ScheduleCard(Card):
             "开启：该时间点写入计划任务，到点自动开始挂机。\n"
             "关闭：该时间点不触发（保留在列表，随时可重新打开）。\n"
             "全部关闭时计划任务整体禁用。")
-        shutdown_sw = SwitchButton()
+        shutdown_sw = set_switch_checked_gray(SwitchButton())
         shutdown_sw.setText("关机")
         shutdown_sw.setFixedWidth(75)
         shutdown_sw.setChecked(bool(entry.get("shutdown", False)))
@@ -266,7 +264,7 @@ class ScheduleCard(Card):
         del_btn.setToolTip(
             "删除该时间点，计划任务中的对应触发立即移除。")
         del_btn.setStyleSheet(
-            "PushButton { color: %s; border: 1px solid #e5b7b1; }" % theme.ERR)
+            "PushButton { color: %s; border: 1px solid #9aa1ab; }" % theme.ERR)
 
         row.addWidget(lab)
         row.addWidget(edit)
@@ -759,12 +757,7 @@ class DashboardPage(ScrollArea):
             self.acc_cards.append(card)
 
     def resizeEvent(self, event):
-        # 太窄时账号卡改一列；底部合并卡片缩字号保持 1×2
-        cols = 2 if self.viewport().width() >= 720 else 1
-        if cols != self._acc_cols:
-            self._acc_cols = cols
-            self._rebuild_accounts()
-        self.status_card.set_compact(self.viewport().width() < 900)
+        """不做响应式重排：布局固定，窗口过窄时由滚动区横向滚动兜底。"""
         super().resizeEvent(event)
 
     def refresh(self):

@@ -23,7 +23,7 @@ from qfluentwidgets import (BodyLabel, ComboBox, InfoBar, InfoBarPosition,
 
 import config as appconfig
 import theme
-from widgets import Card
+from widgets import Card, set_switch_checked_gray
 
 PLUGIN_DIR = Path(r"D:\1\plugins\base_schedule")
 if str(PLUGIN_DIR) not in sys.path:
@@ -104,7 +104,7 @@ class BaseScheduleDialog(QDialog):
         drones_row = QHBoxLayout()
         drones_row.setSpacing(10)
         drones_row.addWidget(BodyLabel("无人机:"))
-        self.drones_switch = SwitchButton()
+        self.drones_switch = set_switch_checked_gray(SwitchButton())
         self.drones_switch.setText("启用")
         self.drones_switch.setChecked(bool(self.bs.get("drones", {}).get("enable")))
         drones_row.addWidget(self.drones_switch)

@@ -4,6 +4,7 @@
 - 添加账号：控制台输入账号/密码 → 调 capture_account.ps1 自动登录并拉取
   登录数据到 scripts\\accounts\\<slot>\\；特殊字符密码或验证码时自动转人工登录。
 - 删除账号：仅从列表移除（槽位文件保留在磁盘，如需彻底删除可手动清理）。
+- 改名账号：点击卡片上的账号名字原地改名（回车/失焦保存，Esc 取消）。
 - 切换账号不再走游戏内点击流程：master.ps1 用 slot_switch.ps1 重启游戏+推入数据。
 """
 import subprocess
@@ -11,7 +12,7 @@ import uuid
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QThread, Signal
-from PySide6.QtWidgets import (QDialog, QGridLayout, QHBoxLayout,
+from PySide6.QtWidgets import (QDialog, QGridLayout, QHBoxLayout, QLabel,
                                QPlainTextEdit, QVBoxLayout, QWidget)
 
 from qfluentwidgets import (BodyLabel, ComboBox, InfoBar, InfoBarPosition,
@@ -22,11 +23,54 @@ import config as appconfig
 import theme
 from pages.stage_plan_dialog import (format_stage_plan, maa_second_fight_plan,
                                      show_stage_plan_dialog)
-from widgets import Card, IconBadge, Pill
+from widgets import Card, IconBadge, Pill, set_switch_checked_gray
 
 CREATE_NO_WINDOW = 0x08000000
 
 SERVER_LABELS = {"official": "官服", "bilibili": "B 服"}
+
+
+def _label_transparent(widget):
+    """让 Fluent 文本标签透明，避免在灰卡片上画出底色方块。
+
+    qfluentwidgets 的 FluentLabelBase 样式本身不设背景，但在带背景色
+    样式表的父级里会把调色板 Window 色画出来，补一条 background 规则覆盖。
+    """
+    old = widget.styleSheet() or ""
+    if "background: transparent" not in old:
+        widget.setStyleSheet(old + "\nFluentLabelBase { background: transparent; }")
+
+
+class ClickLabel(QLabel):
+    """可点击的普通文本标签（按下即发 clicked，不继续冒泡给父卡片）。"""
+
+    clicked = Signal()
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.clicked.emit()
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
+
+class RenameEdit(LineEdit):
+    """账号名行内编辑框：回车/失焦提交，Esc 取消。"""
+
+    cancelled = Signal()
+
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key.Key_Escape:
+            self.cancelled.emit()
+            event.accept()
+            return
+        super().keyPressEvent(event)
 
 
 def slot_uid(cfg, slot):
@@ -272,24 +316,24 @@ class AccountRow(Card):
         self.acc = acc
         self.page = page
         server = acc.get("server", "official")
-        colors = (theme.ACCENT_B if server == "bilibili"
-                  else (theme.ACCENT_O1 if index % 2 == 0 else theme.ACCENT_O2))
         row = QHBoxLayout()
         row.setSpacing(12)
-        row.addWidget(IconBadge(str(index + 1), colors))
+        row.addWidget(IconBadge(str(index + 1)))
         name_box = QVBoxLayout()
         name_box.setSpacing(1)
         name = SubtitleLabel(acc.get("label", "?"))
+        _label_transparent(name)
         meta = BodyLabel("%s · 槽位 %s" % (SERVER_LABELS.get(server, server),
                                            acc.get("slot", "未设置")))
         meta.setStyleSheet("color: %s; font-size: 12px;" % theme.TEXT_2)
+        _label_transparent(meta)
         name_box.addWidget(name)
         name_box.addWidget(meta)
         row.addLayout(name_box)
         row.addStretch(1)
         self.uid_pill = Pill()
         row.addWidget(self.uid_pill)
-        self.base_sw = SwitchButton()
+        self.base_sw = set_switch_checked_gray(SwitchButton())
         self.base_sw.setText("精确基建")
         self.base_sw.setChecked(bool((acc.get("base_schedule") or {}).get("enabled", False)))
         self.base_sw.setToolTip("启用精确基建派驻；关闭时使用 MAA 自带基建换班")
@@ -299,7 +343,7 @@ class AccountRow(Card):
         self.base_btn.setToolTip("精确选择各设施进驻干员（批次随启动时间，支持333/243布局）")
         self.base_btn.clicked.connect(self._on_base_config)
         row.addWidget(self.base_btn)
-        self.sw = SwitchButton()
+        self.sw = set_switch_checked_gray(SwitchButton())
         self.sw.setChecked(bool(acc.get("enabled", True)))
         self.sw.checkedChanged.connect(self._on_toggle)
         row.addWidget(self.sw)
@@ -309,7 +353,7 @@ class AccountRow(Card):
         row.addWidget(self.cap_btn)
         self.del_btn = PushButton("删除")
         self.del_btn.setStyleSheet(
-            "PushButton { color: %s; border: 1px solid #e5b7b1; }" % theme.ERR)
+            "PushButton { color: %s; border: 1px solid #9aa1ab; }" % theme.ERR)
         self.del_btn.clicked.connect(self._on_delete)
         row.addWidget(self.del_btn)
         self.vbox.addLayout(row)
@@ -412,17 +456,17 @@ class AccountDetailDialog(QDialog):
 
         # 头部：名称 + 服务器/槽位 + UID 状态
         server = acc.get("server", "official")
-        colors = (theme.ACCENT_B if server == "bilibili"
-                  else theme.ACCENT_O1)
         head = QHBoxLayout()
         head.setSpacing(12)
-        head.addWidget(IconBadge("1", colors))
+        head.addWidget(IconBadge("1"))
         name_box = QVBoxLayout()
         name_box.setSpacing(2)
         name = SubtitleLabel(acc.get("label") or "?")
+        _label_transparent(name)
         meta = BodyLabel("%s · 槽位 %s" % (SERVER_LABELS.get(server, server),
                                            acc.get("slot", "未设置")))
         meta.setStyleSheet("color: %s; font-size: 12px;" % theme.TEXT_2)
+        _label_transparent(meta)
         name_box.addWidget(name)
         name_box.addWidget(meta)
         head.addLayout(name_box)
@@ -439,6 +483,7 @@ class AccountDetailDialog(QDialog):
         sec = BodyLabel("常用功能")
         sec.setStyleSheet("color: %s; font-size: 13px; font-weight: 600;"
                           % theme.TEXT_2)
+        _label_transparent(sec)
         root.addWidget(sec)
 
         grid = QGridLayout()
@@ -451,7 +496,7 @@ class AccountDetailDialog(QDialog):
         self.fight_btn.setToolTip("按 MAA 候选关卡界面修改该账号刷图候选")
         self.delete_btn = PushButton("删除该账号")
         self.delete_btn.setStyleSheet(
-            "PushButton { color: %s; border: 1px solid #e5b7b1; }" % theme.ERR)
+            "PushButton { color: %s; border: 1px solid #9aa1ab; }" % theme.ERR)
         for i, b in enumerate((self.capture_btn, self.bs_btn,
                                self.fight_btn, self.delete_btn)):
             b.setMinimumHeight(38)
@@ -465,6 +510,7 @@ class AccountDetailDialog(QDialog):
             "运行顺序 = 账号列表顺序。")
         self.hint.setWordWrap(True)
         self.hint.setStyleSheet("color: %s; font-size: 12px;" % theme.TEXT_3)
+        _label_transparent(self.hint)
         root.addWidget(self.hint)
         root.addStretch(1)
 
@@ -514,33 +560,38 @@ class AccountDetailDialog(QDialog):
 
 class AccountCard(Card):
     """两列网格中的账号卡片：表面只放「精确基建 / 启用」两个开关，
-    点击卡片空白处打开详细控制界面。"""
+    点击名字可直接改名，点击卡片空白处打开详细控制界面。"""
 
     def __init__(self, cfg, acc, index, page=None, parent=None):
         super().__init__(parent=parent)
         self.cfg = cfg
         self.acc = acc
         self.page = page
+        self._rename_edit = None
+        self._rename_active = False
         server = acc.get("server", "official")
-        colors = (theme.ACCENT_B if server == "bilibili"
-                  else (theme.ACCENT_O1 if index % 2 == 0
-                        else theme.ACCENT_O2))
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.vbox.setContentsMargins(12, 12, 12, 12)
 
         row = QHBoxLayout()
         row.setSpacing(8)
-        row.addWidget(IconBadge(str(index + 1), colors))
-        name_box = QVBoxLayout()
-        name_box.setSpacing(2)
-        name = SubtitleLabel(acc.get("label") or "?")
-        name.setToolTip("%s · 槽位 %s" % (SERVER_LABELS.get(server, server),
-                                          acc.get("slot", "未设置")))
-        name_box.addWidget(name)
-        row.addLayout(name_box)
+        row.addWidget(IconBadge(str(index + 1)))
+        self.name_box = QVBoxLayout()
+        self.name_box.setSpacing(2)
+        self.name_label = ClickLabel(acc.get("label") or "?")
+        self.name_label.setStyleSheet(
+            "QLabel { background: transparent; color: %s;"
+            " font-size: 20px; font-weight: 600; }" % theme.TEXT)
+        self.name_label.setToolTip(
+            "点击修改账号名称\n%s · 槽位 %s"
+            % (SERVER_LABELS.get(server, server), acc.get("slot", "未设置")))
+        self.name_label.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.name_label.clicked.connect(self._start_rename)
+        self.name_box.addWidget(self.name_label)
+        row.addLayout(self.name_box)
         row.addStretch(1)
 
-        self.base_sw = SwitchButton()
+        self.base_sw = set_switch_checked_gray(SwitchButton())
         self.base_sw.setOnText("精确基建")
         self.base_sw.setOffText("精确基建")
         self.base_sw.setText("精确基建")
@@ -550,7 +601,7 @@ class AccountCard(Card):
         self.base_sw.checkedChanged.connect(self._on_base_toggle)
         row.addWidget(self.base_sw, 0, Qt.AlignmentFlag.AlignVCenter)
 
-        self.sw = SwitchButton()
+        self.sw = set_switch_checked_gray(SwitchButton())
         self.sw.setOnText("启用")
         self.sw.setOffText("启用")
         self.sw.setText("启用")
@@ -603,25 +654,75 @@ class AccountCard(Card):
                                   parent=self)
         dlg.exec()
 
+    def _start_rename(self):
+        """点击账号名字：原地换成输入框，回车/失焦保存，Esc 取消。"""
+        if self._rename_active:
+            return
+        self._rename_active = True
+        edit = RenameEdit(self)
+        self._rename_edit = edit
+        edit.setText(self.acc.get("label") or "")
+        edit.selectAll()
+        edit.setMinimumWidth(220)
+        edit.setClearButtonEnabled(False)
+        edit.setToolTip("回车或点击其他位置保存；Esc 取消")
+        edit.returnPressed.connect(self._commit_rename)
+        edit.editingFinished.connect(self._commit_rename)
+        edit.cancelled.connect(self._cancel_rename)
+        self.name_box.replaceWidget(self.name_label, edit)
+        self.name_label.hide()
+        edit.setFocus()
+
+    def _remove_rename_edit(self):
+        if self._rename_edit is None:
+            return
+        edit = self._rename_edit
+        self._rename_edit = None
+        self.name_box.replaceWidget(edit, self.name_label)
+        edit.deleteLater()
+        self.name_label.show()
+
+    def _commit_rename(self):
+        if not self._rename_active:
+            return
+        self._rename_active = False
+        edit = self._rename_edit
+        text = (edit.text() or "").strip()
+        changed = bool(text) and text != self.acc.get("label")
+        old = self.acc.get("label") or ""
+        self._remove_rename_edit()
+        if not changed:
+            self.name_label.setText(old)
+            return
+        self.acc["label"] = text
+        appconfig.save(self.cfg)
+        self.name_label.setText(text)
+        if self.page is not None:
+            self.page.refresh()
+
+    def _cancel_rename(self):
+        if not self._rename_active:
+            return
+        self._rename_active = False
+        self._remove_rename_edit()
+        self.name_label.setText(self.acc.get("label") or "?")
+
 
 class AccountsPage(ScrollArea):
     def __init__(self, cfg):
         super().__init__()
         self.cfg = cfg
         self.view = QWidget()
-        self.view.setObjectName("accountsView")
-        self.view.setStyleSheet(
-            "#accountsView { background: %s; }" % theme.BG)
         self.setWidget(self.view)
         self.setWidgetResizable(True)
-        self.setStyleSheet(
-            "QScrollArea { background: %s; border: none; }" % theme.BG)
-        self.viewport().setStyleSheet("background: %s;" % theme.BG)
+        # 与仪表盘一致：滚动区背景透明，露出窗口统一底色
+        self.setStyleSheet("QScrollArea { border: none; background: transparent; }")
+        self.viewport().setStyleSheet("background: transparent;")
         root = QVBoxLayout(self.view)
         root.setContentsMargins(0, 16, 0, 16)
         root.setSpacing(16)
 
-        # 「添加账号」操作放最上面，下面只保留账号卡片网格
+        # 「添加账号」操作放最上面；账号卡片与仪表盘一样直接铺在页面背景上
         action = Card()
         bar = QHBoxLayout()
         bar.setSpacing(10)
@@ -633,11 +734,10 @@ class AccountsPage(ScrollArea):
         action.vbox.addLayout(bar)
         root.addWidget(action)
 
-        self.list_card = Card()
-        root.addWidget(self.list_card)
+        self.acc_grid = QGridLayout()
+        self.acc_grid.setSpacing(16)
+        root.addLayout(self.acc_grid)
         root.addStretch(1)
-
-        self._cols = 2
         self.refresh()
 
     def _on_add(self):
@@ -646,36 +746,27 @@ class AccountsPage(ScrollArea):
         self.refresh()
 
     def refresh(self):
-        # 清空并重建账号卡片（每行 2 个）
-        while self.list_card.vbox.count():
-            item = self.list_card.vbox.takeAt(0)
+        # 清空并重建账号卡片（固定每行 2 个，与仪表盘一致）
+        while self.acc_grid.count():
+            item = self.acc_grid.takeAt(0)
             w = item.widget()
             if w is not None:
                 w.deleteLater()
-        # 旧版本网格里的卡片是布局子项，必须一并清理，否则刷新会叠出重复卡片
-        for w in self.list_card.findChildren(QWidget):
-            w.deleteLater()
+        cols = 2
         if not self.cfg["accounts"]:
             empty = BodyLabel("暂无账号，点击上方「添加账号」开始。")
             empty.setStyleSheet("color: %s; font-size: 13px;" % theme.TEXT_3)
-            self.list_card.vbox.addWidget(empty)
-        grid = QGridLayout()
-        grid.setSpacing(12)
+            _label_transparent(empty)
+            self.acc_grid.addWidget(empty, 0, 0, 1, cols)
         for i, acc in enumerate(self.cfg["accounts"]):
             card = AccountCard(self.cfg, acc, i, page=self)
-            r, c = divmod(i, self._cols)
-            span = (self._cols - c) if (self._cols > 1
-                                        and len(self.cfg["accounts"]) % 2
-                                        and i == len(self.cfg["accounts"]) - 1) else 1
-            grid.addWidget(card, r, c, 1, span)
-        for c in range(self._cols):
-            grid.setColumnStretch(c, 1)
-        self.list_card.vbox.addLayout(grid)
+            r, c = divmod(i, cols)
+            span = (cols - c) if (len(self.cfg["accounts"]) % 2
+                                  and i == len(self.cfg["accounts"]) - 1) else 1
+            self.acc_grid.addWidget(card, r, c, 1, span)
+        for c in range(cols):
+            self.acc_grid.setColumnStretch(c, 1)
 
     def resizeEvent(self, event):
-        # 太窄时自动改成一列，保证打开侧边栏/缩小窗口也不横向截断
-        cols = 2 if self.viewport().width() >= 720 else 1
-        if cols != self._cols:
-            self._cols = cols
-            self.refresh()
+        """不做响应式重排：固定两列，窗口过窄时由横向滚动兜底。"""
         super().resizeEvent(event)

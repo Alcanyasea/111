@@ -6,40 +6,43 @@ qfluentwidgets 自带 Fluent 浅色主题已覆盖整体观感，
 """
 
 BG = "#cfd2d7"
-CARD = "#e7e9ec"
+CARD = "#b9bec6"
 BORDER = "#e3e6ea"
 TEXT = "#1b1f24"
 TEXT_2 = "#5b6470"
 TEXT_3 = "#8b94a1"
-ACCENT = "#0078d4"
+ACCENT = "#4b515a"
 
-OK = "#107c10"
-OK_TINT = "#e6f4e6"
-ERR = "#c42b1c"
-ERR_TINT = "#fdeceb"
-WARN = "#9d5d00"
-WARN_TINT = "#fdf3e0"
-RUN = "#0078d4"
-RUN_TINT = "#e8f2fb"
+OK = "#2f363e"
+OK_TINT = "#e2e4e8"
+ERR = "#111111"
+ERR_TINT = "#d7dade"
+WARN = "#5b6470"
+WARN_TINT = "#e8eaed"
+RUN = "#4b515a"
+RUN_TINT = "#d9dde2"
 WAIT = "#5b6470"
 WAIT_TINT = "#f0f2f5"
+
+# 开关开启（启用）后的深灰底色；浅色主题用深灰，深色主题用浅灰
+SWITCH_ON = "#4b515a"
+SWITCH_ON_DARK = "#a6acb5"
 
 # 深色日志视图（mockup .log-view）
 LOG_BG = "#14171c"
 LOG_FG = "#c8d0da"
 LOG_TS = "#5d6a79"
-LOG_OK = "#6fcf6f"
-LOG_ERR = "#f0756a"
-LOG_HEAD = "#7ab3e8"
+LOG_OK = "#aeb6bf"
+LOG_ERR = "#ffffff"
+LOG_HEAD = "#d0d6dd"
 
 # 侧边栏（mockup .sidebar）
 SIDEBAR_BG = "#20262e"
 
-# 三账号图标渐变色
-ACCENT_O1 = ("#3a7bd5", "#2b5ea7")
-ACCENT_O2 = ("#4aa3a2", "#2e7d7b")
-ACCENT_B = ("#e07a9e", "#c2527b")
+# 剩余图标渐变色统一为灰阶
+ACCENT_O1 = ("#3d434b", "#1d2025")
+ACCENT_O2 = ("#4b515a", "#262a30")
+ACCENT_B = ("#5b6470", "#2f343b")
 
 # 取点覆盖层
 OVERLAY_BG = "rgba(9, 11, 15, 0.94)"
-PICK_RED = "#ff5c5c"

@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""通用小组件：状态徽章 Pill、键值行 KV、带标题卡片 Card、渐变图标徽标 IconBadge。"""
+"""通用小组件：状态徽章 Pill、键值行 KV、带标题卡片 Card、圆角数字徽标 IconBadge。"""
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import QHBoxLayout, QLabel, QVBoxLayout, QWidget, QSizePolicy
@@ -15,7 +15,7 @@ class Pill(QLabel):
     _STYLES = {
         "ok": (theme.OK, theme.OK_TINT),
         "run": (theme.RUN, theme.RUN_TINT),
-        "fail": (theme.ERR, theme.ERR_TINT),
+        "fail": ("#ffffff", "#111111"),
         "wait": (theme.WAIT, theme.WAIT_TINT),
     }
 
@@ -129,14 +129,19 @@ class Card(CardWidget):
 
 
 class IconBadge(QLabel):
-    """账号卡片左上角的渐变圆角图标（字符 + 渐变底色）。"""
+    """账号卡片左上角的圆角数字图标：黑色底、白色数字。"""
 
-    def __init__(self, char, colors, parent=None):
+    def __init__(self, char, parent=None):
         super().__init__(char, parent)
         self.setFixedSize(38, 38)
         self.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.setStyleSheet(
-            "QLabel { background: qlineargradient(x1:0,y1:0,x2:1,y2:1,"
-            " stop:0 %s, stop:1 %s); color: #fff; font-size: 18px;"
-            " font-weight: 700; border-radius: 10px; }" % colors
+            "QLabel { background: #000000; color: #ffffff; font-size: 18px;"
+            " font-weight: 700; border-radius: 10px; }"
         )
+
+
+def set_switch_checked_gray(switch):
+    """开关开启态从主题青色改为深灰，与灰底卡片风格统一。"""
+    switch.setCheckedIndicatorColor(theme.SWITCH_ON, theme.SWITCH_ON_DARK)
+    return switch

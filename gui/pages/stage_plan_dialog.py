@@ -18,6 +18,7 @@ from qfluentwidgets import (BodyLabel, InfoBar, InfoBarPosition,
 
 import config as appconfig
 import theme
+from widgets import set_switch_checked_gray
 
 PERMANENT_STAGE_OPTIONS = (
     ("1-7", "1-7"),
@@ -263,7 +264,7 @@ class StagePlanDialog(QDialog):
         tb.addWidget(self.source_lab)
         hb.addLayout(tb)
         hb.addStretch(1)
-        self.optional_sw = SwitchButton("使用备选关卡")
+        self.optional_sw = set_switch_checked_gray(SwitchButton("使用备选关卡"))
         hb.addWidget(self.optional_sw, 0, Qt.AlignmentFlag.AlignVCenter)
         root.addWidget(header)
 

@@ -14,9 +14,10 @@ from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QColor, QFont, QIcon, QLinearGradient, QPainter, QPixmap
 from PySide6.QtWidgets import QApplication, QHBoxLayout, QLabel, QVBoxLayout, QWidget
 
-from qfluentwidgets import (FluentIcon, FluentWindow, InfoBar, InfoBarManager,
-                            InfoBarPosition, MessageBox, PrimaryPushButton,
-                            PushButton, Theme, setTheme)
+from qfluentwidgets import (FluentIcon, FluentWindow, InfoBar, InfoBarIcon,
+                            InfoBarManager, InfoBarPosition, MessageBox,
+                            PrimaryPushButton, PushButton, Theme, setTheme,
+                            setThemeColor)
 
 import config as appconfig
 import theme
@@ -66,7 +67,7 @@ class HeaderBar(QWidget):
             "停止当前挂机（结束 master.ps1 与 MAA 进程），\n"
             "并取消已排定的自动关机。空闲时不可用。")
         self.stop_btn.setStyleSheet(
-            "PushButton { color: %s; border: 1px solid #e5b7b1; background: %s; }"
+            "PushButton { color: %s; border: 1px solid #9aa1ab; background: %s; }"
             "PushButton:hover { background: %s; }"
             % (theme.ERR, theme.CARD, theme.ERR_TINT))
         self.run_btn = PrimaryPushButton("▶ 立即运行")
@@ -107,6 +108,11 @@ class MainWindow(FluentWindow):
         self.setWindowIcon(make_icon())
         self.setWindowTitle("MAA 挂机控制台")
         self.titleBar.setTitle("MAA 挂机控制台")
+        # 标题栏关闭按钮默认悬停是红色，统一改成黑/灰系
+        self.titleBar.closeBtn.setHoverBackgroundColor(QColor("#22252a"))
+        self.titleBar.closeBtn.setPressedBackgroundColor(QColor("#3a3f46"))
+        self.titleBar.closeBtn.setHoverColor(QColor("#ffffff"))
+        self.titleBar.closeBtn.setPressedColor(QColor("#ffffff"))
         self.resize(1180, 780)
         # 默认展开侧边栏（qfluentwidgets 初始会收起成 48px 图标模式）
         self.navigationInterface.expand(useAni=False)
@@ -263,8 +269,8 @@ def make_icon():
     p = QPainter(pm)
     p.setRenderHint(QPainter.RenderHint.Antialiasing)
     grad = QLinearGradient(0, 0, 64, 64)
-    grad.setColorAt(0, QColor("#2f7fd1"))
-    grad.setColorAt(1, QColor("#1e5fa8"))
+    grad.setColorAt(0, QColor("#3f454d"))
+    grad.setColorAt(1, QColor("#171a1f"))
     p.setBrush(grad)
     p.setPen(Qt.PenStyle.NoPen)
     p.drawRoundedRect(0, 0, 64, 64, 14, 14)
@@ -277,11 +283,27 @@ def make_icon():
     return QIcon(pm)
 
 
+def _patch_gray_info_bar():
+    """通知条统一成灰阶：图标与背景都不再使用绿/黄/红等彩色。"""
+    orig_new = InfoBar.new.__func__
+
+    def _new(cls, icon, title, content, orient=Qt.Horizontal, isClosable=True,
+             duration=1000, position=InfoBarPosition.TOP_RIGHT, parent=None):
+        bar = orig_new(cls, InfoBarIcon.INFORMATION, title, content, orient,
+                       isClosable, duration, position, parent)
+        bar.setCustomBackgroundColor("#e9eaed", "#33363c")
+        return bar
+
+    InfoBar.new = classmethod(_new)
+
+
 def main():
     QApplication.setHighDpiScaleFactorRoundingPolicy(
         Qt.HighDpiScaleFactorRoundingPolicy.PassThrough)
     app = QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(True)
+    setThemeColor("#4b515a")
+    _patch_gray_info_bar()
     win = MainWindow()
     win.show()
     if "--smoke" in sys.argv:
