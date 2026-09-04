@@ -16,6 +16,38 @@ Write-Host "  MAA 挂机控制台 v$Version 安装" -ForegroundColor Cyan
 Write-Host "================================================" -ForegroundColor Cyan
 Write-Warn "本安装包只安装/配置挂机脚本；MuMu 模拟器与 MAA 请预先安装好。"
 
+function Find-FileUnder($roots, $file, $depth = 4) {
+    foreach ($r in $roots) {
+        if (-not $r -or -not (Test-Path $r)) { continue }
+        $hit = Get-ChildItem -Path $r -Recurse -Depth $depth -Filter $file -File `
+            -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($hit) { return $hit.FullName }
+    }
+    return $null
+}
+
+function Find-MaaExes {
+    $roots = @(
+        "D:\软件",
+        "$env:ProgramFiles",
+        "D:\Program Files",
+        "$env:LOCALAPPDATA\Programs"
+    )
+    $dirs = @()
+    foreach ($r in $roots) {
+        if (Test-Path $r) {
+            $dirs += @(Get-ChildItem -Path $r -Directory -Filter "MAA*" `
+                -ErrorAction SilentlyContinue)
+        }
+    }
+    $exes = @()
+    foreach ($d in $dirs) {
+        $exes += @(Get-ChildItem -Path $d.FullName -Recurse -Depth 3 -Filter "MAA.exe" `
+            -File -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName)
+    }
+    return @($exes | Sort-Object -Unique)
+}
+
 # 1) install directory
 $dirInput = Read-Host "安装目录（直接回车 = $defaultTarget）"
 if ([string]::IsNullOrWhiteSpace($dirInput)) { $target = $defaultTarget } else { $target = $dirInput.TrimEnd('\') }
@@ -34,7 +66,10 @@ Write-Ok "程序文件复制完成"
 if ($target -ne $defaultTarget) {
     Write-Step "修正脚本中的硬编码路径..."
     Get-ChildItem $target -Recurse -File -ErrorAction SilentlyContinue |
-        Where-Object { $_.Extension -in ".py",".ps1",".bat" } |
+        Where-Object {
+            $_.Extension -in ".py",".ps1",".bat" -and
+            $_.FullName -notmatch '\\gui\\(runtime|\.venv)\\'
+        } |
         ForEach-Object {
             try {
                 $c = [System.IO.File]::ReadAllText($_.FullName)
@@ -46,10 +81,15 @@ if ($target -ne $defaultTarget) {
         }
 }
 
-# 4) python venv + dependencies
+# 4) Python 运行环境：优先使用安装包内置的 gui\runtime
+$runtimePyw = Join-Path $target "gui\runtime\pythonw.exe"
 $venvPy = Join-Path $target "gui\.venv\Scripts\python.exe"
-if (-not (Test-Path $venvPy)) {
-    Write-Step "创建 Python 虚拟环境并安装依赖（首次较慢，请稍候）..."
+if (Test-Path $runtimePyw) {
+    Write-Ok "已内置 Python 运行环境与依赖，无需联网安装"
+} elseif (Test-Path $venvPy) {
+    Write-Ok "已存在虚拟环境，使用现有 gui\.venv"
+} else {
+    Write-Warn "未找到内置 Python 运行环境，尝试用系统 Python 创建虚拟环境（需要联网）..."
     $python = "python"
     if (-not (Get-Command python -ErrorAction SilentlyContinue)) { $python = "py" }
     try {
@@ -62,8 +102,6 @@ if (-not (Test-Path $venvPy)) {
         Write-Warn "可稍后手动执行：python -m venv $target\gui\.venv"
         Write-Warn "然后：$target\gui\.venv\Scripts\pip install -r $target\gui\requirements.txt"
     }
-} else {
-    Write-Ok "已存在虚拟环境，跳过依赖安装"
 }
 
 # 5) config.json generation + path auto-detection
@@ -71,41 +109,45 @@ $cfgPath = Join-Path $target "config.json"
 if (-not (Test-Path $cfgPath)) {
     Write-Step "生成 config.json 并自动检测 MAA/MuMu 路径..."
     Copy-Item (Join-Path $target "config.example.json") $cfgPath -Force
-    $adb = $null
-    $cli = $null
-    foreach ($p in @(
-        "D:\软件\MuMu模拟器\MuMuPlayer\nx_main\adb.exe",
-        "C:\Program Files\Netease\MuMuPlayer-12.0\shell\adb.exe",
-        "$env:ProgramFiles\Netease\MuMuPlayer-12.0\shell\adb.exe",
-        "D:\Program Files\Netease\MuMuPlayer-12.0\shell\adb.exe"
-    )) { if (Test-Path $p) { $adb = $p; break } }
-    foreach ($p in @(
-        "D:\软件\MuMu模拟器\MuMuPlayer\nx_main\mumu-cli.exe",
-        "C:\Program Files\Netease\MuMuPlayer-12.0\MuMuManager.exe",
-        "$env:ProgramFiles\Netease\MuMuPlayer-12.0\MuMuManager.exe",
-        "D:\Program Files\Netease\MuMuPlayer-12.0\MuMuManager.exe"
-    )) { if (Test-Path $p) { $cli = $p; break } }
-    $maaOfficial = Get-ChildItem "D:\软件\MAA" -Recurse -Filter "MAA.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
-    $maaBili = Get-ChildItem "D:\软件\MAA（b）" -Recurse -Filter "MAA.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
+    $mumuRoots = @(
+        "D:\软件\MuMu模拟器",
+        "C:\Program Files\Netease\MuMuPlayer-12.0",
+        "C:\Program Files\Netease",
+        "D:\Program Files\Netease\MuMuPlayer-12.0",
+        "D:\Program Files\Netease",
+        "$env:ProgramFiles\Netease",
+        "$env:LOCALAPPDATA\Netease"
+    )
+    $adb = Find-FileUnder $mumuRoots "adb.exe" 5
+    $cli = Find-FileUnder $mumuRoots "mumu-cli.exe" 5
+    if (-not $cli) { $cli = Find-FileUnder $mumuRoots "MuMuManager.exe" 5 }
+    $maaExes = Find-MaaExes
+    $maaOfficial = $maaExes |
+        Where-Object { $_ -notmatch '[（(]b[）)]|Bilibili' } |
+        Select-Object -First 1
+    if (-not $maaOfficial) { $maaOfficial = $maaExes | Select-Object -First 1 }
+    $maaBili = $maaExes |
+        Where-Object { $_ -ne $maaOfficial -and ($_ -match '[（(]b[）)]|Bilibili') } |
+        Select-Object -First 1
     if (-not $maaBili) {
-        $maaBili = Get-ChildItem "D:\软件\MAA*" -Recurse -Filter "MAA.exe" -ErrorAction SilentlyContinue |
-            Where-Object { -not $maaOfficial -or $_.FullName -ne $maaOfficial.FullName } |
-            Select-Object -First 1
+        $maaBili = $maaExes | Where-Object { $_ -ne $maaOfficial } | Select-Object -First 1
     }
     try {
         $cfg = [System.IO.File]::ReadAllText($cfgPath, [System.Text.Encoding]::UTF8) | ConvertFrom-Json
+        $cfg.paths.script_dir = Join-Path $target "scripts"
+        $cfg.paths.log_file = Join-Path $target "scripts\master_log.txt"
         if ($adb) { $cfg.paths.adb = $adb; Write-Ok ("检测到 ADB：" + $adb) }
         else { Write-Warn "未检测到 MuMu ADB，请稍后在「运行设置」页填写" }
         if ($cli) { $cfg.paths.cli = $cli; Write-Ok ("检测到 MuMu CLI：" + $cli) }
         if ($maaOfficial) {
-            $cfg.paths.maa_official = $maaOfficial.FullName
-            $cfg.paths.maa_official_dir = $maaOfficial.DirectoryName
-            Write-Ok ("检测到 MAA（官服）：" + $maaOfficial.FullName)
+            $cfg.paths.maa_official = $maaOfficial
+            $cfg.paths.maa_official_dir = Split-Path -Parent $maaOfficial
+            Write-Ok ("检测到 MAA（官服）：" + $maaOfficial)
         } else { Write-Warn "未检测到官服 MAA，请稍后在「运行设置」页填写" }
         if ($maaBili) {
-            $cfg.paths.maa_bilibili = $maaBili.FullName
-            $cfg.paths.maa_bilibili_dir = $maaBili.DirectoryName
-            Write-Ok ("检测到 MAA（B服）：" + $maaBili.FullName)
+            $cfg.paths.maa_bilibili = $maaBili
+            $cfg.paths.maa_bilibili_dir = Split-Path -Parent $maaBili
+            Write-Ok ("检测到 MAA（B服）：" + $maaBili)
         }
         $json = $cfg | ConvertTo-Json -Depth 10
         [System.IO.File]::WriteAllText($cfgPath, $json, (New-Object System.Text.UTF8Encoding($false)))

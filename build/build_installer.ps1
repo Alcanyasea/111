@@ -4,13 +4,14 @@
 产物：build\dist\MAA-Farm-Console-v<版本>-Setup.exe
 安装包结构：7zS.sfx 引导 + config.txt（解压后运行 setup.bat）+ 压缩的项目文件。
 setup.bat -> install.ps1 负责：选安装目录、复制文件、修正硬编码路径、
-创建 Python 虚拟环境并装依赖、生成 config.json 并自动检测 MAA/MuMu 路径、
+内置 Python 运行环境（含 GUI 依赖）、生成 config.json 并自动检测 MAA/MuMu 路径、
 创建桌面快捷方式、可选创建计划任务。
 
 用法：
     powershell -ExecutionPolicy Bypass -File build\build_installer.ps1
     powershell -ExecutionPolicy Bypass -File build\build_installer.ps1 -Version 1.1.3
     powershell -ExecutionPolicy Bypass -File build\build_installer.ps1 -SevenZip "C:\Program Files\7-Zip\7z.exe"
+    powershell -ExecutionPolicy Bypass -File build\build_installer.ps1 -PythonHome "C:\Python312"
 
 7-Zip 缺失时自动引导（无需管理员）：
     1) 若当前有管理员权限，尝试 winget 安装 7zip.7zip；
@@ -22,6 +23,7 @@ param(
     [string]$RepoRoot = "",
     [string]$OutputDir = "",
     [string]$SevenZip = "",
+    [string]$PythonHome = "",
     [switch]$SkipBootstrap
 )
 $ErrorActionPreference = "Stop"
@@ -60,6 +62,33 @@ function Find-7z {
         Select-Object -First 1
     if ($cached) { return $cached.FullName }
     return $null
+}
+
+function Find-PythonHome {
+    if ($PythonHome -and (Test-Path (Join-Path $PythonHome "python.exe"))) {
+        return $PythonHome
+    }
+    $cmd = Get-Command python -ErrorAction SilentlyContinue
+    if ($cmd -and $cmd.Source) {
+        try {
+            # 若当前在虚拟环境里，这里取的是它背后的基础 Python；发布构建不要用 venv
+            $base = & python -c "import sys; print(sys.base_prefix)" 2>$null
+            if ($base -and (Test-Path (Join-Path $base.Trim() "python.exe"))) {
+                return $base.Trim()
+            }
+        } catch {}
+        $home = Split-Path -Parent $cmd.Source
+        if (Test-Path (Join-Path $home "python.exe")) { return $home }
+    }
+    if (Get-Command py -ErrorAction SilentlyContinue) {
+        try {
+            $base = & py -3 -c "import sys; print(sys.base_prefix)" 2>$null
+            if ($base -and (Test-Path (Join-Path $base.Trim() "python.exe"))) {
+                return $base.Trim()
+            }
+        } catch {}
+    }
+    throw "未找到 Python。请先安装 Python 3.12 并执行 gui\requirements.txt 依赖安装，或用 -PythonHome 指定路径。"
 }
 
 $exe7z = Find-7z
@@ -123,6 +152,24 @@ robocopy $RepoRoot $staging /E /NFL /NDL /NJH /NJS /NP `
     /XF config.json config.json.bak master_log.txt master.lock maa_done.signal `
         switch_output.tmp _shot.png _shot.py *.pyc | Out-Null
 if ($LASTEXITCODE -ge 8) { throw "robocopy 失败（exit=$LASTEXITCODE）" }
+
+# ---------- 内置 Python 运行环境（含 GUI 依赖，安装时无需联网） ----------
+$pythonHome = Find-PythonHome
+$runtimeDst = Join-Path $staging "gui\runtime"
+Write-Step "复制 Python 运行环境（$pythonHome -> gui\runtime）..."
+robocopy $pythonHome $runtimeDst /E /NFL /NDL /NJH /NJS /NP `
+    /XD __pycache__ test tests Doc Tools include libs tcl `
+    /XF *.pyc | Out-Null
+if ($LASTEXITCODE -ge 8) { throw "复制 Python 运行环境失败（exit=$LASTEXITCODE）" }
+if (-not (Test-Path (Join-Path $runtimeDst "pythonw.exe"))) {
+    throw "Python 运行环境缺少 pythonw.exe，请确认 -PythonHome 指向完整 Python 安装目录"
+}
+$runtimePy = Join-Path $runtimeDst "python.exe"
+$importOut = & $runtimePy -c "import PySide6, qfluentwidgets" 2>&1
+if ($LASTEXITCODE -ne 0) {
+    throw "内置 Python 缺少 GUI 依赖（PySide6 / qfluentwidgets）。请先执行 python -m pip install -r gui\requirements.txt`n$importOut"
+}
+Write-Ok "Python 运行环境已内置且 GUI 依赖可导入"
 
 # 注入安装脚本（版本号占位符替换）
 $installSrc = Join-Path $PSScriptRoot "installer"
