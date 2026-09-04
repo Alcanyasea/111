@@ -1,18 +1,19 @@
 # -*- coding: utf-8 -*-
-"""仪表盘：3 账号卡片 + 班次计划 + 最近一次运行 + 连接状态。"""
+"""仪表盘：3 账号卡片 + 上次运行汇总条 + 班次计划 + 状态与更新合并卡片（1×2）。"""
 import re
 from datetime import datetime
 
-from PySide6.QtCore import Qt, QTimer
-from PySide6.QtWidgets import (QFrame, QGridLayout, QHBoxLayout, QLabel,
-                               QVBoxLayout, QWidget)
+from PySide6.QtCore import Qt, QThread, QTimer, Signal
+from PySide6.QtWidgets import (QDialog, QFrame, QGridLayout, QHBoxLayout,
+                               QLabel, QPlainTextEdit, QVBoxLayout, QWidget)
 
 from qfluentwidgets import (BodyLabel, InfoBar, InfoBarPosition, LineEdit,
-                            PushButton, ScrollArea, SwitchButton)
+                            MessageBox, PrimaryPushButton, PushButton,
+                            ScrollArea, SwitchButton)
 
 import config as appconfig
 import theme
-from core import adb, logparse, runner, scheduler
+from core import adb, logparse, maa_update, runner, scheduler
 from widgets import Card, IconBadge, Pill, big_number, kv_row
 
 LEGACY_LOG_NAMES = {"official1": "Official 1", "official2": "Official 2",
@@ -381,80 +382,150 @@ class ScheduleCard(Card):
             new_edit.selectAll()
 
 
-class LastRunCard(Card):
-    """最近一次运行汇总。"""
+class LastRunStrip(Card):
+    """上次运行汇总：并入账号卡片区（账号各卡片展示各自结果，
+    这里只保留全局的总耗时 / 模拟器关闭情况，标题右侧为运行时间）。"""
 
-    def __init__(self, specs):
-        super().__init__("最近一次运行", "")
-        self.specs = specs
-        self.account_rows = {}
-        for acc in specs:
-            pill = Pill("未运行")
-            self.vbox.addWidget(kv_row(acc["name"], pill))
-            self.vbox.addSpacing(6)
-            self.account_rows[acc["key"]] = pill
-        line = QFrame()
-        line.setFrameShape(QFrame.Shape.HLine)
-        line.setStyleSheet("border: none; border-top: 1px dashed %s;" % theme.BORDER)
-        self.vbox.addWidget(line)
-        self.vbox.addSpacing(10)
+    def __init__(self):
+        super().__init__("上次运行", "")
+        bar = QHBoxLayout()
+        bar.setSpacing(28)
         self.total_num = big_number("—", "分钟")
-        self.vbox.addWidget(kv_row("总耗时", self.total_num))
-        self.vbox.addSpacing(4)
+        bar.addWidget(self.total_num)
         self.emu_pill = Pill("—")
-        self.vbox.addWidget(kv_row("模拟器", self.emu_pill))
+        bar.addWidget(self.emu_pill, 0, Qt.AlignmentFlag.AlignBottom)
+        bar.addStretch(1)
+        self.vbox.addLayout(bar)
 
     def refresh(self, run):
         if self.hint_label is not None:
-            self.hint_label.setText("")
-        if run is None:
-            for pill in self.account_rows.values():
-                pill.set_state("wait", "未运行")
-            _set_big_num(self.total_num, "—")
-            self.emu_pill.set_state("wait", "—")
-            return
-        if self.hint_label is not None:
-            self.hint_label.setText(fmt_ts(run["start"]))
-        for acc in self.specs:
-            pill = self.account_rows[acc["key"]]
-            result = next((a for a in run.get("accounts", [])
-                           if a["key"] == acc["key"] or a["name"] == acc["name"]), None)
-            if result is None:
-                pill.set_state("wait", "未运行")
-            elif result.get("skipped"):
-                pill.set_state("wait", "已跳过")
-            elif result["ok"]:
-                pill.set_state("ok", "成功 · %s 分" % result["dur"])
-            else:
-                pill.set_state("fail", "超时 · %s 分" % result["dur"])
-        total = run.get("total_min")
+            self.hint_label.setText(fmt_ts(run["start"]) if run else "暂无记录")
+        total = (run or {}).get("total_min")
         _set_big_num(self.total_num, str(total) if total is not None else "—")
-        if run.get("emulator_closed"):
-            self.emu_pill.set_state("ok", "已自动关闭 ✓")
+        if run is None:
+            self.emu_pill.set_state("wait", "—")
+        elif run.get("emulator_closed"):
+            self.emu_pill.set_state("ok", "模拟器已自动关闭 ✓")
         elif run.get("final") is not None:
-            self.emu_pill.set_state("wait", "未关闭")
+            self.emu_pill.set_state("wait", "模拟器未关闭")
         else:
             self.emu_pill.set_state("wait", "—")
 
 
-class ConnectionCard(Card):
-    """连接状态：模拟器 / ADB / MAA 进程 / RunDirectly 检查。"""
+class StatusCard(Card):
+    """连接状态 + MAA 更新 合并卡片：内部左右两列（1×2）。
+
+    窗口变窄时通过 set_compact 缩小字号/内边距保持两列并排，不改堆叠。
+    更新逻辑在 core/maa_update：开 Clash → 两套 MAA 依次自更新（版本+资源）
+    → 恢复配置 → 关 Clash。配置（Clash 路径/端口）在「运行设置 → MAA 更新」。
+    """
 
     def __init__(self):
-        super().__init__("连接状态")
+        super().__init__("连接状态与 MAA 更新")
+        self._compact = False
+        self._key_labels = []
+        self._section_labels = []
+        self._last_rd = {}
+
+        cols = QHBoxLayout()
+        cols.setSpacing(16)
+        self.vbox.addLayout(cols)
+
+        # 左列：连接状态
+        left = QVBoxLayout()
+        left.setSpacing(6)
+        left.addWidget(self._section_label("连接状态"))
+        left.addSpacing(4)
         self.mumu_pill = Pill("未启动")
-        self.vbox.addWidget(kv_row("MuMu 模拟器", self.mumu_pill))
-        self.vbox.addSpacing(6)
+        left.addWidget(self._kv("MuMu 模拟器", self.mumu_pill))
         self.adb_pill = Pill("未连接")
-        self.vbox.addWidget(kv_row("ADB", self.adb_pill))
-        self.vbox.addSpacing(6)
+        left.addWidget(self._kv("ADB", self.adb_pill))
         self.maa_pill = Pill("未运行")
-        self.vbox.addWidget(kv_row("MAA 进程", self.maa_pill))
-        self.vbox.addSpacing(6)
+        left.addWidget(self._kv("MAA 进程", self.maa_pill))
         self.rd_val = _label("—")
         self.rd_val.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         self.rd_val.setTextFormat(Qt.TextFormat.RichText)
-        self.vbox.addWidget(kv_row("MAA 自动运行配置", self.rd_val))
+        left.addWidget(self._kv("MAA 自动运行配置", self.rd_val))
+        cols.addLayout(left, 1)
+
+        divider = QFrame()
+        divider.setFrameShape(QFrame.Shape.VLine)
+        divider.setStyleSheet("border: none; border-left: 1px dashed %s;" % theme.BORDER)
+        cols.addWidget(divider)
+
+        # 右列：MAA 更新
+        right = QVBoxLayout()
+        right.setSpacing(6)
+        right.addWidget(self._section_label("MAA 更新"))
+        right.addSpacing(4)
+        self.pills = {}
+        for name in ("官服", "B服"):
+            pill = Pill("未知")
+            self.pills[name] = pill
+            right.addWidget(self._kv("%s MAA" % name, pill))
+        self.hint = _label("版本更新 + 资源更新一次完成；自动开关 Clash 代理，"
+                           "全程几分钟到十几分钟，期间请勿关闭控制台",
+                           size="12px", color=theme.TEXT_3)
+        self.hint.setWordWrap(True)
+        right.addWidget(self.hint)
+        right.addSpacing(4)
+        btn_row = QHBoxLayout()
+        self.update_btn = PrimaryPushButton("⟳ 一键更新两套 MAA")
+        self.update_btn.setToolTip(
+            "更新前自动启动 Clash 并把 MAA 下载代理指向它，全部结束后关闭；\n"
+            "更新前 Clash 已开着则复用，不会主动关闭。挂机运行时不可用。")
+        btn_row.addWidget(self.update_btn)
+        btn_row.addStretch(1)
+        right.addLayout(btn_row)
+        cols.addLayout(right, 1)
+
+    # ---------- 构建 / 缩放 ----------
+
+    def _section_label(self, text):
+        lab = _label(text, size="12px", weight="600", color=theme.TEXT_2)
+        self._section_labels.append(lab)
+        return lab
+
+    def _kv(self, key_text, value_widget):
+        """同 widgets.kv_row，但保留 key label 引用以支持缩放字号。"""
+        row = QWidget()
+        lay = QHBoxLayout(row)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(8)
+        key = BodyLabel(key_text)
+        self._key_labels.append(key)
+        self._apply_key_style(key)
+        lay.addWidget(key)
+        lay.addStretch(1)
+        lay.addWidget(value_widget, 0, Qt.AlignmentFlag.AlignRight)
+        return row
+
+    def _apply_key_style(self, key):
+        key.setStyleSheet("color: %s; font-size: %s;"
+                          % (theme.TEXT_2, "11px" if self._compact else "12.5px"))
+
+    def set_compact(self, flag):
+        """空间不足：整体缩小字号/内边距，保持左右两列不变。"""
+        if flag == self._compact:
+            return
+        self._compact = flag
+        for key in self._key_labels:
+            self._apply_key_style(key)
+        for lab in self._section_labels:
+            lab.setStyleSheet("font-size: %s; font-weight: 600; color: %s;"
+                              % ("11px" if flag else "12px", theme.TEXT_2))
+        for pill in (self.mumu_pill, self.adb_pill, self.maa_pill,
+                     *self.pills.values()):
+            pill.set_compact(flag)
+        self.hint.setStyleSheet("font-size: %s; color: %s;"
+                                % ("11px" if flag else "12px", theme.TEXT_3))
+        self.update_btn.setStyleSheet(
+            "PrimaryPushButton { font-size: %s; padding: 4px 10px; }"
+            % ("11.5px" if flag else "13px"))
+        self.update_btn.setText("⟳ 一键更新" if flag else "⟳ 一键更新两套 MAA")
+        self._render_rd()
+
+    # ---------- 刷新 ----------
 
     def refresh(self, cfg, adb_ok):
         if adb.emulator_running():
@@ -472,17 +543,94 @@ class ConnectionCard(Card):
         else:
             self.maa_pill.set_state("wait", "未运行")
 
-        rd = runner.check_run_directly(cfg)
+        self._last_rd = runner.check_run_directly(cfg)
+        self._render_rd()
+
+    def _render_rd(self):
         parts = []
-        for label, key in (("官服", "official"), ("B服", "bilibili")):
-            v = rd.get(key)
-            if v is True:
+        tips = []
+        full = {"official": "官服", "bilibili": "B服"}
+        for key, label in full.items():
+            v = self._last_rd.get(key)
+            tips.append("%s：%s" % (label, {
+                True: "RunDirectly 已开启",
+                False: "RunDirectly 已关闭",
+            }.get(v, "配置缺失")))
+            if self._compact:
+                mark = {True: "✓", False: "✗", None: "?"}.get(v, "?")
+                color = {True: theme.OK, False: theme.ERR}.get(v, theme.WARN)
+                parts.append('<span style="color:%s">%s %s</span>' % (color, label, mark))
+            elif v is True:
                 parts.append('<span style="color:%s">%s ✓</span>' % (theme.OK, label))
             elif v is False:
-                parts.append('<span style="color:%s">%s ✗ RunDirectly 已关闭</span>' % (theme.ERR, label))
+                parts.append('<span style="color:%s">%s ✗ RunDirectly 已关闭</span>'
+                             % (theme.ERR, label))
             else:
                 parts.append('<span style="color:%s">%s 配置缺失</span>' % (theme.WARN, label))
         self.rd_val.setText(" · ".join(parts))
+        self.rd_val.setToolTip("\n".join(tips))
+
+    def refresh_versions(self, cfg):
+        """刷新版本号显示（ctypes 读版本 + 读本地缓存文件，毫秒级，不派生子进程）。"""
+        for name, cur, latest in maa_update.version_rows(cfg):
+            pill = self.pills[name]
+            if maa_update.has_update(cur, latest):
+                pill.set_state("fail", "有更新 %s → %s"
+                               % (maa_update.fmt_version(cur),
+                                  maa_update.fmt_version(latest)))
+            elif cur:
+                pill.set_state("ok", "已最新 %s" % maa_update.fmt_version(cur))
+            else:
+                pill.set_state("wait", "未知")
+
+
+class MaaUpdateWorker(QThread):
+    """后台跑 run_full_update：逐行转发日志，结束发 done(ok, summary)。"""
+
+    line = Signal(str)
+    done = Signal(bool, str)
+
+    def __init__(self, cfg, parent=None):
+        super().__init__(parent)
+        self.cfg = cfg
+
+    def run(self):
+        try:
+            ok, summary = maa_update.run_full_update(self.cfg, self.line.emit)
+        except Exception as exc:  # 兜底：更新流程异常不能让线程崩掉
+            ok, summary = False, "更新过程异常：%s" % exc
+        self.done.emit(ok, summary)
+
+
+class UpdateLogDialog(QDialog):
+    """MAA 更新实时日志窗口。关闭只是后台运行，不中断更新。"""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("MAA 更新")
+        self.resize(620, 460)
+        root = QVBoxLayout(self)
+        root.setContentsMargins(20, 18, 20, 16)
+        root.setSpacing(10)
+        self.log_view = QPlainTextEdit()
+        self.log_view.setReadOnly(True)
+        self.log_view.setStyleSheet(
+            "QPlainTextEdit { background: %s; color: %s; font-family: Consolas,"
+            " 'Courier New', monospace; font-size: 12px; border: 1px solid %s;"
+            " border-radius: 6px; }" % (theme.LOG_BG, theme.LOG_FG, theme.BORDER))
+        root.addWidget(self.log_view, 1)
+        btns = QHBoxLayout()
+        tip = BodyLabel("关闭窗口不会中断更新，完成后右上有提示")
+        tip.setStyleSheet("color: %s; font-size: 12px;" % theme.TEXT_3)
+        close_btn = PushButton("后台运行")
+        close_btn.clicked.connect(self.accept)
+        btns.addWidget(tip)
+        btns.addStretch(1)
+        btns.addWidget(close_btn)
+        root.addLayout(btns)
+
+    def append(self, text):
+        self.log_view.appendPlainText(text)
 
 
 class DashboardPage(ScrollArea):
@@ -492,6 +640,9 @@ class DashboardPage(ScrollArea):
         self.view = QWidget()
         self.setWidget(self.view)
         self.setWidgetResizable(True)
+        # 视口透明化：露出的滚动区底色改用窗口灰底（默认调色板底色会发黑/发白）
+        self.setStyleSheet("QScrollArea { border: none; background: transparent; }")
+        self.viewport().setStyleSheet("background: transparent;")
         root = QVBoxLayout(self.view)
         root.setContentsMargins(0, 16, 0, 16)
         root.setSpacing(16)
@@ -500,21 +651,20 @@ class DashboardPage(ScrollArea):
         self.acc_grid.setSpacing(16)
         root.addLayout(self.acc_grid)
 
-        # 中间两个卡片：宽窗口左右并排，窄窗口上下堆叠
-        self.mid_vbox = QVBoxLayout()
-        self.mid_vbox.setSpacing(16)
-        root.addLayout(self.mid_vbox)
-        self.mid_hbox = QHBoxLayout()
-        self.mid_hbox.setSpacing(16)
-        self.mid_vbox.addLayout(self.mid_hbox)
-        self.schedule_card = ScheduleCard(cfg)
-        self.mid_hbox.addWidget(self.schedule_card, 1)
-        self.last_card = LastRunCard(account_specs(cfg))
-        self.mid_hbox.addWidget(self.last_card, 1)
-        self._mid_stacked = False
+        # 上次运行汇总：紧贴账号卡片的同一区块（全局总耗时 + 模拟器状态）
+        self.last_strip = LastRunStrip()
+        root.addWidget(self.last_strip)
 
-        self.conn_card = ConnectionCard()
-        root.addWidget(self.conn_card)
+        self.schedule_card = ScheduleCard(cfg)
+        root.addWidget(self.schedule_card)
+
+        # 底部：连接状态 + MAA 更新 合并为一张 1×2 卡片
+        self.status_card = StatusCard()
+        self.status_card.update_btn.clicked.connect(self.on_maa_update)
+        root.addWidget(self.status_card)
+        self.status_card.refresh_versions(self.cfg)
+        self._upd_worker = None
+        self._upd_dialog = None
         root.addStretch(1)
 
         self.acc_cards = []
@@ -530,6 +680,59 @@ class DashboardPage(ScrollArea):
     def set_adb_state(self, ok):
         """后台线程回报的 ADB 在线状态。"""
         self.adb_ok = ok
+
+    def update_running(self):
+        """MAA 一键更新是否正在后台执行（主窗口关闭前检查）。"""
+        w = self._upd_worker
+        return w is not None and w.isRunning()
+
+    def on_maa_update(self):
+        if runner.is_running():
+            InfoBar.warning("挂机运行中", "请先停止挂机再更新 MAA",
+                            parent=self.window(),
+                            position=InfoBarPosition.TOP_RIGHT, duration=4000)
+            return
+        if self.update_running():
+            InfoBar.info("更新进行中", "MAA 更新正在后台执行，请稍候",
+                         parent=self.window(),
+                         position=InfoBarPosition.TOP_RIGHT, duration=4000)
+            return
+        mu = self.cfg.get("maa_update") or {}
+        vpn_line = ("更新前自动启动 Clash，全部结束后关闭"
+                    if mu.get("use_vpn", True) else "未启用 Clash，MAA 将直连下载")
+        box = MessageBox(
+            "一键更新 MAA",
+            "将依次更新官服与B服两套 MAA（版本更新 + 资源更新）。\n\n"
+            "· %s\n· 更新期间会临时修改 MAA 配置，结束后自动恢复\n"
+            "· 全程可能需要几分钟到十几分钟，期间请勿关闭控制台\n\n"
+            "确定开始吗？" % vpn_line,
+            self.window())
+        box.yesButton.setText("开始更新")
+        box.cancelButton.setText("取消")
+        if not box.exec():
+            return
+        self._upd_dialog = UpdateLogDialog(self.window())
+        self._upd_worker = MaaUpdateWorker(self.cfg, self)
+        self._upd_worker.line.connect(self._upd_dialog.append)
+        self._upd_worker.done.connect(self._on_update_done)
+        self.status_card.update_btn.setEnabled(False)
+        self._upd_worker.start()
+        self._upd_dialog.show()
+
+    def _on_update_done(self, ok, summary):
+        self.status_card.update_btn.setEnabled(True)
+        self.status_card.refresh_versions(self.cfg)
+        dlg = self._upd_dialog
+        if dlg is not None:
+            dlg.append("")
+            dlg.append("==== %s ====" % ("更新完成" if ok else "更新未全部完成"))
+            dlg.append(summary)
+        if ok:
+            InfoBar.success("MAA 更新完成", summary, parent=self.window(),
+                            position=InfoBarPosition.TOP_RIGHT, duration=8000)
+        else:
+            InfoBar.warning("MAA 更新未全部完成", summary, parent=self.window(),
+                            position=InfoBarPosition.TOP_RIGHT, duration=10000)
 
     def _acc_sig(self):
         return tuple((a.get("id"), a.get("label"), bool(a.get("enabled")),
@@ -555,35 +758,13 @@ class DashboardPage(ScrollArea):
                 self.acc_grid.setColumnStretch(c, 1)
             self.acc_cards.append(card)
 
-    @staticmethod
-    def _detach_widget(layout, widget):
-        for i in reversed(range(layout.count())):
-            if layout.itemAt(i).widget() is widget:
-                layout.takeAt(i)
-
-    def _apply_mid_stack(self, stack):
-        """宽窗口「班次计划 + 最近运行」并排；窄窗口改上下堆叠。"""
-        if stack == self._mid_stacked:
-            return
-        self._mid_stacked = stack
-        cards = (self.schedule_card, self.last_card)
-        for w in cards:
-            self._detach_widget(self.mid_hbox, w)
-            self._detach_widget(self.mid_vbox, w)
-        if stack:
-            for w in cards:
-                self.mid_vbox.addWidget(w)
-        else:
-            for w in cards:
-                self.mid_hbox.addWidget(w, 1)
-
     def resizeEvent(self, event):
-        # 太窄时账号卡改一列、中间卡片上下堆叠，避免横向截断
+        # 太窄时账号卡改一列；底部合并卡片缩字号保持 1×2
         cols = 2 if self.viewport().width() >= 720 else 1
         if cols != self._acc_cols:
             self._acc_cols = cols
             self._rebuild_accounts()
-        self._apply_mid_stack(self.viewport().width() < 820)
+        self.status_card.set_compact(self.viewport().width() < 900)
         super().resizeEvent(event)
 
     def refresh(self):
@@ -593,7 +774,6 @@ class DashboardPage(ScrollArea):
         if sig != self.acc_sig:
             self.acc_sig = sig
             self._rebuild_accounts()
-            self.last_card.specs = account_specs(self.cfg)
         log_path = self.cfg["paths"]["log_file"]
         text = logparse.read_text(log_path)
         run = logparse.last_run(text)
@@ -602,8 +782,8 @@ class DashboardPage(ScrollArea):
                        for a in self.cfg.get("accounts", [])}
         for card in self.acc_cards:
             card.refresh(run, stage, enabled_map.get(card.acc["key"], True))
-        self.last_card.refresh(run)
-        self.conn_card.refresh(self.cfg, self.adb_ok)
+        self.last_strip.refresh(run)
+        self.status_card.refresh(self.cfg, self.adb_ok)
         # 残留锁清理（上次运行中断）
         if runner.stale_lock() is not None:
             try:

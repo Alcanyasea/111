@@ -36,8 +36,9 @@ class LogsPage(QWidget):
         open_btn.clicked.connect(self._open_file)
         clear_btn = PushButton("清空")
         clear_btn.setStyleSheet(
-            "PushButton { color: %s; border: 1px solid #e5b7b1; background: #fff; }"
-            "PushButton:hover { background: %s; }" % (theme.ERR, theme.ERR_TINT))
+            "PushButton { color: %s; border: 1px solid #e5b7b1; background: %s; }"
+            "PushButton:hover { background: %s; }"
+            % (theme.ERR, theme.CARD, theme.ERR_TINT))
         clear_btn.clicked.connect(self._clear)
         bar.addWidget(refresh_btn)
         bar.addWidget(open_btn)

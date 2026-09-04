@@ -66,8 +66,9 @@ class HeaderBar(QWidget):
             "停止当前挂机（结束 master.ps1 与 MAA 进程），\n"
             "并取消已排定的自动关机。空闲时不可用。")
         self.stop_btn.setStyleSheet(
-            "PushButton { color: %s; border: 1px solid #e5b7b1; background: #fff; }"
-            "PushButton:hover { background: %s; }" % (theme.ERR, theme.ERR_TINT))
+            "PushButton { color: %s; border: 1px solid #e5b7b1; background: %s; }"
+            "PushButton:hover { background: %s; }"
+            % (theme.ERR, theme.CARD, theme.ERR_TINT))
         self.run_btn = PrimaryPushButton("▶ 立即运行")
         self.run_btn.setToolTip(
             "手动运行一次完整挂机流程（启动模拟器 → 切号 → 跑 MAA → 关模拟器）。\n"
@@ -99,6 +100,10 @@ class MainWindow(FluentWindow):
         self._task_info = None
 
         setTheme(Theme.LIGHT)
+        # 控制台整体灰底：关掉 Win11 默认 Mica 背景后，窗口（含标题栏/侧栏区域）
+        # 统一刷成主题 BG 灰色；Mica 开启时 setCustomBackgroundColor 不生效
+        self.setMicaEffectEnabled(False)
+        self.setCustomBackgroundColor(theme.BG, theme.BG)
         self.setWindowIcon(make_icon())
         self.setWindowTitle("MAA 挂机控制台")
         self.titleBar.setTitle("MAA 挂机控制台")
@@ -206,6 +211,17 @@ class MainWindow(FluentWindow):
 
     def closeEvent(self, event):
         """关窗前停掉后台轮询线程，避免 QThread 泄漏告警。"""
+        if self.dash.update_running():
+            box = MessageBox(
+                "MAA 更新进行中",
+                "MAA 正在后台更新，现在退出会中断更新：\n"
+                "Clash 可能保持开启、MAA 代理配置可能未恢复。\n\n确定退出吗？",
+                self)
+            box.yesButton.setText("仍要退出")
+            box.cancelButton.setText("继续更新")
+            if not box.exec():
+                event.ignore()
+                return
         for p in (self.poller, self.adb_poller):
             p.stop()
             p.wait(3000)

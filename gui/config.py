@@ -138,6 +138,12 @@ DEFAULTS = {
             {"time": "16:00", "enabled": True, "shutdown": False},
         ],
     },
+    "maa_update": {
+        "use_vpn": True,   # 更新前启动 Clash、全部结束后关闭（更新前已开着则复用）
+        "vpn_exe": r"D:\软件\Flclash\clash-verge.exe",  # Clash Verge Rev 主程序
+        "proxy_port": 7897,  # Clash 混合端口（verge.yaml verge_mixed_port）
+        "timeout_min": 15,   # 单套 MAA 更新（下载+安装）等待上限
+    },
     "cleanup": {
         "auto": True,          # 自动清理开关（控制台运行期间定期清理）
         "interval_days": 7,    # 自动清理间隔（天）

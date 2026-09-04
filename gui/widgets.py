@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """通用小组件：状态徽章 Pill、键值行 KV、带标题卡片 Card、渐变图标徽标 IconBadge。"""
 from PySide6.QtCore import Qt
+from PySide6.QtGui import QColor
 from PySide6.QtWidgets import QHBoxLayout, QLabel, QVBoxLayout, QWidget, QSizePolicy
 
 from qfluentwidgets import BodyLabel, CardWidget, SubtitleLabel
@@ -20,17 +21,34 @@ class Pill(QLabel):
 
     def __init__(self, text="", parent=None):
         super().__init__(text, parent)
+        self.compact = False
+        self._kind = "wait"
         self.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         self.set_state("wait", text)
 
     def set_state(self, kind, text):
-        fg, bg = self._STYLES.get(kind, self._STYLES["wait"])
+        self._kind = kind
+        self._apply_style()
+        self.setText(text)
+
+    def set_compact(self, flag):
+        """紧凑模式：更小字号与内边距（用于空间不足时缩小卡片）。"""
+        if self.compact == flag:
+            return
+        self.compact = flag
+        self._apply_style()
+
+    def _apply_style(self):
+        fg, bg = self._STYLES.get(self._kind, self._STYLES["wait"])
+        if self.compact:
+            size, pad = "10.5px", "2px 7px"
+        else:
+            size, pad = "11.5px", "3px 10px"
         self.setStyleSheet(
             "QLabel { background: %s; color: %s; border-radius: 99px;"
-            " padding: 3px 10px; font-size: 11.5px; font-weight: 600; }" % (bg, fg)
+            " padding: %s; font-size: %s; font-weight: 600; }" % (bg, fg, pad, size)
         )
-        self.setText(text)
 
 
 def kv_row(key_text, value_widget, value_min_width=0):
@@ -69,7 +87,19 @@ def big_number(num_text, unit_text):
 
 
 class Card(CardWidget):
-    """白底卡片：可选标题 + 提示文字，内容用 add_widget 逐行加入。"""
+    """灰色卡片：可选标题 + 提示文字，内容用 add_widget 逐行加入。
+
+    CardWidget 默认画白色半透明底，这里改为主题 CARD 灰色（控制台统一灰底）。
+    """
+
+    def _normalBackgroundColor(self):
+        return QColor(theme.CARD)
+
+    def _hoverBackgroundColor(self):
+        return QColor(theme.CARD)
+
+    def _pressedBackgroundColor(self):
+        return QColor(theme.CARD)
 
     def __init__(self, title=None, hint=None, parent=None):
         super().__init__(parent)

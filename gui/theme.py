@@ -5,8 +5,8 @@ qfluentwidgets 自带 Fluent 浅色主题已覆盖整体观感，
 这里只定义设计稿中自定义的部分：状态徽章、kv 行、深色日志视图。
 """
 
-BG = "#f3f5f7"
-CARD = "#ffffff"
+BG = "#cfd2d7"
+CARD = "#e7e9ec"
 BORDER = "#e3e6ea"
 TEXT = "#1b1f24"
 TEXT_2 = "#5b6470"

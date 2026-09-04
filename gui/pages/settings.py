@@ -35,6 +35,9 @@ class SettingsPage(ScrollArea):
         self.view = QWidget()
         self.setWidget(self.view)
         self.setWidgetResizable(True)
+        # 视口透明化：露出的滚动区底色改用窗口灰底
+        self.setStyleSheet("QScrollArea { border: none; background: transparent; }")
+        self.viewport().setStyleSheet("background: transparent;")
         root = QVBoxLayout(self.view)
         root.setContentsMargins(0, 16, 0, 16)
         root.setSpacing(16)
@@ -123,6 +126,42 @@ class SettingsPage(ScrollArea):
         self.maa_setup_card.vbox.addLayout(setup_row)
         self.maa_setup_card.vbox.addSpacing(10)
         root.addWidget(self.maa_setup_card)
+
+        # ---- MAA 更新（一键更新按钮在仪表盘；这里只放 Clash 代理配置）----
+        self.upd_card = Card("MAA 更新")
+        upd_hint = BodyLabel(
+            "「仪表盘 → 一键更新」会依次更新两套 MAA（版本更新 + 资源更新，由 MAA "
+            "启动时自动完成）。更新前自动启动 Clash 并把 MAA 下载代理指向它，"
+            "全部结束后关闭 Clash 并恢复 MAA 原配置；更新前 Clash 已开着则复用，"
+            "不会主动关闭。挂机运行或 MAA 正在打开时不能更新。")
+        upd_hint.setWordWrap(True)
+        upd_hint.setStyleSheet("color: %s; font-size: 12px;" % theme.TEXT_3)
+        self.upd_card.vbox.addWidget(upd_hint)
+        self.upd_card.vbox.addSpacing(10)
+        self.use_vpn_sw = SwitchButton()
+        self._card_row(self.upd_card, "Clash 代理", self.use_vpn_sw,
+                       "关闭后 MAA 更新直连下载（不推荐，GitHub 直连不稳）")
+        self.vpn_edit = LineEdit()
+        self.vpn_edit.setClearButtonEnabled(False)
+        vpn_browse = PushButton("浏览…")
+        vpn_browse.setFixedWidth(76)
+        vpn_browse.clicked.connect(self._browse_vpn)
+        vpn_row = QHBoxLayout()
+        vpn_row.setSpacing(10)
+        vpn_row.addWidget(_row_label("Clash 程序"))
+        vpn_row.addWidget(self.vpn_edit, 1)
+        vpn_row.addWidget(vpn_browse)
+        self.upd_card.vbox.addLayout(vpn_row)
+        self.upd_card.vbox.addSpacing(10)
+        self.port_spin = SpinBox()
+        self.port_spin.setRange(1024, 65535)
+        self._card_row(self.upd_card, "代理端口", self.port_spin,
+                       "Clash 混合端口（Clash Verge Rev 默认 7897）")
+        self.upd_timeout = SpinBox()
+        self.upd_timeout.setRange(5, 60)
+        self._card_row(self.upd_card, "更新超时", self.upd_timeout,
+                       "分钟（单套 MAA 下载+安装的等待上限）")
+        root.addWidget(self.upd_card)
 
         # ---- 数据清理 ----
         self.clean_card = Card("数据清理")
@@ -218,6 +257,11 @@ class SettingsPage(ScrollArea):
         self.clean_auto_sw.setChecked(bool(c.get("auto", True)))
         self.clean_interval.setValue(int(c.get("interval_days", 7)))
         self._refresh_clean_hint()
+        u = source.get("maa_update") or {}
+        self.use_vpn_sw.setChecked(bool(u.get("use_vpn", True)))
+        self.vpn_edit.setText(str(u.get("vpn_exe", "")))
+        self.port_spin.setValue(int(u.get("proxy_port", 7897)))
+        self.upd_timeout.setValue(int(u.get("timeout_min", 15)))
 
     def _refresh_clean_hint(self):
         self.clean_hint.setText(cleanup.last_run_text(self.cfg))
@@ -242,6 +286,11 @@ class SettingsPage(ScrollArea):
         c = self.cfg.setdefault("cleanup", {})
         c["auto"] = self.clean_auto_sw.isChecked()
         c["interval_days"] = self.clean_interval.value()
+        u = self.cfg.setdefault("maa_update", {})
+        u["use_vpn"] = self.use_vpn_sw.isChecked()
+        u["vpn_exe"] = self.vpn_edit.text().strip()
+        u["proxy_port"] = self.port_spin.value()
+        u["timeout_min"] = self.upd_timeout.value()
 
         appconfig.save(self.cfg)
         ok, msg = scheduler.apply(self.cfg)
@@ -321,6 +370,12 @@ class SettingsPage(ScrollArea):
             InfoBar.error("%s MAA 配置失败" % name, msg,
                           parent=self.window(),
                           position=InfoBarPosition.TOP_RIGHT, duration=8000)
+
+    def _browse_vpn(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "选择 Clash 程序", "", "程序 (*.exe);;所有文件 (*.*)")
+        if path:
+            self.vpn_edit.setText(path)
 
     def _browse(self, key):
         path, _ = QFileDialog.getOpenFileName(
