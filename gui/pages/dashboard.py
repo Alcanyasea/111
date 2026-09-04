@@ -4,7 +4,8 @@ import re
 from datetime import datetime
 
 from PySide6.QtCore import Qt, QTimer
-from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QVBoxLayout, QWidget
+from PySide6.QtWidgets import (QFrame, QGridLayout, QHBoxLayout, QLabel,
+                               QVBoxLayout, QWidget)
 
 from qfluentwidgets import (BodyLabel, InfoBar, InfoBarPosition, LineEdit,
                             PushButton, ScrollArea, SwitchButton)
@@ -162,10 +163,10 @@ class ScheduleCard(Card):
         self._row_widgets = []
         self._edits = {}
 
-        # 列标题：与下方每行控件同宽对齐（60 班次 / 84 时间 / 84 启用 / 84 关机 / 64 操作）
+        # 列标题：与下方每行控件同宽对齐（44 班次 / 68 时间 / 75 启用 / 75 关机 / 56 操作）
         head = QHBoxLayout()
-        head.setSpacing(10)
-        for text, w in (("班次", 60), ("时间", 84), ("启用", 84), ("关机", 84), ("操作", 64)):
+        head.setSpacing(6)
+        for text, w in (("班次", 44), ("时间", 68), ("启用", 75), ("关机", 75), ("操作", 56)):
             hlab = _label(text, size="12px", color=theme.TEXT_3)
             hlab.setFixedWidth(w)
             head.addWidget(hlab)
@@ -233,19 +234,19 @@ class ScheduleCard(Card):
         row_widget = QWidget()
         row = QHBoxLayout(row_widget)
         row.setContentsMargins(0, 0, 0, 0)
-        row.setSpacing(10)
+        row.setSpacing(6)
 
         lab = BodyLabel(appconfig.batch_name(entry["time"]))
         lab.setStyleSheet("color: %s; font-size: 13px;" % theme.TEXT_2)
-        lab.setFixedWidth(60)
+        lab.setFixedWidth(44)
         edit = LineEdit()
-        edit.setFixedWidth(84)
+        edit.setFixedWidth(68)
         edit.setClearButtonEnabled(False)
         edit.setText(entry["time"])
         edit.setToolTip("启动时间，HH:MM；00:00 显示为 24点")
         sw = SwitchButton()
         sw.setText("启用")
-        sw.setFixedWidth(84)
+        sw.setFixedWidth(75)
         sw.setChecked(bool(entry.get("enabled", True)))
         sw.setToolTip(
             "开启：该时间点写入计划任务，到点自动开始挂机。\n"
@@ -253,27 +254,24 @@ class ScheduleCard(Card):
             "全部关闭时计划任务整体禁用。")
         shutdown_sw = SwitchButton()
         shutdown_sw.setText("关机")
-        shutdown_sw.setFixedWidth(84)
+        shutdown_sw.setFixedWidth(75)
         shutdown_sw.setChecked(bool(entry.get("shutdown", False)))
         shutdown_sw.setToolTip(
             "开启：该时间点运行成功后 60 秒自动关机（无需确认）。\n"
             "关闭：跑完保持开机。失败时一律不关机，只弹窗提示。\n"
             "手动点「立即运行」不受此开关影响，永不关机。")
         del_btn = PushButton("删除")
-        del_btn.setFixedWidth(64)
+        del_btn.setFixedWidth(56)
         del_btn.setToolTip(
             "删除该时间点，计划任务中的对应触发立即移除。")
         del_btn.setStyleSheet(
             "PushButton { color: %s; border: 1px solid #e5b7b1; }" % theme.ERR)
-        hint = _label("", size="12px", color=theme.TEXT_3)
-        self._update_hint(entry, hint)
 
         row.addWidget(lab)
         row.addWidget(edit)
         row.addWidget(sw)
         row.addWidget(shutdown_sw)
         row.addWidget(del_btn)
-        row.addWidget(hint)
         row.addStretch(1)
         self.rows_layout.addWidget(row_widget)
         self._row_widgets.append(row_widget)
@@ -498,17 +496,22 @@ class DashboardPage(ScrollArea):
         root.setContentsMargins(0, 16, 0, 16)
         root.setSpacing(16)
 
-        self.acc_row = QHBoxLayout()
-        self.acc_row.setSpacing(16)
-        root.addLayout(self.acc_row)
+        self.acc_grid = QGridLayout()
+        self.acc_grid.setSpacing(16)
+        root.addLayout(self.acc_grid)
 
-        row = QHBoxLayout()
-        row.setSpacing(16)
+        # 中间两个卡片：宽窗口左右并排，窄窗口上下堆叠
+        self.mid_vbox = QVBoxLayout()
+        self.mid_vbox.setSpacing(16)
+        root.addLayout(self.mid_vbox)
+        self.mid_hbox = QHBoxLayout()
+        self.mid_hbox.setSpacing(16)
+        self.mid_vbox.addLayout(self.mid_hbox)
         self.schedule_card = ScheduleCard(cfg)
-        row.addWidget(self.schedule_card, 1)
+        self.mid_hbox.addWidget(self.schedule_card, 1)
         self.last_card = LastRunCard(account_specs(cfg))
-        row.addWidget(self.last_card, 1)
-        root.addLayout(row)
+        self.mid_hbox.addWidget(self.last_card, 1)
+        self._mid_stacked = False
 
         self.conn_card = ConnectionCard()
         root.addWidget(self.conn_card)
@@ -516,6 +519,7 @@ class DashboardPage(ScrollArea):
 
         self.acc_cards = []
         self.acc_sig = None
+        self._acc_cols = 2
         self.tick = 0
         self.adb_ok = None
         self.timer = QTimer(self)
@@ -532,18 +536,55 @@ class DashboardPage(ScrollArea):
                       a.get("server")) for a in self.cfg.get("accounts", []))
 
     def _rebuild_accounts(self):
-        """账号列表变化时重建卡片行（顺序/增删/改名）。"""
+        """账号列表变化时重建卡片网格（每行 2 个，顺序/增删/改名）。"""
         specs = account_specs(self.cfg)
-        while self.acc_row.count():
-            item = self.acc_row.takeAt(0)
+        while self.acc_grid.count():
+            item = self.acc_grid.takeAt(0)
             w = item.widget()
             if w is not None:
                 w.deleteLater()
         self.acc_cards = []
-        for acc in specs:
+        for i, acc in enumerate(specs):
             card = AccountCard(acc)
-            self.acc_row.addWidget(card, 1)
+            row, col = divmod(i, self._acc_cols)
+            span = (self._acc_cols - col) if (self._acc_cols > 1
+                                              and len(specs) % 2
+                                              and i == len(specs) - 1) else 1
+            self.acc_grid.addWidget(card, row, col, 1, span)
+            for c in range(self._acc_cols):
+                self.acc_grid.setColumnStretch(c, 1)
             self.acc_cards.append(card)
+
+    @staticmethod
+    def _detach_widget(layout, widget):
+        for i in reversed(range(layout.count())):
+            if layout.itemAt(i).widget() is widget:
+                layout.takeAt(i)
+
+    def _apply_mid_stack(self, stack):
+        """宽窗口「班次计划 + 最近运行」并排；窄窗口改上下堆叠。"""
+        if stack == self._mid_stacked:
+            return
+        self._mid_stacked = stack
+        cards = (self.schedule_card, self.last_card)
+        for w in cards:
+            self._detach_widget(self.mid_hbox, w)
+            self._detach_widget(self.mid_vbox, w)
+        if stack:
+            for w in cards:
+                self.mid_vbox.addWidget(w)
+        else:
+            for w in cards:
+                self.mid_hbox.addWidget(w, 1)
+
+    def resizeEvent(self, event):
+        # 太窄时账号卡改一列、中间卡片上下堆叠，避免横向截断
+        cols = 2 if self.viewport().width() >= 720 else 1
+        if cols != self._acc_cols:
+            self._acc_cols = cols
+            self._rebuild_accounts()
+        self._apply_mid_stack(self.viewport().width() < 820)
+        super().resizeEvent(event)
 
     def refresh(self):
         self.tick += 1

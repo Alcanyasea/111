@@ -12,7 +12,8 @@
               },
     "timeouts":  {
                      "maa_min":  30,
-                     "launch_wait_sec":  120
+                     "launch_wait_sec":  120,
+                     "game_update_min":  90
                  },
     "accounts":  [
                      {
@@ -22,7 +23,9 @@
                          "enabled":  true,
                          "slot":  "official_1",
                          "username":  "",
-                         "password":  ""
+                         "password":  "",
+                         "second_fight_plan":  [],
+                         "second_fight_use_optional":  true
                      },
                      {
                          "id":  "official2",
@@ -31,7 +34,9 @@
                          "enabled":  true,
                          "slot":  "official_2",
                          "username":  "",
-                         "password":  ""
+                         "password":  "",
+                         "second_fight_plan":  [],
+                         "second_fight_use_optional":  true
                      },
                      {
                          "id":  "bilibili",
@@ -40,12 +45,15 @@
                          "enabled":  true,
                          "slot":  "bilibili_1",
                          "username":  "",
-                         "password":  ""
+                         "password":  "",
+                         "second_fight_plan":  [],
+                         "second_fight_use_optional":  true
                      }
                  ],
     "behavior":  {
                      "close_emulator":  true,
-                     "morning_shutdown":  true
+                     "morning_shutdown":  true,
+                     "wait_game_update":  true
                  },
     "schedule":  {
                      "times":  [

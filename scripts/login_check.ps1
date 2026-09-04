@@ -84,6 +84,19 @@ $inGameMarkers = @("公开招募", "干员寻访", "理智", "终端", "采购�
 $announceMarkers = @("活动公告", "系统公告", "资讯速报")
 $announceCloseX = 1215
 $announceCloseY = 75
+# 游戏更新界面标记（版本更新/资源下载/校验/安装；公告页出现同样文字时由
+# 上面公告分支先接管，不会误判成“更新中”）
+$updateMarkers = @(
+    "正在获取更新", "获取更新配置", "获取资源更新配置", "更新配置",
+    "开始下载更新", "开始下载", "正在下载更新", "正在下载", "下载更新包",
+    "正在校验资源", "正在校验", "校验资源", "资源校验",
+    "正在解压", "解压资源", "资源解压",
+    "正在安装更新", "正在安装", "安装更新", "安装中",
+    "正在更新", "正在更新资源", "更新中", "资源更新", "更新资源",
+    "版本更新", "强制更新", "更新内容",
+    "更新完成", "重新启动游戏", "正在重新启动",
+    "更新下载失败", "下载更新失败", "更新资源损坏", "安装更新失败"
+)
 
 function Invoke-Tap($x, $y) {
     & $adb -s $device shell "input tap $x $y" 2>$null | Out-Null
@@ -228,6 +241,8 @@ $blindPokeCount = 0
 $lastPngHash = ""
 $lastWords = $null
 $deadline = (Get-Date).AddSeconds($ScreenTimeoutSec)
+# 游戏更新等待的最长封顶：超过后即使仍在更新也不断延长（防止无限卡死）
+$hardDeadline = (Get-Date).AddHours(2)
 while ((Get-Date) -lt $deadline) {
     if (-not (Ocr-Screenshot $adb $device $png)) { Start-Sleep 5; continue }
     # 画面与上一轮完全相同（静态加载/弹窗/表单）→ 复用上一轮 OCR 结果，
@@ -252,6 +267,23 @@ while ((Get-Date) -lt $deadline) {
         if ($lmExact) { $lm = [PSCustomObject]@{ X = $lmExact.X; Y = $lmExact.Y; Name = "登录" } }
     }
     if ($lm) { $reachedLogin = $true; $loginHit = $lm; break }
+    # 游戏更新中：只等待不点击（下载/安装期间盲点可能打断更新）；
+    # 公告页的“更新公告”正文用公告分支处理，不在此误判
+    $annNow = Find-Marker $words $announceMarkers
+    $upNow = $null
+    if (-not $annNow) { $upNow = Find-Marker $words $updateMarkers }
+    if ($upNow) {
+        $stableCount = 0
+        $posCount = 0
+        $lastActionAt = Get-Date
+        LogLine ("[update] 检测到游戏更新界面（{0}），等待更新完成（不点击）" -f $upNow.Name)
+        if ((Get-Date) -lt $hardDeadline) {
+            # 更新下载/安装可能超过默认登录超时：每次检测到更新顺延一轮
+            $deadline = (Get-Date).AddSeconds($ScreenTimeoutSec)
+        }
+        Start-Sleep 6
+        continue
+    }
     # 启动公告弹窗：优先处理（盖住主界面时特征词不可见，且要求优先关弹窗再看主界面）。
     # 点右上角 X 关闭；限频 8 秒防连点；不刷新 $lastActionAt，若 X 点不掉仍保留盲点兜底
     $ann = Find-Marker $words $announceMarkers

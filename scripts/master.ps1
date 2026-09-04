@@ -47,8 +47,12 @@ $signalFile = "D:\1\scripts\maa_done.signal"
 $logFile = "D:\1\scripts\master_log.txt"
 $scriptDir = "D:\1\scripts"
 $maaTimeout = 1800
+# 游戏更新检测：默认开启；切号后若游戏在更新，先等更新完成再登录校验
+$waitGameUpdate = $true
+$updateTimeoutSec = 5400   # 默认最长等待 90 分钟
 $venvPython = "D:\1\gui\.venv\Scripts\python.exe"
 $baseSchedulePy = "D:\1\plugins\base_schedule\base_schedule.py"
+$fightStagePy = "D:\1\plugins\fight_stage\fight_stage.py"
 
 # ---- 读取 GUI 配置（D:\1\config.json），字段缺失时回退上面的硬编码默认 ----
 # config.json 由「MAA 挂机控制台」GUI 生成；文件不存在时流程与旧版完全一致。
@@ -76,6 +80,12 @@ if ($config) {
     }
     if ($null -ne $config.timeouts -and $null -ne $config.timeouts.maa_min) {
         $maaTimeout = [int]$config.timeouts.maa_min * 60
+    }
+    if ($null -ne $config.timeouts -and $null -ne $config.timeouts.game_update_min) {
+        $updateTimeoutSec = [int]$config.timeouts.game_update_min * 60
+    }
+    if ($null -ne $config.behavior -and $null -ne $config.behavior.wait_game_update) {
+        $waitGameUpdate = [bool]$config.behavior.wait_game_update
     }
     $closeEmulator = $true
     if ($null -ne $config.behavior -and $null -ne $config.behavior.close_emulator) {
@@ -431,6 +441,17 @@ $total = $accountList.Count
             continue
         }
 
+        # ---- 游戏更新检测：若游戏在更新（资源下载/校验/安装/重装），
+        # 先等更新完成再开始登录校验，避免对着更新界面误操作 ----
+        if ($waitGameUpdate) {
+            $updOk = ((Run-Switch ("game_update_wait.ps1 -Server {0} -TimeoutSec {1}" -f $accServer, $updateTimeoutSec)) -eq 0)
+            if (-not $updOk) {
+                Log ("  [ERROR] 游戏更新未完成（超过 " + [int]($updateTimeoutSec / 60) + " 分钟），跳过该账号，请手动确认游戏可正常进入后重试")
+                $results += [PSCustomObject]@{ Account=$accLabel; OK=$false; Duration="0 min" }
+                continue
+            }
+        }
+
         # ---- 登录校验：屏幕级确认游戏已登录；未登录自动输账号密码（官服）并刷新槽位 ----
         # 文件级 uid 校验通过不代表游戏真在登录态（token 失效时会回到登录界面）
         $loginOk = ((Run-Switch ("login_check.ps1 -Server {0} -Slot {1}" -f $accServer, $accSlot)) -eq 0)
@@ -445,8 +466,33 @@ $total = $accountList.Count
             Log "  [TEST] -SkipMAA: 跳过 MAA，仅验证切号"
             $ok = $true
         } else {
-            # ---- 精确基建派驻插件：启动 MAA 前按账号写入自定义计划（未启用则恢复 Rotation）----
             $accId = if ($null -ne $acc.id -and [string]$acc.id) { [string]$acc.id } else { "" }
+            # ---- 第二理智作战关卡：启动 MAA 前按账号写入第二个 FightTask 的关卡 ----
+            $accHasFightPlan = $false
+            $planProp = $acc.PSObject.Properties['second_fight_plan']
+            if ($null -ne $planProp -and $null -ne $planProp.Value) {
+                $planList = @($planProp.Value)
+                if ($planList.Count -gt 0) {
+                    $accHasFightPlan = $true
+                }
+            }
+            if (-not $accHasFightPlan -and $null -ne $acc.second_fight_stage -and
+                [string]$acc.second_fight_stage) {
+                $accHasFightPlan = $true
+            }
+            if ($accId -and $accHasFightPlan -and (Test-Path $venvPython) -and (Test-Path $fightStagePy)) {
+                $fsOut = & $venvPython $fightStagePy apply --config $configPath --account $accId --server $accServer 2>&1
+                $fsCode = $LASTEXITCODE
+                foreach ($fsLine in $fsOut) {
+                    if ($fsLine -and [string]$fsLine) { Log ("  [理智关卡] " + [string]$fsLine) }
+                }
+                if ($fsCode -ne 0) {
+                    Log "  [WARN] 理智关卡插件执行失败（exit $fsCode），继续按 MAA 原配置运行"
+                }
+            } elseif ($accId -and $accHasFightPlan) {
+                Log "  [WARN] 理智关卡插件不可用（venv python 或脚本缺失），第二理智关卡未写入"
+            }
+            # ---- 精确基建派驻插件：启动 MAA 前按账号写入自定义计划（未启用则恢复 Rotation）----
             if ($accId -and (Test-Path $venvPython) -and (Test-Path $baseSchedulePy)) {
                 $bsOut = & $venvPython $baseSchedulePy apply --config $configPath --account $accId --server $accServer --batch $bsBatch 2>&1
                 $bsCode = $LASTEXITCODE

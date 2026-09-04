@@ -57,6 +57,8 @@ def default_base_schedule(layout="333", batches=None):
         dormitory  干员休整宿舍 5 人/间（二维列表，固定 4 间，留空自动安排）
         office     办公室  1 人（列表）
         processing 加工站  1 人（列表，可选；留空时 MAA 在自定义模式下跳过加工站）
+    （可选）每个批次还可带 fiammetta：{enable, target, order} —— 该批次是否使用
+    菲亚梅塔、目标干员、换班前/后；一般由「导入排班文件」功能写入。
     drones      无人机（全局，每个批次都投放）：
         {room: manufacture/trading, index: 站号 1 起,
          enable: 是否启用, order: pre 换班前/post 换班后}
@@ -108,6 +110,7 @@ DEFAULTS = {
     "timeouts": {
         "maa_min": 30,            # 单个 MAA 任务超时（分钟）
         "launch_wait_sec": 120,   # 模拟器启动等待上限（秒）
+        "game_update_min": 90,    # 游戏更新检测最长等待（分钟）
     },
     "accounts": [
         # 账号数组（顺序即运行顺序）。slot = scripts\accounts\<slot> 登录数据目录
@@ -124,6 +127,7 @@ DEFAULTS = {
     ],
     "behavior": {
         "close_emulator": True,   # 完成后关模拟器
+        "wait_game_update": True, # 检测到游戏更新时先等更新完成，再开始登录检测
         # 旧版早晚班关机开关（新格式迁移进 schedule.times 后不再使用，仅兼容回退）
         "morning_shutdown": True,
         "evening_shutdown": False,
@@ -184,6 +188,17 @@ def _migrate_accounts(cfg):
             a.setdefault("slot", "")
             a.setdefault("username", "")
             a.setdefault("password", "")
+            # 第二理智作战候选关卡（对应 MAA StagePlan 列表；空 = 跟随 MAA 原设置）
+            if not isinstance(a.get("second_fight_plan"), list):
+                legacy = a.pop("second_fight_stage", None)
+                if isinstance(legacy, list):
+                    plan = [str(x).strip() for x in legacy if str(x).strip()]
+                elif isinstance(legacy, str) and legacy.strip():
+                    plan = [legacy.strip()]
+                else:
+                    plan = []
+                a["second_fight_plan"] = plan
+            a.setdefault("second_fight_use_optional", True)
             a.setdefault("base_schedule", default_base_schedule())
 
 

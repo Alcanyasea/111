@@ -7,11 +7,13 @@
 MAA 自定义计划 JSON（master.ps1 启动 MAA 前会自动应用）。
 """
 import copy
+import json
+import re
 import sys
 from pathlib import Path
 
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import (QDialog, QGridLayout, QHBoxLayout,
+from PySide6.QtWidgets import (QDialog, QFileDialog, QGridLayout, QHBoxLayout,
                                QScrollArea, QStackedWidget, QVBoxLayout,
                                QWidget)
 
@@ -47,6 +49,12 @@ def _batch_labels(cfg):
             name, "、".join("%s - %s" % (s[0], s[1]) for s in segs))
         for name, segs in zip(names, periods)
     }
+
+
+def _safe_filename(text):
+    """账号标签等 → 可用于 Windows 文件名的片段。"""
+    name = re.sub(r'[\\/:*?"<>|\s]+', "_", str(text).strip())
+    return name or "排班"
 
 
 class BaseScheduleDialog(QDialog):
@@ -138,8 +146,21 @@ class BaseScheduleDialog(QDialog):
 
         btns = QHBoxLayout()
         btns.setSpacing(10)
+        self.import_btn = PushButton("导入排班文件")
+        self.import_btn.setToolTip(
+            "选择一图流基建排班表 / MAA 自定义基建导出的 JSON，"
+            "自动识别换班时段、布局与干员配置，填入当前账号对应批次。\n"
+            "识别后仍需点「保存并生成计划」才会写入配置并生成 MAA 计划文件。")
+        self.import_btn.clicked.connect(self._on_import)
+        self.export_btn = PushButton("导出排班文件")
+        self.export_btn.setToolTip(
+            "把当前弹窗里的排班按一图流 / MAA 自定义基建 JSON 格式保存。\n"
+            "默认保存到桌面，方便备份或导入其它工具 / MAA。")
+        self.export_btn.clicked.connect(self._on_export)
         self.cancel_btn = PushButton("取消")
         self.save_btn = PrimaryPushButton("保存并生成计划")
+        btns.addWidget(self.import_btn)
+        btns.addWidget(self.export_btn)
         btns.addStretch(1)
         btns.addWidget(self.cancel_btn)
         btns.addWidget(self.save_btn)
@@ -292,6 +313,103 @@ class BaseScheduleDialog(QDialog):
     def _on_batch_changed(self, index):
         self.stack.setCurrentIndex(index)
 
+    def _on_import(self):
+        """导入一图流/MAA 自定义基建 JSON：识别后填入当前账号各批次（不自动保存）。"""
+        start = Path.home() / "Desktop"
+        if not start.exists():
+            start = Path.home()
+        fname, _ = QFileDialog.getOpenFileName(
+            self, "选择排班文件（一图流 / MAA 自定义基建 JSON）",
+            str(start), "JSON 文件 (*.json);;所有文件 (*)")
+        if not fname:
+            return
+        try:
+            with open(fname, "r", encoding="utf-8-sig") as f:
+                doc = json.load(f)
+            result = bsplugin.convert_import_document(self.cfg, doc)
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            box = MessageBox("无法识别该排班文件", str(exc), self.window())
+            box.yesButton.setText("知道了")
+            box.cancelButton.hide()
+            box.exec()
+            return
+
+        # 先把当前页面各批次读回 self.data，未覆盖到的批次保留未保存的修改
+        for b in self.batches:
+            self._capture(b)
+        self.layout = result["layout"]
+        self.layout_combo.blockSignals(True)
+        self.layout_combo.setCurrentIndex(0 if self.layout == "333" else 1)
+        self.layout_combo.blockSignals(False)
+        for b, data in result["batches"].items():
+            if b in self.data:
+                self.data[b] = data
+        # 统一按文件布局规范化：旧批次多余站台裁剪、旧数组格式转新格式
+        norm = bsplugin.normalize(
+            {"layout": self.layout, "batches": self.data}, self.batches)
+        self.data = norm["batches"]
+
+        drones = result.get("drones")
+        if drones is not None:
+            idx = self.drones_room_combo.findData(drones.get("room"))
+            if idx >= 0:
+                self.drones_room_combo.setCurrentIndex(idx)
+            self._refresh_drones_index()
+            d_idx = self.drones_index_combo.findData(drones.get("index"))
+            if d_idx >= 0:
+                self.drones_index_combo.setCurrentIndex(d_idx)
+            o_idx = self.drones_order_combo.findData(drones.get("order"))
+            if o_idx >= 0:
+                self.drones_order_combo.setCurrentIndex(o_idx)
+            self.drones_switch.setChecked(True)
+        elif result.get("drones_explicit"):
+            # 文件里明确写了不使用无人机：关掉，而不是沿用旧设置
+            self.drones_switch.setChecked(False)
+
+        self._rebuild_pages()
+        self._refresh_drones_index()
+        self._refresh_hint()
+
+        summary = []
+        if result.get("title"):
+            summary.append("识别到排班：%s（%s 布局）" % (result["title"], self.layout))
+        summary.append("已填入 %d 个批次：" % len(result["batches"]))
+        for b in self.batches:
+            if b not in result["batches"]:
+                continue
+            src = result["plan_names"].get(b)
+            summary.append("  %s批 ← %s" % (b, src or "计划"))
+        fia_lines = []
+        for b in self.batches:
+            fia = self.data.get(b, {}).get("fiammetta")
+            if isinstance(fia, dict) and fia.get("enable") and fia.get("target"):
+                fia_lines.append("  %s批：菲亚梅塔 → %s（%s）"
+                                 % (b, fia["target"],
+                                    "换班前" if fia.get("order") == "pre"
+                                    else "换班后"))
+        if fia_lines:
+            summary.append("")
+            summary.append("菲亚梅塔设置：")
+            summary.extend(fia_lines)
+        if result.get("drones"):
+            d = result["drones"]
+            summary.append("")
+            summary.append("无人机：%s%d号站，%s投放"
+                           % ("贸易站" if d.get("room") == "trading"
+                              else "制造站",
+                              d.get("index"),
+                              "换班前" if d.get("order") == "pre"
+                              else "换班后"))
+        summary.append("")
+        summary.append("内容已填入弹窗，尚未写入配置——点下方「保存并生成计划」即可生效。")
+        for note in result.get("notes") or []:
+            summary.append("")
+            summary.append("说明：%s" % note)
+        box = MessageBox("已识别并导入排班文件", "\n".join(summary), self.window())
+        box.yesButton.setText("知道了")
+        box.cancelButton.hide()
+        box.exec()
+
     def _refresh_drones_index(self, *_):
         """按目标设施与布局刷新无人机站号下拉（制造 3/4 台，贸易 2/3 台）。"""
         room = self.drones_room_combo.currentData()
@@ -395,7 +513,8 @@ class BaseScheduleDialog(QDialog):
             surplus = old[len(shown):] if isinstance(old, list) else []
             self.data[batch][key] = shown + list(surplus)
 
-    def _on_save(self):
+    def _collect_bs(self):
+        """把当前界面状态收集为规范化后的 base_schedule 结构。"""
         for b in self.batches:
             self._capture(b)
         bs = {
@@ -409,7 +528,10 @@ class BaseScheduleDialog(QDialog):
             },
             "batches": self.data,
         }
-        bs = bsplugin.normalize(bs, self.batches)
+        return bsplugin.normalize(bs, self.batches)
+
+    def _on_save(self):
+        bs = self._collect_bs()
         self.acc["base_schedule"] = bs
         appconfig.save(self.cfg)
         try:
@@ -424,6 +546,56 @@ class BaseScheduleDialog(QDialog):
             box.exec()
             return
         self.accept()
+
+    def _on_export(self):
+        """按一图流 / MAA 自定义基建格式导出当前弹窗里的排班（默认存桌面）。"""
+        bs = self._collect_bs()
+        entries, names, _periods = bsplugin.schedule_spec(self.cfg)
+        if not entries:
+            box = MessageBox("无法导出", "当前没有启用的班次计划时间，无法生成换班时段。",
+                             self.window())
+            box.yesButton.setText("知道了")
+            box.cancelButton.hide()
+            box.exec()
+            return
+        doc = bsplugin.build_plan_document(
+            bs, entries,
+            title=(self.acc.get("label") or "自定义基建"),
+            description="由 MAA 挂机控制台导出（%s）" % "、".join(names),
+        )
+
+        start = Path.home() / "Desktop"
+        if not start.exists():
+            start = Path.home()
+        default_name = "排班表%s.json" % _safe_filename(self.acc.get("label")
+                                                        or "排班")
+        fname, _ = QFileDialog.getSaveFileName(
+            self, "导出排班文件", str(start / default_name),
+            "JSON 文件 (*.json);;所有文件 (*)")
+        if not fname:
+            return
+        out = Path(fname)
+        if out.suffix.lower() != ".json":
+            out = out.with_suffix(".json")
+        tmp = out.with_name(out.name + ".tmp")
+        try:
+            tmp.write_text(json.dumps(doc, ensure_ascii=False, indent=2),
+                           encoding="utf-8", newline="\n")
+            tmp.replace(out)
+        except OSError as exc:
+            box = MessageBox("导出失败", str(exc), self.window())
+            box.yesButton.setText("知道了")
+            box.cancelButton.hide()
+            box.exec()
+            return
+        box = MessageBox(
+            "已导出排班文件",
+            "已保存到：\n%s\n\n格式：一图流 / MAA 自定义基建 JSON（%d 个班次：%s）。"
+            % (out, len(doc.get("plans") or []), "、".join(names)),
+            self.window())
+        box.yesButton.setText("知道了")
+        box.cancelButton.hide()
+        box.exec()
 
 
 def show_base_schedule_dialog(cfg, acc, parent=None):

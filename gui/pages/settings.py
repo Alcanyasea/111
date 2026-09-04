@@ -58,9 +58,13 @@ class SettingsPage(ScrollArea):
             self.path_edits[key] = edit
         root.addWidget(self.path_card)
 
-        # ---- 连接与超时 / 行为开关 ----
-        row = QHBoxLayout()
-        row.setSpacing(16)
+        # ---- 连接与超时 / 行为开关（宽窗口并排，窄窗口上下堆叠）----
+        self.mid_vbox = QVBoxLayout()
+        self.mid_vbox.setSpacing(16)
+        root.addLayout(self.mid_vbox)
+        self.mid_hbox = QHBoxLayout()
+        self.mid_hbox.setSpacing(16)
+        self.mid_vbox.addLayout(self.mid_hbox)
 
         self.conn_card = Card("连接与超时")
         self.device_edit = LineEdit()
@@ -72,11 +76,18 @@ class SettingsPage(ScrollArea):
         self.launch_spin = SpinBox()
         self.launch_spin.setRange(10, 600)
         self._card_row(self.conn_card, "启动等待", self.launch_spin, "秒（模拟器启动上限）")
-        row.addWidget(self.conn_card, 1)
+        self.update_spin = SpinBox()
+        self.update_spin.setRange(5, 360)
+        self._card_row(self.conn_card, "更新等待上限", self.update_spin,
+                       "分钟（游戏更新下载/安装最长等待，默认 90）")
+        self.mid_hbox.addWidget(self.conn_card, 1)
 
         self.behavior_card = Card("行为开关")
         self.close_emu_sw = SwitchButton()
         self._card_row(self.behavior_card, "完成后关模拟器", self.close_emu_sw)
+        self.wait_update_sw = SwitchButton()
+        self._card_row(self.behavior_card, "游戏更新检测", self.wait_update_sw,
+                       "检测到游戏更新时先等更新完成，再开始登录检测")
         shutdown_hint = BodyLabel(
             "每个启动时间的「关机」开关在仪表盘「班次计划」中设置（60 秒倒计时）")
         shutdown_hint.setStyleSheet("color: %s; font-size: 12px;" % theme.TEXT_3)
@@ -86,8 +97,8 @@ class SettingsPage(ScrollArea):
         acc_hint = BodyLabel("账号增删 / 启用 / 捕获请到「账号管理」页")
         acc_hint.setStyleSheet("color: %s; font-size: 12px;" % theme.TEXT_3)
         self.behavior_card.vbox.addWidget(acc_hint)
-        row.addWidget(self.behavior_card, 1)
-        root.addLayout(row)
+        self.mid_hbox.addWidget(self.behavior_card, 1)
+        self._mid_stacked = False
 
         # ---- MAA 服务器配置 ----
         self.maa_setup_card = Card("MAA 服务器配置")
@@ -155,6 +166,32 @@ class SettingsPage(ScrollArea):
 
         self.load_from_cfg()
 
+    @staticmethod
+    def _detach_widget(layout, widget):
+        for i in reversed(range(layout.count())):
+            if layout.itemAt(i).widget() is widget:
+                layout.takeAt(i)
+
+    def _apply_mid_stack(self, stack):
+        """宽窗口「连接与超时 / 行为开关」并排；窄窗口上下堆叠。"""
+        if stack == self._mid_stacked:
+            return
+        self._mid_stacked = stack
+        cards = (self.conn_card, self.behavior_card)
+        for w in cards:
+            self._detach_widget(self.mid_hbox, w)
+            self._detach_widget(self.mid_vbox, w)
+        if stack:
+            for w in cards:
+                self.mid_vbox.addWidget(w)
+        else:
+            for w in cards:
+                self.mid_hbox.addWidget(w, 1)
+
+    def resizeEvent(self, event):
+        self._apply_mid_stack(self.viewport().width() < 900)
+        super().resizeEvent(event)
+
     def _card_row(self, card, label, widget, hint=None):
         row = QHBoxLayout()
         row.setSpacing(10)
@@ -174,7 +211,9 @@ class SettingsPage(ScrollArea):
         self.device_edit.setText(source["paths"].get("device", ""))
         self.maa_spin.setValue(int(source["timeouts"].get("maa_min", 30)))
         self.launch_spin.setValue(int(source["timeouts"].get("launch_wait_sec", 120)))
+        self.update_spin.setValue(int(source["timeouts"].get("game_update_min", 90)))
         self.close_emu_sw.setChecked(bool(source["behavior"].get("close_emulator", True)))
+        self.wait_update_sw.setChecked(bool(source["behavior"].get("wait_game_update", True)))
         c = source.get("cleanup") or {}
         self.clean_auto_sw.setChecked(bool(c.get("auto", True)))
         self.clean_interval.setValue(int(c.get("interval_days", 7)))
@@ -197,7 +236,9 @@ class SettingsPage(ScrollArea):
         self.cfg["paths"]["device"] = self.device_edit.text().strip()
         self.cfg["timeouts"]["maa_min"] = self.maa_spin.value()
         self.cfg["timeouts"]["launch_wait_sec"] = self.launch_spin.value()
+        self.cfg["timeouts"]["game_update_min"] = self.update_spin.value()
         self.cfg["behavior"]["close_emulator"] = self.close_emu_sw.isChecked()
+        self.cfg["behavior"]["wait_game_update"] = self.wait_update_sw.isChecked()
         c = self.cfg.setdefault("cleanup", {})
         c["auto"] = self.clean_auto_sw.isChecked()
         c["interval_days"] = self.clean_interval.value()

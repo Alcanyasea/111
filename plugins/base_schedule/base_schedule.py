@@ -256,6 +256,17 @@ def normalize(bs, batches=None):
             "office": single(src, "office", 1),
             "processing": single(src, "processing", 1),
         }
+        # 菲亚梅塔（每个批次可选）：保留导入文件/手动配置里的设置，供生成器写回
+        # MAA 计划 JSON 的 plan["Fiammetta"] 字段。
+        fi = src.get("fiammetta")
+        if isinstance(fi, dict):
+            target = str(fi.get("target") or "").strip()
+            order = str(fi.get("order") or "pre")
+            out["batches"][b]["fiammetta"] = {
+                "enable": bool(fi.get("enable", bool(target))),
+                "target": target,
+                "order": order if order in ("pre", "post") else "pre",
+            }
     return out
 
 
@@ -340,6 +351,16 @@ def build_plan_document(bs, entries=None, title="自定义基建",
                 "enable": True,
                 "order": drones.get("order") or "pre",
             }
+        fiammetta = b.get("fiammetta")
+        if isinstance(fiammetta, dict) and fiammetta.get("enable"):
+            target = str(fiammetta.get("target") or "").strip()
+            if target:
+                plan["Fiammetta"] = {
+                    "enable": True,
+                    "target": target,
+                    "order": (fiammetta.get("order") or "pre")
+                    if fiammetta.get("order") in ("pre", "post") else "pre",
+                }
         plans.append(plan)
     return {
         "author": "MAA 挂机控制台",
@@ -556,6 +577,325 @@ def cmd_generate(args):
     path = regenerate_for_account(cfg, acc)
     print("OK " + str(path))
     return 0
+
+
+def _import_time(t):
+    return isinstance(t, str) and bool(re.fullmatch(r"([01]\d|2[0-3]):[0-5]\d", t))
+
+
+def _cfg_schedule_times(cfg):
+    """config.schedule.times 中所有有效 HH:MM（含停用项，与配置弹窗保持一致）。"""
+    sched = cfg.get("schedule") if isinstance(cfg, dict) else {}
+    times = sched.get("times") if isinstance(sched.get("times"), list) else []
+    out = []
+    for it in times:
+        if not isinstance(it, dict):
+            continue
+        t = str(it.get("time", "")).strip()
+        if _import_time(t) and t not in out:
+            out.append(t)
+    out.sort()
+    return out
+
+
+def _period_covers(segs, t):
+    """换班时段是否覆盖 t（HH:MM 字符串比较，MAA 语义一致；跨天拆成两段）。"""
+    if not isinstance(segs, list):
+        return False
+    for seg in segs:
+        if not isinstance(seg, list) or len(seg) < 2:
+            continue
+        s, e = str(seg[0]).strip(), str(seg[1]).strip()
+        if _import_time(s) and _import_time(e) and s <= t <= e:
+            return True
+    return False
+
+
+def _period_midpoint(segs):
+    """取第一段有效同天时段的中间 HH:MM（用于把 ±1h 窗口识别回整点班次）。"""
+    if not isinstance(segs, list):
+        return None
+    for seg in segs:
+        if not isinstance(seg, list) or len(seg) < 2:
+            continue
+        s, e = str(seg[0]).strip(), str(seg[1]).strip()
+        if not (_import_time(s) and _import_time(e)):
+            continue
+        sm = int(s[:2]) * 60 + int(s[3:])
+        em = int(e[:2]) * 60 + int(e[3:])
+        if em < sm:  # 跨天请拆成两段，单段跨天不参与中点推断
+            continue
+        mid = (sm + em) // 2
+        return "%02d:%02d" % (mid // 60, mid % 60)
+    return None
+
+
+def _doc_layout(doc):
+    """按 scheduleType / rooms 台数识别布局：333 或 243（贸易/制造数）。"""
+    st = doc.get("scheduleType")
+    if isinstance(st, dict):
+        try:
+            m, t = int(st.get("manufacture") or 0), int(st.get("trading") or 0)
+        except (TypeError, ValueError):
+            m = t = 0
+        if t == 2 and m == 4:
+            return "243"
+        if t == 3 and m == 3:
+            return "333"
+    for plan in (doc.get("plans") or []):
+        rooms = plan.get("rooms") if isinstance(plan, dict) else {}
+        if not isinstance(rooms, dict):
+            continue
+        m = len(rooms.get("manufacture") or [])
+        t = len(rooms.get("trading") or [])
+        if t == 2 and m == 4:
+            return "243"
+        if t == 3 and m == 3:
+            return "333"
+    raise ValueError("无法识别布局：仅支持 333（贸易3台·制造3台）或 243（贸易2台·制造4台）")
+
+
+def _entry_operators(entry):
+    if not isinstance(entry, dict):
+        return []
+    ops = entry.get("operators")
+    return [str(x).strip() for x in ops] if isinstance(ops, list) else []
+
+
+def _first_entry(entries):
+    if not isinstance(entries, list) or not entries:
+        return None
+    e = entries[0]
+    return e if isinstance(e, dict) else None
+
+
+def _convert_import_plan(plan, layout):
+    """把一个 MAA 自定义计划转成控制台 base_schedule.batches 里的批次结构。"""
+    m = 4 if layout in ("423", "243") else 3
+    t = 2 if layout in ("423", "243") else 3
+    rooms = plan.get("rooms") if isinstance(plan, dict) else {}
+    if not isinstance(rooms, dict):
+        rooms = {}
+
+    def single(key, n):
+        ops = _entry_operators(_first_entry(rooms.get(key)))
+        return (ops + [""] * n)[:n]
+
+    def stations(key, n, default_product):
+        entries = rooms.get(key)
+        if not isinstance(entries, list):
+            entries = []
+        rows = []
+        for i in range(n):
+            entry = entries[i] if i < len(entries) else {}
+            if not isinstance(entry, dict):
+                entry = {}
+            ops = _entry_operators(entry)
+            product = str(entry.get("product") or default_product)
+            rows.append({"product": product,
+                         "operators": (ops + [""] * 3)[:3]})
+        return rows
+
+    def power_rows():
+        entries = rooms.get("power")
+        if not isinstance(entries, list):
+            entries = []
+        rows = []
+        for i in range(3):
+            entry = entries[i] if i < len(entries) else {}
+            ops = _entry_operators(entry)
+            rows.append((ops + [""])[:1])
+        return rows
+
+    def dorm_rows():
+        entries = rooms.get("dormitory")
+        if not isinstance(entries, list):
+            entries = []
+        rows = []
+        for i in range(4):
+            entry = entries[i] if i < len(entries) else {}
+            ops = _entry_operators(entry)
+            rows.append((ops + [""] * 5)[:5])
+        return rows
+
+    batch = {
+        "control": single("control", 5),
+        "meeting": single("meeting", 2),
+        "manufacture": stations("manufacture", m,
+                                DEFAULT_MANUFACTURE_PRODUCT),
+        "trading": stations("trading", t, DEFAULT_TRADING_PRODUCT),
+        "power": power_rows(),
+        "dormitory": dorm_rows(),
+        "office": single("hire", 1),
+        "processing": single("processing", 1),
+    }
+    fia = plan.get("Fiammetta")
+    if isinstance(fia, dict):
+        target = str(fia.get("target") or "").strip()
+        order = str(fia.get("order") or "pre")
+        batch["fiammetta"] = {
+            "enable": bool(fia.get("enable", bool(target))),
+            "target": target,
+            "order": order if order in ("pre", "post") else "pre",
+        }
+    return batch
+
+
+def _room_import_notes(plan):
+    """识别控制台模型表达不了的进阶字段，导入时给出说明。"""
+    notes = []
+    rooms = plan.get("rooms") if isinstance(plan, dict) else {}
+    if not isinstance(rooms, dict):
+        return notes
+    name = str(plan.get("name") or "计划").strip() or "计划"
+    if plan.get("groups"):
+        notes.append("「%s」带计划级编组 groups，控制台暂不支持，仅导入 operators。"
+                     % name)
+    for key, entries in rooms.items():
+        if not isinstance(entries, list):
+            continue
+        for i, e in enumerate(entries):
+            if not isinstance(e, dict):
+                continue
+            if e.get("skip"):
+                notes.append("「%s」%s 第 %d 个条目原为“不换班”(skip)，控制台不支持该字段，"
+                             "将按留空/自动排班处理。" % (name, key, i + 1))
+            for field in ("candidates", "groups", "use_operator_groups"):
+                if e.get(field):
+                    notes.append("「%s」%s 含进阶字段 %s，控制台暂不支持，仅导入 operators。"
+                                 % (name, key, field))
+    return notes
+
+
+def convert_import_document(cfg, doc):
+    """识别一图流/MAA 自定义基建 JSON 并转换为账号批次配置。
+
+    返回:
+        layout / batches / plan_names / title / drones / notes
+    batches 的键是当前班次计划里的批次名（如 4点/12点/20点）。
+    识别失败抛出 ValueError（含给用户看的原因）。
+    """
+    if not isinstance(doc, dict):
+        raise ValueError("文件内容不是排班 JSON（缺少 plans 列表）。")
+    plans = doc.get("plans")
+    if not isinstance(plans, list) or not plans:
+        raise ValueError("不是可识别的排班文件：缺少 plans 排班列表。\n"
+                         "请选择一图流基建排班表/MAA 自定义基建导出的 JSON。")
+    for i, p in enumerate(plans):
+        if not isinstance(p, dict) or not isinstance(p.get("rooms"), dict):
+            raise ValueError("第 %d 个计划缺少 rooms 房间数据，无法导入。" % (i + 1))
+
+    times = _cfg_schedule_times(cfg)
+    if not times:
+        raise ValueError("当前班次计划里没有启动时间，无法对应批次。\n"
+                         "请先在「班次计划」添加时间（如 04:00 / 12:00 / 20:00）。")
+
+    mapping = {}  # "HH:MM" -> plan 下标
+    used = set()
+    for t in times:
+        hits = [i for i, p in enumerate(plans)
+                if _period_covers(p.get("period"), t)]
+        if len(hits) > 1:
+            names = "、".join("「%s」" % str(plans[i].get("name") or "计划 %d" % (i + 1))
+                              for i in hits)
+            raise ValueError("班次时间 %s 同时被 %s 覆盖，无法自动判断用哪个计划，"
+                             "请先调整文件里的换班时段或班次计划。" % (t, names))
+        if hits:
+            if hits[0] in used:
+                other = next((x for x in mapping if mapping[x] == hits[0]), None)
+                raise ValueError("计划「%s」的换班时段覆盖了 %s 与 %s 两个班次时间，"
+                                 "无法自动拆分，请调整文件时段或班次计划。"
+                                 % (str(plans[hits[0]].get("name") or "计划"), other, t))
+            mapping[t] = hits[0]
+            used.add(hits[0])
+
+    notes = []
+    # 计划没写换班时段（常见于公孙长乐等工具导出）：按排列顺序对应剩余班次时间
+    remaining_times = [t for t in times if t not in mapping]
+    no_period = []
+    for i, p in enumerate(plans):
+        if i in used:
+            continue
+        segs = p.get("period")
+        if not isinstance(segs, list) or not segs:
+            no_period.append(i)
+    if no_period and len(no_period) == len(remaining_times):
+        for t, i in zip(remaining_times, no_period):
+            mapping[t] = i
+            used.add(i)
+            notes.append("「%s」未写换班时段，按文件顺序对应 %s 批。"
+                         % (str(plans[i].get("name") or "计划").strip(),
+                            batch_name(t)))
+
+    for i, p in enumerate(plans):
+        if i in used:
+            continue
+        name = str(p.get("name") or "第 %d 个计划" % (i + 1)).strip()
+        center = _period_midpoint(p.get("period"))
+        if center and center in times and center not in mapping:
+            mapping[center] = i
+            used.add(i)
+            notes.append("「%s」按换班时段中点 %s 归入 %s 批。"
+                         % (name, center, batch_name(center)))
+        elif center:
+            notes.append("「%s」的换班时段中点 %s 不在当前班次计划里，未导入。"
+                         % (name, center))
+        else:
+            notes.append("「%s」没有可匹配的换班时段，未导入。" % name)
+
+    if not mapping:
+        raise ValueError("未能把排班文件里的任何计划对应到当前班次计划。\n"
+                         "请确认文件的换班时段覆盖班次计划里的启动时间"
+                         "（如 03:00-05:00 对应 04:00），或在「班次计划」里添加对应时间。")
+
+    layout = _doc_layout(doc)
+    batches = {}
+    plan_names = {}
+    drones = None
+    drones_explicit = False
+    for t, idx in sorted(mapping.items()):
+        plan = plans[idx]
+        bname = batch_name(t)
+        batches[bname] = _convert_import_plan(plan, layout)
+        plan_names[bname] = str(plan.get("name") or "").strip()
+        notes.extend(_room_import_notes(plan))
+        d = plan.get("drones")
+        if isinstance(d, dict):
+            drones_explicit = True
+            if d.get("enable", True):
+                room = str(d.get("room") or "")
+                if room not in ("trading", "manufacture"):
+                    room = "manufacture"
+                try:
+                    index = int(d.get("index") or 1)
+                except (TypeError, ValueError):
+                    index = 1
+                if index < 1:
+                    index = 1
+                order = str(d.get("order") or "pre")
+                if order not in ("pre", "post"):
+                    order = "pre"
+                cur = {"room": room, "index": index,
+                       "enable": True, "order": order}
+                if drones is None:
+                    drones = cur
+                elif drones != cur:
+                    notes.append("不同班次的无人机目标不一致，已按第 %s 批的"
+                                 "%d号%s站、%s 投放处理。"
+                                 % (bname, drones["index"],
+                                    "贸易站" if drones["room"] == "trading"
+                                    else "制造站",
+                                    "换班前" if drones["order"] == "pre"
+                                    else "换班后"))
+    return {
+        "layout": layout,
+        "batches": batches,
+        "plan_names": plan_names,
+        "title": str(doc.get("title") or "").strip(),
+        "drones": drones,
+        "drones_explicit": drones_explicit,
+        "notes": notes,
+    }
 
 
 def main(argv=None):

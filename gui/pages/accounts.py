@@ -10,9 +10,9 @@ import subprocess
 import uuid
 from pathlib import Path
 
-from PySide6.QtCore import QThread, Signal
-from PySide6.QtWidgets import (QDialog, QHBoxLayout, QPlainTextEdit,
-                               QVBoxLayout, QWidget)
+from PySide6.QtCore import Qt, QThread, Signal
+from PySide6.QtWidgets import (QDialog, QGridLayout, QHBoxLayout,
+                               QPlainTextEdit, QVBoxLayout, QWidget)
 
 from qfluentwidgets import (BodyLabel, ComboBox, InfoBar, InfoBarPosition,
                             LineEdit, MessageBox, PrimaryPushButton, PushButton,
@@ -20,6 +20,8 @@ from qfluentwidgets import (BodyLabel, ComboBox, InfoBar, InfoBarPosition,
 
 import config as appconfig
 import theme
+from pages.stage_plan_dialog import (format_stage_plan, maa_second_fight_plan,
+                                     show_stage_plan_dialog)
 from widgets import Card, IconBadge, Pill
 
 CREATE_NO_WINDOW = 0x08000000
@@ -233,6 +235,10 @@ class CaptureDialog(QDialog):
             "slot": self._slot,
             "username": self.user_edit.text().strip(),
             "password": self.pass_edit.text(),
+            "second_fight_plan": list((self.acc or {}).get("second_fight_plan")
+                                      or []),
+            "second_fight_use_optional": bool(
+                (self.acc or {}).get("second_fight_use_optional", True)),
             "base_schedule": appconfig.default_base_schedule(
                 batches=appconfig.schedule_batches(self.cfg)),
         }
@@ -307,7 +313,38 @@ class AccountRow(Card):
         self.del_btn.clicked.connect(self._on_delete)
         row.addWidget(self.del_btn)
         self.vbox.addLayout(row)
+
+        # 第二理智作战候选关卡：仿 MAA，点开用下拉逐行添加/调整候选
+        sub = QHBoxLayout()
+        sub.setSpacing(10)
+        lab = BodyLabel("候选关卡:")
+        lab.setStyleSheet("color: %s; font-size: 12px;" % theme.TEXT_2)
+        sub.addWidget(lab)
+        self.fight_btn = PushButton()
+        self.fight_btn.setMinimumWidth(300)
+        self.fight_btn.setToolTip(
+            "编辑该账号第二个理智作战的候选关卡，界面与 MAA 一致：\n"
+            "每个候选一行下拉关卡，可「＋ 添加 / ✕ 删除 / ↑↓ 调整顺序」。")
+        self.fight_btn.clicked.connect(self._on_fight_plan)
+        self._refresh_fight_plan_text()
+        sub.addWidget(self.fight_btn)
+        tip = BodyLabel("点开按 MAA 方式修改；留空 = 跟随 MAA")
+        tip.setStyleSheet("color: %s; font-size: 12px;" % theme.TEXT_3)
+        sub.addWidget(tip)
+        sub.addStretch(1)
+        self.vbox.addLayout(sub)
         self.refresh_uid()
+
+    def _refresh_fight_plan_text(self):
+        """按钮摘要：账号已设置 → 显示其候选；否则显示 MAA 当前映射。"""
+        saved = self.acc.get("second_fight_plan")
+        plan = [str(s).strip() for s in saved] if isinstance(saved, list) else []
+        mapped = []
+        if not plan:
+            mapped = maa_second_fight_plan(self.cfg,
+                                           self.acc.get("server"))[0]
+        text = format_stage_plan(plan or mapped) or "跟随 MAA 原设置"
+        self.fight_btn.setText("候选：%s ▾" % text)
 
     def refresh_uid(self):
         uid = slot_uid(self.cfg, self.acc.get("slot", ""))
@@ -319,6 +356,10 @@ class AccountRow(Card):
     def _on_toggle(self, checked):
         self.acc["enabled"] = bool(checked)
         appconfig.save(self.cfg)
+
+    def _on_fight_plan(self):
+        if show_stage_plan_dialog(self.cfg, self.acc, parent=self):
+            self._refresh_fight_plan_text()
 
     def _on_base_toggle(self, checked):
         bs = self.acc.get("base_schedule")
@@ -353,36 +394,250 @@ class AccountRow(Card):
             self.page.refresh()
 
 
+class AccountDetailDialog(QDialog):
+    """账号详细控制：捕获、基建配置、候选关卡、删除都集中在这里。"""
+
+    def __init__(self, cfg, acc, page=None, parent=None):
+        super().__init__(parent)
+        self.cfg = cfg
+        self.acc = acc
+        self.page = page
+        self.setWindowTitle("账号详情 - %s" % (acc.get("label") or ""))
+        self.setModal(True)
+        self.resize(560, 430)
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(20, 18, 20, 16)
+        root.setSpacing(14)
+
+        # 头部：名称 + 服务器/槽位 + UID 状态
+        server = acc.get("server", "official")
+        colors = (theme.ACCENT_B if server == "bilibili"
+                  else theme.ACCENT_O1)
+        head = QHBoxLayout()
+        head.setSpacing(12)
+        head.addWidget(IconBadge("1", colors))
+        name_box = QVBoxLayout()
+        name_box.setSpacing(2)
+        name = SubtitleLabel(acc.get("label") or "?")
+        meta = BodyLabel("%s · 槽位 %s" % (SERVER_LABELS.get(server, server),
+                                           acc.get("slot", "未设置")))
+        meta.setStyleSheet("color: %s; font-size: 12px;" % theme.TEXT_2)
+        name_box.addWidget(name)
+        name_box.addWidget(meta)
+        head.addLayout(name_box)
+        head.addStretch(1)
+        self.uid_pill = Pill()
+        head.addWidget(self.uid_pill, 0, Qt.AlignmentFlag.AlignVCenter)
+        root.addLayout(head)
+
+        line = QWidget()
+        line.setFixedHeight(1)
+        line.setStyleSheet("background: %s;" % theme.BORDER)
+        root.addWidget(line)
+
+        sec = BodyLabel("常用功能")
+        sec.setStyleSheet("color: %s; font-size: 13px; font-weight: 600;"
+                          % theme.TEXT_2)
+        root.addWidget(sec)
+
+        grid = QGridLayout()
+        grid.setSpacing(10)
+        self.capture_btn = PushButton("重新捕获登录数据")
+        self.capture_btn.setToolTip("清空登录态并重新登录，拉取该账号的登录数据")
+        self.bs_btn = PushButton("精确基建配置")
+        self.bs_btn.setToolTip("配置该账号精确基建派驻（布局/批次/干员）")
+        self.fight_btn = PushButton("第二理智候选关卡")
+        self.fight_btn.setToolTip("按 MAA 候选关卡界面修改该账号刷图候选")
+        self.delete_btn = PushButton("删除该账号")
+        self.delete_btn.setStyleSheet(
+            "PushButton { color: %s; border: 1px solid #e5b7b1; }" % theme.ERR)
+        for i, b in enumerate((self.capture_btn, self.bs_btn,
+                               self.fight_btn, self.delete_btn)):
+            b.setMinimumHeight(38)
+            grid.addWidget(b, i // 2, i % 2)
+        grid.setColumnStretch(0, 1)
+        grid.setColumnStretch(1, 1)
+        root.addLayout(grid)
+
+        self.hint = BodyLabel(
+            "「是否启用 / 精确基建」开关在账号卡片上直接操作；"
+            "运行顺序 = 账号列表顺序。")
+        self.hint.setWordWrap(True)
+        self.hint.setStyleSheet("color: %s; font-size: 12px;" % theme.TEXT_3)
+        root.addWidget(self.hint)
+        root.addStretch(1)
+
+        self.delete_btn.clicked.connect(self._on_delete)
+
+        self.capture_btn.clicked.connect(self._on_capture)
+        self.bs_btn.clicked.connect(self._on_base_config)
+        self.fight_btn.clicked.connect(self._on_fight_plan)
+        self._refresh_uid()
+
+    def _refresh_uid(self):
+        uid = slot_uid(self.cfg, self.acc.get("slot", ""))
+        if uid:
+            self.uid_pill.set_state("ok", "已捕获 UID %s" % uid)
+        else:
+            self.uid_pill.set_state("warn", "未捕获")
+
+    def _on_capture(self):
+        dlg = CaptureDialog(self.cfg, self.acc, page=self.page, parent=self)
+        dlg.exec()
+        self._refresh_uid()
+        if self.page is not None:
+            self.page.refresh()
+
+    def _on_base_config(self):
+        from pages.base_schedule_dialog import show_base_schedule_dialog
+        show_base_schedule_dialog(self.cfg, self.acc, parent=self)
+
+    def _on_fight_plan(self):
+        show_stage_plan_dialog(self.cfg, self.acc, parent=self)
+
+    def _on_delete(self):
+        box = MessageBox(
+            "删除账号", "确定从运行列表中删除「%s」吗？\n\n"
+            "仅从列表移除，登录数据槽位文件保留在磁盘。"
+            % self.acc.get("label", ""), self.window())
+        box.yesButton.setText("删除")
+        box.cancelButton.setText("取消")
+        if not box.exec():
+            return
+        self.cfg["accounts"].remove(self.acc)
+        appconfig.save(self.cfg)
+        if self.page is not None:
+            self.page.refresh()
+        self.accept()
+
+
+class AccountCard(Card):
+    """两列网格中的账号卡片：表面只放「精确基建 / 启用」两个开关，
+    点击卡片空白处打开详细控制界面。"""
+
+    def __init__(self, cfg, acc, index, page=None, parent=None):
+        super().__init__(parent=parent)
+        self.cfg = cfg
+        self.acc = acc
+        self.page = page
+        server = acc.get("server", "official")
+        colors = (theme.ACCENT_B if server == "bilibili"
+                  else (theme.ACCENT_O1 if index % 2 == 0
+                        else theme.ACCENT_O2))
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.vbox.setContentsMargins(12, 12, 12, 12)
+
+        row = QHBoxLayout()
+        row.setSpacing(8)
+        row.addWidget(IconBadge(str(index + 1), colors))
+        name_box = QVBoxLayout()
+        name_box.setSpacing(2)
+        name = SubtitleLabel(acc.get("label") or "?")
+        name.setToolTip("%s · 槽位 %s" % (SERVER_LABELS.get(server, server),
+                                          acc.get("slot", "未设置")))
+        name_box.addWidget(name)
+        row.addLayout(name_box)
+        row.addStretch(1)
+
+        self.base_sw = SwitchButton()
+        self.base_sw.setOnText("精确基建")
+        self.base_sw.setOffText("精确基建")
+        self.base_sw.setText("精确基建")
+        self.base_sw.setToolTip("启用精确基建派驻；关闭时使用 MAA 自带基建换班")
+        self.base_sw.setChecked(
+            bool((acc.get("base_schedule") or {}).get("enabled", False)))
+        self.base_sw.checkedChanged.connect(self._on_base_toggle)
+        row.addWidget(self.base_sw, 0, Qt.AlignmentFlag.AlignVCenter)
+
+        self.sw = SwitchButton()
+        self.sw.setOnText("启用")
+        self.sw.setOffText("启用")
+        self.sw.setText("启用")
+        self.sw.setToolTip("是否把该账号加入自动挂机运行列表")
+        self.sw.setChecked(bool(acc.get("enabled", True)))
+        self.sw.checkedChanged.connect(self._on_toggle)
+        row.addWidget(self.sw, 0, Qt.AlignmentFlag.AlignVCenter)
+        self.vbox.addLayout(row)
+
+        # 捕获状态（UID）直接显示在卡片上
+        uid_row = QHBoxLayout()
+        uid_row.addStretch(1)
+        self.uid_pill = Pill()
+        uid_row.addWidget(self.uid_pill)
+        self.vbox.addLayout(uid_row)
+        self.vbox.addSpacing(2)
+        self.refresh_uid()
+
+    def refresh_uid(self):
+        uid = slot_uid(self.cfg, self.acc.get("slot", ""))
+        if uid:
+            self.uid_pill.set_state("ok", "已捕获 UID %s" % uid)
+        else:
+            self.uid_pill.set_state("warn", "未捕获")
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            pos = event.position().toPoint()
+            # 两个开关自己的区域绝不触发详情（即使事件冒泡回卡片）
+            if not (self.base_sw.geometry().contains(pos)
+                    or self.sw.geometry().contains(pos)):
+                self._open_detail()
+        super().mousePressEvent(event)
+
+    def _on_toggle(self, checked):
+        self.acc["enabled"] = bool(checked)
+        appconfig.save(self.cfg)
+
+    def _on_base_toggle(self, checked):
+        bs = self.acc.get("base_schedule")
+        if not isinstance(bs, dict):
+            bs = appconfig.default_base_schedule(
+                batches=appconfig.schedule_batches(self.cfg))
+            self.acc["base_schedule"] = bs
+        bs["enabled"] = bool(checked)
+        appconfig.save(self.cfg)
+
+    def _open_detail(self):
+        dlg = AccountDetailDialog(self.cfg, self.acc, page=self.page,
+                                  parent=self)
+        dlg.exec()
+
+
 class AccountsPage(ScrollArea):
     def __init__(self, cfg):
         super().__init__()
         self.cfg = cfg
         self.view = QWidget()
+        self.view.setObjectName("accountsView")
+        self.view.setStyleSheet(
+            "#accountsView { background: %s; }" % theme.BG)
         self.setWidget(self.view)
         self.setWidgetResizable(True)
+        self.setStyleSheet(
+            "QScrollArea { background: %s; border: none; }" % theme.BG)
+        self.viewport().setStyleSheet("background: %s;" % theme.BG)
         root = QVBoxLayout(self.view)
         root.setContentsMargins(0, 16, 0, 16)
         root.setSpacing(16)
 
-        self.list_card = Card("账号列表")
-        root.addWidget(self.list_card)
-
+        # 「添加账号」操作放最上面，下面只保留账号卡片网格
         action = Card()
         bar = QHBoxLayout()
         bar.setSpacing(10)
         self.add_btn = PrimaryPushButton("＋ 添加账号")
+        self.add_btn.setToolTip("添加账号：输入名称/服务器/账号/密码，自动登录并保存登录数据")
         self.add_btn.clicked.connect(self._on_add)
         bar.addWidget(self.add_btn)
-        hint = BodyLabel(
-            "添加账号只需输入账号密码，脚本自动登录并保存登录数据。"
-            "运行顺序 = 列表顺序；开关控制是否运行该号。")
-        hint.setStyleSheet("color: %s; font-size: 12px;" % theme.TEXT_3)
-        bar.addWidget(hint, 1)
         bar.addStretch(1)
         action.vbox.addLayout(bar)
         root.addWidget(action)
+
+        self.list_card = Card()
+        root.addWidget(self.list_card)
         root.addStretch(1)
 
+        self._cols = 2
         self.refresh()
 
     def _on_add(self):
@@ -391,17 +646,36 @@ class AccountsPage(ScrollArea):
         self.refresh()
 
     def refresh(self):
-        # 清空并重建账号行
+        # 清空并重建账号卡片（每行 2 个）
         while self.list_card.vbox.count():
             item = self.list_card.vbox.takeAt(0)
             w = item.widget()
             if w is not None:
                 w.deleteLater()
+        # 旧版本网格里的卡片是布局子项，必须一并清理，否则刷新会叠出重复卡片
+        for w in self.list_card.findChildren(QWidget):
+            w.deleteLater()
         if not self.cfg["accounts"]:
             empty = BodyLabel("暂无账号，点击上方「添加账号」开始。")
             empty.setStyleSheet("color: %s; font-size: 13px;" % theme.TEXT_3)
             self.list_card.vbox.addWidget(empty)
+        grid = QGridLayout()
+        grid.setSpacing(12)
         for i, acc in enumerate(self.cfg["accounts"]):
-            row = AccountRow(self.cfg, acc, i, page=self)
-            self.list_card.vbox.addWidget(row)
-            self.list_card.vbox.addSpacing(10)
+            card = AccountCard(self.cfg, acc, i, page=self)
+            r, c = divmod(i, self._cols)
+            span = (self._cols - c) if (self._cols > 1
+                                        and len(self.cfg["accounts"]) % 2
+                                        and i == len(self.cfg["accounts"]) - 1) else 1
+            grid.addWidget(card, r, c, 1, span)
+        for c in range(self._cols):
+            grid.setColumnStretch(c, 1)
+        self.list_card.vbox.addLayout(grid)
+
+    def resizeEvent(self, event):
+        # 太窄时自动改成一列，保证打开侧边栏/缩小窗口也不横向截断
+        cols = 2 if self.viewport().width() >= 720 else 1
+        if cols != self._cols:
+            self._cols = cols
+            self.refresh()
+        super().resizeEvent(event)
