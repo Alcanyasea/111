@@ -5,6 +5,9 @@ gui/.venv/
 .claude/
 .scratch/
 
+# Local AI agent convention files (not distributed)
+AGENTS.md
+
 # Local configuration (contains credentials)
 config.json
 config.json.bak
