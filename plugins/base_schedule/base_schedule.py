@@ -427,6 +427,11 @@ def apply_maa_config(maa_dir, plan_path, plan_index=None, log=print):
 
     修改 gui.new.json 的 InfrastTask（Mode/Filename/PlanSelect）与
     gui.json 的 Infrast.InfrastMode。返回改动的文件名列表。
+    切换到 Custom（精确换班）时强制开启 InfrastTask 的
+    DormFilterNotStationed（「不将已进驻的干员放入宿舍」）：宿舍 autofill
+    补位只从「未进驻」干员里选，避免把训练室/加工站等已在岗的干员拉进宿舍、
+    破坏精确排班；恢复 Rotation 时不改动该字段（该开关只影响自定义模式的
+    宿舍补位流程，MAA 自带 Rotation 不处理 Dorm 设施）。
     plan_index：自定义模式下固定使用第几个计划（0=第一个批次，按时间升序）；
     None 表示按时间自动（PlanSelect=-1）。
     """
@@ -468,6 +473,11 @@ def apply_maa_config(maa_dir, plan_path, plan_index=None, log=print):
                                     pos = i + 1
                                     break
                             rooms.insert(pos, {"Room": "Dorm"})
+                    if mode == "Custom":
+                        # 精确换班期间不让已进驻的干员进入宿舍：MAA 宿舍补位
+                        # 会按此开关用游戏内的「未进驻」筛选，已在其它设施上岗
+                        # 的干员（如训练室中的艾丽妮、加工站干员）不会被拉去休息
+                        first["DormFilterNotStationed"] = True
                     first["Mode"] = mode
                     first["Filename"] = filename
                     first["PlanSelect"] = plan_select
