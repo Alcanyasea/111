@@ -11,7 +11,7 @@
                   "log_file":  "D:\\1\\scripts\\master_log.txt"
               },
     "timeouts":  {
-                     "maa_min":  30,
+                     "maa_min":  3,
                      "launch_wait_sec":  120,
                      "game_update_min":  90
                  },

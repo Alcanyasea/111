@@ -46,7 +46,9 @@ $maaBilibiliDir = "D:\软件\MAA（b）"
 $signalFile = "D:\1\scripts\maa_done.signal"
 $logFile = "D:\1\scripts\master_log.txt"
 $scriptDir = "D:\1\scripts"
-$maaTimeout = 1800
+# MAA 无进展判超时（秒）：该账号这段时间内没有任何战斗/任务推进才放弃；
+# 正常打关（一直有进战斗/结算心跳）不再受单号总时长限制。
+$maaStallTimeoutSec = 180
 # 游戏更新检测：默认开启；切号后若游戏在更新，先等更新完成再登录校验
 $waitGameUpdate = $true
 $updateTimeoutSec = 5400   # 默认最长等待 90 分钟
@@ -79,7 +81,8 @@ if ($config) {
         $maaBilibiliDir = Split-Path -Parent $maaBilibili
     }
     if ($null -ne $config.timeouts -and $null -ne $config.timeouts.maa_min) {
-        $maaTimeout = [int]$config.timeouts.maa_min * 60
+        # 键名沿用 maa_min（GUI「运行设置」同键），语义为“无进展判超时分钟数”
+        $maaStallTimeoutSec = [int]$config.timeouts.maa_min * 60
     }
     if ($null -ne $config.timeouts -and $null -ne $config.timeouts.game_update_min) {
         $updateTimeoutSec = [int]$config.timeouts.game_update_min * 60
@@ -136,19 +139,63 @@ function Start-MuMu {
     Log "ERROR: MuMu timeout"; return $false
 }
 
-function Wait-MAADone($t) {
-    Log "Waiting for MAA tasks..."
+function Wait-MAADone($t, $maaDir) {
+    # 完成信号由 signal_done.bat（MAA 任务结束后回调）创建。
+    # 心跳 = MAA 的 asst.log 持续出现 SubTask 事件（进战斗、战斗中 PRTS 轮询、
+    # 结算等，正常战斗下每几秒一条）；超过 $t 秒没有任何心跳才判超时。
+    Log ("Waiting for MAA tasks... ({0} 秒无战斗/任务进展判超时)" -f $t)
     if (Test-Path $signalFile) { Remove-Item $signalFile -Force }
+    $logPath = Join-Path $maaDir "debug\asst.log"
+    $logPos = -1
+    if (Test-Path $logPath) {
+        try {
+            $fs = [System.IO.File]::Open($logPath, 'Open', 'Read', 'ReadWrite')
+            $logPos = $fs.Length   # 只统计本次 MAA 启动后新增的日志
+            $fs.Dispose()
+        } catch { $logPos = -1 }
+    }
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
-    while ($sw.Elapsed.TotalSeconds -lt $t) {
+    $lastAct = Get-Date
+    $readFail = 0
+    while ($true) {
         if (Test-Path $signalFile) {
-            Log "MAA finished! " + [math]::Round($sw.Elapsed.TotalMinutes,1).ToString() + " min"
+            Log ("MAA finished! {0} min" -f [math]::Round($sw.Elapsed.TotalMinutes, 1))
             Start-Sleep 3
             return $true
         }
+        if ($logPos -ge 0) {
+            $fs = $null
+            try {
+                $fs = [System.IO.File]::Open($logPath, 'Open', 'Read', 'ReadWrite')
+                $len = $fs.Length
+                if ($len -lt $logPos) { $logPos = 0 }   # asst.log 被轮转/重建
+                if ($len -gt $logPos) {
+                    $fs.Seek($logPos, 'Begin') | Out-Null
+                    $n = $len - $logPos
+                    $buf = New-Object byte[] $n
+                    [void]$fs.Read($buf, 0, $n)
+                    $logPos = $len
+                    $chunk = [System.Text.Encoding]::UTF8.GetString($buf)
+                    if ($chunk -match 'append_callback \| SubTask') {
+                        $lastAct = Get-Date
+                        $readFail = 0
+                    }
+                }
+                $fs.Dispose()
+            } catch {
+                if ($fs) { try { $fs.Dispose() } catch {} }
+                # MAA 独占日志等短暂不可读：前几次宽容，之后按无进展计
+                $readFail++
+                if ($readFail -gt 3) { $lastAct = (Get-Date).AddSeconds(-$t) }
+            }
+        }
+        $idleSec = ((Get-Date) - $lastAct).TotalSeconds
+        if ($idleSec -ge $t) {
+            Log ("ERROR: MAA stall: 已 {0} 分钟没有战斗/任务进展，判定超时" -f [math]::Round($idleSec / 60, 1))
+            return $false
+        }
         Start-Sleep 10
     }
-    Log "ERROR: MAA timeout"; return $false
 }
 
 function Run-MAA($exe, $dir, $label) {
@@ -159,7 +206,7 @@ function Run-MAA($exe, $dir, $label) {
     Log "Launching MAA..."
     Start-Process $exe -WorkingDirectory $dir
     Start-Sleep 5
-    $ok = Wait-MAADone $maaTimeout
+    $ok = Wait-MAADone $maaStallTimeoutSec $dir
     Get-Process -Name "MAA" -ErrorAction SilentlyContinue | Stop-Process -Force
     Start-Sleep 2
     if ($ok) { Log "MAA [" + $label + "] completed successfully" }

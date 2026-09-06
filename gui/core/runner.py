@@ -95,7 +95,8 @@ def check_run_directly(cfg):
     """检查两套 MAA 配置的 RunDirectly 是否都为 true。
 
     记忆 maa-farm-setup：RunDirectly 必须 true，否则 MAA 启动后不自动跑任务、
-    master.ps1 会一直等 maa_done.signal 直到超时。
+    master.ps1 会一直等 maa_done.signal；仅在该账号长时间（默认 3 分钟）
+    没有战斗/任务推进时判超时放弃。
     返回 {"official": bool|None, "bilibili": bool|None}，None = 配置缺失/读不了。
     """
     result = {}

@@ -108,7 +108,7 @@ DEFAULTS = {
         "log_file": r"D:\1\scripts\master_log.txt",
     },
     "timeouts": {
-        "maa_min": 30,            # 单个 MAA 任务超时（分钟）
+        "maa_min": 3,             # MAA 无战斗/任务进展判超时（分钟）；正常挂机不限制总时长
         "launch_wait_sec": 120,   # 模拟器启动等待上限（秒）
         "game_update_min": 90,    # 游戏更新检测最长等待（分钟）
     },

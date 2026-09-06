@@ -68,7 +68,8 @@ class SettingsPage(ScrollArea):
         self._card_row(self.conn_card, "ADB 地址", self.device_edit)
         self.maa_spin = SpinBox()
         self.maa_spin.setRange(1, 180)
-        self._card_row(self.conn_card, "单号超时", self.maa_spin, "分钟（默认 30）")
+        self._card_row(self.conn_card, "无进展超时", self.maa_spin,
+                       "分钟（默认 3）：期间没有战斗/任务推进才放弃该号")
         self.launch_spin = SpinBox()
         self.launch_spin.setRange(10, 600)
         self._card_row(self.conn_card, "启动等待", self.launch_spin, "秒（模拟器启动上限）")
@@ -213,7 +214,7 @@ class SettingsPage(ScrollArea):
         for key, edit in self.path_edits.items():
             edit.setText(source["paths"].get(key, ""))
         self.device_edit.setText(source["paths"].get("device", ""))
-        self.maa_spin.setValue(int(source["timeouts"].get("maa_min", 30)))
+        self.maa_spin.setValue(int(source["timeouts"].get("maa_min", 3)))
         self.launch_spin.setValue(int(source["timeouts"].get("launch_wait_sec", 120)))
         self.update_spin.setValue(int(source["timeouts"].get("game_update_min", 90)))
         self.close_emu_sw.setChecked(bool(source["behavior"].get("close_emulator", True)))
