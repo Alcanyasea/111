@@ -311,6 +311,7 @@ class StagePlanDialog(QDialog):
         scroll.setAlignment(Qt.AlignmentFlag.AlignLeft
                             | Qt.AlignmentFlag.AlignTop)
         scroll.setStyleSheet("QScrollArea { border: none; background: transparent; }")
+        scroll.viewport().setStyleSheet("background: transparent;")
         host = QWidget()
         self.tags_layout = QVBoxLayout(host)
         self.tags_layout.setContentsMargins(0, 0, 6, 0)

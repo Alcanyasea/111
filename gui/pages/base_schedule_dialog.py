@@ -75,6 +75,7 @@ class BaseScheduleDialog(QDialog):
         self.setWindowTitle("精确基建派驻 - %s" % acc.get("label", ""))
         self.setModal(True)
         self.resize(880, 720)
+        self.setStyleSheet("QDialog { background: %s; }" % theme.BG)
 
         root = QVBoxLayout(self)
         root.setContentsMargins(22, 18, 22, 16)
@@ -279,6 +280,9 @@ class BaseScheduleDialog(QDialog):
 
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
+        # 与主界面各页面一致：滚动区透明，露出下层弹窗灰底
+        scroll.setStyleSheet("QScrollArea { border: none; background: transparent; }")
+        scroll.viewport().setStyleSheet("background: transparent;")
         inner = QWidget()
         v = QVBoxLayout(inner)
         v.setContentsMargins(2, 2, 2, 2)

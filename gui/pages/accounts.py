@@ -5,15 +5,21 @@
   登录数据到 scripts\\accounts\\<slot>\\；特殊字符密码或验证码时自动转人工登录。
 - 删除账号：仅从列表移除（槽位文件保留在磁盘，如需彻底删除可手动清理）。
 - 改名账号：点击卡片上的账号名字原地改名（回车/失焦保存，Esc 取消）。
+- 调整顺序：按住卡片（或账号名）拖到目标位置换位，卡片左上角数字 = 运行顺序；
+  账号详情里另有「↑ 上移 / ↓ 下移」。顺序即 config.json 的 accounts 数组顺序，
+  master.ps1 按它逐个切号运行（正在挂机时改动从下次运行生效）。
 - 切换账号不再走游戏内点击流程：master.ps1 用 slot_switch.ps1 重启游戏+推入数据。
 """
 import subprocess
 import uuid
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QThread, Signal
-from PySide6.QtWidgets import (QDialog, QGridLayout, QHBoxLayout, QLabel,
-                               QPlainTextEdit, QVBoxLayout, QWidget)
+from PySide6.QtCore import (QEasingCurve, QPoint, QPropertyAnimation, QRect,
+                            Qt, QThread, QTimer, Signal)
+from PySide6.QtGui import QColor, QPainter
+from PySide6.QtWidgets import (QApplication, QDialog, QGraphicsDropShadowEffect,
+                               QGraphicsOpacityEffect, QGridLayout, QHBoxLayout,
+                               QLabel, QPlainTextEdit, QVBoxLayout, QWidget)
 
 from qfluentwidgets import (BodyLabel, ComboBox, InfoBar, InfoBarPosition,
                             LineEdit, MessageBox, PrimaryPushButton, PushButton,
@@ -21,11 +27,21 @@ from qfluentwidgets import (BodyLabel, ComboBox, InfoBar, InfoBarPosition,
 
 import config as appconfig
 import theme
+from core import runner
 from pages.stage_plan_dialog import (format_stage_plan, maa_second_fight_plan,
                                      show_stage_plan_dialog)
 from widgets import Card, IconBadge, Pill, set_switch_checked_gray
 
 CREATE_NO_WINDOW = 0x08000000
+
+# ---- 拖动排序的版式与节奏（数值参考 SortableJS / react-beautiful-dnd）----
+GRID_COLS = 2          # 每行 2 张卡片
+GRID_SPACING = 16      # 卡片间距（px）
+CARD_MIN_H = 86        # 卡片最小高度，实际取内容高度
+MOVE_MS = 150          # 其他卡片让位动画时长（SortableJS 默认 150ms）
+DROP_MS = 170          # 松手落位动画时长（按距离微调）
+AUTOSCROLL_ZONE = 54   # 拖到上下边缘这个范围内开始自动滚动
+AUTOSCROLL_STEP_MAX = 26
 
 SERVER_LABELS = {"official": "官服", "bilibili": "B 服"}
 
@@ -42,19 +58,62 @@ def _label_transparent(widget):
 
 
 class ClickLabel(QLabel):
-    """可点击的普通文本标签（按下即发 clicked，不继续冒泡给父卡片）。"""
+    """可点击的普通文本标签：点击发 clicked；按住拖动则交由所属卡片调整顺序。
+
+    标签会吃掉鼠标事件（不冒泡给父卡片，父卡片上点击=打开详情），
+    所以这里在按住移动超过拖拽阈值时，主动把拖拽交给 drag_target（账号卡片）。
+    """
 
     clicked = Signal()
 
+    def __init__(self, text="", parent=None):
+        super().__init__(text, parent)
+        self.drag_target = None
+        self._press_pos = None
+        self._dragging = False
+
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
-            self.clicked.emit()
+            self._press_pos = event.position().toPoint()
+            self._dragging = False
             event.accept()
             return
         super().mousePressEvent(event)
 
+    def mouseMoveEvent(self, event):
+        target = self.drag_target
+        if target is None or not event.buttons() & Qt.MouseButton.LeftButton:
+            super().mouseMoveEvent(event)
+            return
+        global_pos = event.globalPosition().toPoint()
+        if self._dragging:
+            target.drag_to(global_pos)
+            event.accept()
+            return
+        if self._press_pos is None:
+            super().mouseMoveEvent(event)
+            return
+        moved = (event.position().toPoint() - self._press_pos).manhattanLength()
+        if moved < QApplication.startDragDistance():
+            super().mouseMoveEvent(event)
+            return
+        hotspot = self.mapTo(target, self._press_pos)   # 卡片坐标下的按下点
+        self._press_pos = None
+        self._dragging = True
+        target.begin_drag(global_pos, hotspot)
+        event.accept()
+
     def mouseReleaseEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
+            if self._dragging:
+                self._dragging = False
+                self._press_pos = None
+                self.drag_target.end_drag()
+                event.accept()
+                return
+            if self._press_pos is not None:
+                self.clicked.emit()
+            self._press_pos = None
             event.accept()
             return
         super().mouseReleaseEvent(event)
@@ -132,6 +191,7 @@ class CaptureDialog(QDialog):
         self.setWindowTitle("捕获账号" if acc is None else "重新捕获账号")
         self.setModal(True)
         self.resize(560, 560)
+        self.setStyleSheet("QDialog { background: %s; }" % theme.BG)
 
         root = QVBoxLayout(self)
         root.setContentsMargins(20, 18, 20, 16)
@@ -446,9 +506,11 @@ class AccountDetailDialog(QDialog):
         self.cfg = cfg
         self.acc = acc
         self.page = page
+        self.move_delta = 0   # 关闭窗口后由列表执行的上移/下移（-1/+1）
         self.setWindowTitle("账号详情 - %s" % (acc.get("label") or ""))
         self.setModal(True)
-        self.resize(560, 430)
+        self.resize(560, 480)
+        self.setStyleSheet("QDialog { background: %s; }" % theme.BG)
 
         root = QVBoxLayout(self)
         root.setContentsMargins(20, 18, 20, 16)
@@ -505,9 +567,25 @@ class AccountDetailDialog(QDialog):
         grid.setColumnStretch(1, 1)
         root.addLayout(grid)
 
+        # 运行顺序：列表里可直接拖动卡片，这里再给一份「上移/下移」按钮
+        order_row = QHBoxLayout()
+        order_row.setSpacing(10)
+        order_lab = BodyLabel("运行顺序")
+        order_lab.setStyleSheet("color: %s; font-size: 12.5px;" % theme.TEXT_2)
+        _label_transparent(order_lab)
+        order_row.addWidget(order_lab)
+        self.up_btn = PushButton("↑ 上移")
+        self.up_btn.setToolTip("与上一个账号交换位置（运行顺序 = 列表顺序）")
+        self.down_btn = PushButton("↓ 下移")
+        self.down_btn.setToolTip("与下一个账号交换位置（运行顺序 = 列表顺序）")
+        order_row.addWidget(self.up_btn)
+        order_row.addWidget(self.down_btn)
+        order_row.addStretch(1)
+        root.addLayout(order_row)
+
         self.hint = BodyLabel(
             "「是否启用 / 精确基建」开关在账号卡片上直接操作；"
-            "运行顺序 = 账号列表顺序。")
+            "运行顺序 = 账号列表顺序，列表里按住卡片（或账号名）拖到目标位置即可调整。")
         self.hint.setWordWrap(True)
         self.hint.setStyleSheet("color: %s; font-size: 12px;" % theme.TEXT_3)
         _label_transparent(self.hint)
@@ -519,7 +597,14 @@ class AccountDetailDialog(QDialog):
         self.capture_btn.clicked.connect(self._on_capture)
         self.bs_btn.clicked.connect(self._on_base_config)
         self.fight_btn.clicked.connect(self._on_fight_plan)
+        self.up_btn.clicked.connect(lambda: self._on_move(-1))
+        self.down_btn.clicked.connect(lambda: self._on_move(1))
         self._refresh_uid()
+
+    def _on_move(self, delta):
+        """只记录意图并关窗：列表（卡片的父级）负责真正移动，避免重建时窗口还挂着。"""
+        self.move_delta = delta
+        self.accept()
 
     def _refresh_uid(self):
         uid = slot_uid(self.cfg, self.acc.get("slot", ""))
@@ -558,6 +643,40 @@ class AccountDetailDialog(QDialog):
         self.accept()
 
 
+class DragProxy(QWidget):
+    """跟随鼠标的拖影：被拖动卡片的截图 + 投影，看起来像被「拿起来」了。"""
+
+    def __init__(self, pixmap, parent=None):
+        super().__init__(parent)
+        self._pixmap = pixmap
+        # 拖影不吃鼠标事件：拖动期间鼠标仍由原卡片持有（隐式抓取）
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self.resize(pixmap.size())
+        shadow = QGraphicsDropShadowEffect(self)
+        shadow.setBlurRadius(26)
+        shadow.setOffset(0, 8)
+        shadow.setColor(QColor(0, 0, 0, 120))
+        self.setGraphicsEffect(shadow)
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setOpacity(0.96)
+        painter.drawPixmap(0, 0, self._pixmap)
+
+
+class CardGridArea(QWidget):
+    """卡片容器：卡片由页面绝对定位（不用布局管理），这样才能做位移动画。"""
+
+    def __init__(self, page, parent=None):
+        super().__init__(parent)
+        self.page = page
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self.page.relayout()      # 宽度变化（窗口缩放/滚动条出现）后重新排位
+
+
 class AccountCard(Card):
     """两列网格中的账号卡片：表面只放「精确基建 / 启用」两个开关，
     点击名字可直接改名，点击卡片空白处打开详细控制界面。"""
@@ -567,15 +686,20 @@ class AccountCard(Card):
         self.cfg = cfg
         self.acc = acc
         self.page = page
+        self.index = index        # 在 cfg["accounts"] 中的位置 = 运行顺序
         self._rename_edit = None
         self._rename_active = False
+        self._press_pos = None    # 按下点（卡片坐标），用于区分「点击」与「拖动」
+        self._maybe_click = False
+        self._dragging = False    # 正在被拖动（拖动期间卡片透明，拖影跟着鼠标）
         server = acc.get("server", "official")
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.vbox.setContentsMargins(12, 12, 12, 12)
 
         row = QHBoxLayout()
         row.setSpacing(8)
-        row.addWidget(IconBadge(str(index + 1)))
+        self.badge = IconBadge(str(index + 1))
+        row.addWidget(self.badge)
         self.name_box = QVBoxLayout()
         self.name_box.setSpacing(2)
         self.name_label = ClickLabel(acc.get("label") or "?")
@@ -587,6 +711,7 @@ class AccountCard(Card):
             % (SERVER_LABELS.get(server, server), acc.get("slot", "未设置")))
         self.name_label.setCursor(Qt.CursorShape.PointingHandCursor)
         self.name_label.clicked.connect(self._start_rename)
+        self.name_label.drag_target = self   # 按住名字拖动也能调整顺序
         self.name_box.addWidget(self.name_label)
         row.addLayout(self.name_box)
         row.addStretch(1)
@@ -627,14 +752,67 @@ class AccountCard(Card):
         else:
             self.uid_pill.set_state("warn", "未捕获")
 
+    # ---- 拖动排序：拖影、预览排列与落位动画都由 AccountsPage 负责 ----
+    def set_index(self, index):
+        """更新运行位置（拖动排序后同步左上角数字）。"""
+        self.index = index
+        self.badge.setText(str(index + 1))
+
+    def begin_drag(self, global_pos, hotspot):
+        if self._dragging or self.page is None:
+            return
+        self._dragging = True
+        self._maybe_click = False
+        self.setCursor(Qt.CursorShape.ClosedHandCursor)
+        self.page.begin_drag(self, global_pos, hotspot)
+
+    def drag_to(self, global_pos):
+        if self._dragging:
+            self.page.drag_to(global_pos)
+
+    def end_drag(self):
+        if not self._dragging:
+            return
+        self._dragging = False
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.page.end_drag()
+
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
             pos = event.position().toPoint()
-            # 两个开关自己的区域绝不触发详情（即使事件冒泡回卡片）
+            # 两个开关自己的区域绝不触发详情/拖动（即使事件冒泡回卡片）
             if not (self.base_sw.geometry().contains(pos)
                     or self.sw.geometry().contains(pos)):
-                self._open_detail()
+                self._press_pos = pos
+                self._maybe_click = True
         super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if self._dragging:
+            self.drag_to(event.globalPosition().toPoint())
+            event.accept()
+            return
+        if (self._maybe_click and self._press_pos is not None
+                and event.buttons() & Qt.MouseButton.LeftButton
+                and (event.position().toPoint() - self._press_pos).manhattanLength()
+                >= QApplication.startDragDistance()):
+            self.begin_drag(event.globalPosition().toPoint(), self._press_pos)
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if self._dragging and event.button() == Qt.MouseButton.LeftButton:
+            self.end_drag()
+            event.accept()
+            return
+        open_detail = (self._maybe_click
+                       and event.button() == Qt.MouseButton.LeftButton)
+        self._maybe_click = False
+        self._press_pos = None
+        super().mouseReleaseEvent(event)
+        if open_detail:
+            self._open_detail()
 
     def _on_toggle(self, checked):
         self.acc["enabled"] = bool(checked)
@@ -653,6 +831,8 @@ class AccountCard(Card):
         dlg = AccountDetailDialog(self.cfg, self.acc, page=self.page,
                                   parent=self)
         dlg.exec()
+        if dlg.move_delta and self.page is not None:
+            self.page.move_relative(self.index, dlg.move_delta)
 
     def _start_rename(self):
         """点击账号名字：原地换成输入框，回车/失焦保存，Esc 取消。"""
@@ -712,6 +892,19 @@ class AccountsPage(ScrollArea):
     def __init__(self, cfg):
         super().__init__()
         self.cfg = cfg
+        self.cards = []          # 与 cfg["accounts"] 同序的卡片
+        self.card_h = CARD_MIN_H
+        self._slot_anis = {}     # 卡片 → 位移/落位动画
+        self._in_relayout = False
+        self._land_ani = None    # 松手后「飞回槽位」的淡入动画
+        # 拖动状态（拖动期间：原卡片透明 + 拖影跟手 + 其他卡片平滑让位）
+        self._drag_card = None
+        self._drag_proxy = None
+        self._drag_order = []
+        self._drag_preview = []
+        self._drag_slot = -1
+        self._drag_hotspot = QPoint()
+        self._drag_global = None
         self.view = QWidget()
         self.setWidget(self.view)
         self.setWidgetResizable(True)
@@ -731,13 +924,28 @@ class AccountsPage(ScrollArea):
         self.add_btn.clicked.connect(self._on_add)
         bar.addWidget(self.add_btn)
         bar.addStretch(1)
+        order_hint = BodyLabel("按住卡片（或账号名）拖动：其他账号会让位预览，松手即调整运行顺序")
+        order_hint.setStyleSheet("color: %s; font-size: 12.5px;" % theme.TEXT_2)
+        _label_transparent(order_hint)
+        bar.addWidget(order_hint)
         action.vbox.addLayout(bar)
         root.addWidget(action)
 
-        self.acc_grid = QGridLayout()
-        self.acc_grid.setSpacing(16)
-        root.addLayout(self.acc_grid)
+        # 卡片区：绝对定位 + 动画，故不使用布局管理器
+        self.grid_area = CardGridArea(self)
+        self.grid_area.setFixedHeight(0)
+        self.empty_label = BodyLabel("暂无账号，点击上方「添加账号」开始。")
+        self.empty_label.setStyleSheet("color: %s; font-size: 13px;" % theme.TEXT_3)
+        _label_transparent(self.empty_label)
+        self.empty_label.setParent(self.grid_area)
+        self.empty_label.hide()
+        root.addWidget(self.grid_area)
         root.addStretch(1)
+
+        # 拖到上下边缘时自动滚动（对齐 SortableJS 的 smart auto-scroll）
+        self._autoscroll = QTimer(self)
+        self._autoscroll.setInterval(16)
+        self._autoscroll.timeout.connect(self._autoscroll_step)
         self.refresh()
 
     def _on_add(self):
@@ -746,26 +954,318 @@ class AccountsPage(ScrollArea):
         self.refresh()
 
     def refresh(self):
-        # 清空并重建账号卡片（固定每行 2 个，与仪表盘一致）
-        while self.acc_grid.count():
-            item = self.acc_grid.takeAt(0)
-            w = item.widget()
-            if w is not None:
-                w.deleteLater()
-        cols = 2
-        if not self.cfg["accounts"]:
-            empty = BodyLabel("暂无账号，点击上方「添加账号」开始。")
-            empty.setStyleSheet("color: %s; font-size: 13px;" % theme.TEXT_3)
-            _label_transparent(empty)
-            self.acc_grid.addWidget(empty, 0, 0, 1, cols)
+        # 清空并重建账号卡片（固定每行 2 个，位置由 slot_rect 计算）
+        if self._drag_card is not None:
+            self.cancel_drag()
+        for card in self.cards:
+            ani = self._slot_anis.pop(card, None)
+            if ani is not None:
+                ani.stop()
+                ani.deleteLater()
+            card.setParent(None)
+            card.deleteLater()
+        self.cards = []
         for i, acc in enumerate(self.cfg["accounts"]):
             card = AccountCard(self.cfg, acc, i, page=self)
-            r, c = divmod(i, cols)
-            span = (cols - c) if (len(self.cfg["accounts"]) % 2
-                                  and i == len(self.cfg["accounts"]) - 1) else 1
-            self.acc_grid.addWidget(card, r, c, 1, span)
-        for c in range(cols):
-            self.acc_grid.setColumnStretch(c, 1)
+            card.setParent(self.grid_area)
+            self.cards.append(card)
+            card.show()
+        if self.cards:
+            self.card_h = max(self.card_h,
+                              max(c.sizeHint().height() for c in self.cards))
+        self.empty_label.setVisible(not self.cards)
+        self.relayout()
+
+    # ---- 版式：卡片按「槽位」绝对定位 ----
+    def slot_rect(self, index, count=None):
+        """第 index 个槽位的矩形（grid_area 坐标）。最后一张落单时横跨整行。"""
+        n = len(self.cards) if count is None else count
+        width = max(1, self.grid_area.width())
+        card_w = max(160, (width - (GRID_COLS - 1) * GRID_SPACING) // GRID_COLS)
+        row, _col = divmod(index, GRID_COLS)
+        y = row * (self.card_h + GRID_SPACING)
+        if n % GRID_COLS and index == n - 1:
+            return QRect(0, y, width, self.card_h)
+        return QRect(_col * (card_w + GRID_SPACING), y, card_w, self.card_h)
+
+    def relayout(self):
+        """按当前卡片顺序重排（窗口尺寸变化时直接对齐，不做动画）。"""
+        if self._in_relayout:
+            return
+        self._in_relayout = True
+        try:
+            n = len(self.cards)
+            rows = (n + GRID_COLS - 1) // GRID_COLS
+            if rows:
+                self.grid_area.setFixedHeight(
+                    rows * self.card_h + (rows - 1) * GRID_SPACING)
+            else:
+                self.grid_area.setFixedHeight(self.empty_label.sizeHint().height())
+            self.empty_label.setGeometry(0, 0, max(1, self.grid_area.width()),
+                                         self.empty_label.sizeHint().height())
+            for i, card in enumerate(self.cards):
+                self._stop_ani(card)
+                card.setGeometry(self.slot_rect(i, n))
+        finally:
+            self._in_relayout = False
+
+    def slot_index_at(self, pos):
+        """grid_area 坐标 pos 落在哪个槽位（按最近槽位中心判定）。"""
+        n = len(self.cards)
+        if n == 0:
+            return 0
+        best, best_dist = 0, None
+        for i in range(n):
+            center = self.slot_rect(i, n).center()
+            dist = (center.x() - pos.x()) ** 2 + (center.y() - pos.y()) ** 2
+            if best_dist is None or dist < best_dist:
+                best, best_dist = i, dist
+        return best
+
+    # ---- 位移动画（iOS 式让位：只动位置，曲线先快后缓）----
+    def _animate_card(self, card, rect, duration=MOVE_MS):
+        ani = self._slot_anis.get(card)
+        if ani is None:
+            ani = QPropertyAnimation(card, b"geometry", self)
+            ani.setEasingCurve(QEasingCurve.Type.OutCubic)
+            self._slot_anis[card] = ani
+        if ani.endValue() == rect and ani.state() == QPropertyAnimation.State.Running:
+            return          # 目标没变，动画继续跑，不要重启（否则会顿）
+        if card.geometry() == rect:
+            ani.stop()
+            return
+        ani.stop()
+        ani.setDuration(duration)
+        ani.setStartValue(card.geometry())
+        ani.setEndValue(rect)
+        ani.start()
+
+    def _stop_ani(self, card):
+        ani = self._slot_anis.get(card)
+        if ani is not None:
+            ani.stop()
+
+    # ---- 拖动排序 ----
+    def begin_drag(self, card, global_pos, hotspot):
+        """开始拖动：原卡片透明（腾出位置），拖影跟手，其他卡片准备让位。"""
+        if self._drag_card is not None or card not in self.cards:
+            return
+        self._drag_card = card
+        self._drag_order = list(self.cards)
+        self._drag_preview = list(self.cards)
+        self._drag_hotspot = QPoint(hotspot)
+        self._drag_slot = self.cards.index(card)
+        pixmap = card.grab()                     # 先截图，再让原卡片透明
+        effect = QGraphicsOpacityEffect(card)
+        effect.setOpacity(0.0)
+        card.setGraphicsEffect(effect)
+        proxy = DragProxy(pixmap, self.viewport())
+        proxy.show()
+        proxy.raise_()
+        self._drag_proxy = proxy
+        self._drag_global = global_pos
+        self._move_proxy(global_pos)
+        self._autoscroll.start()
+        self.drag_to(global_pos)      # 立即按当前鼠标位置摆好预览
+
+    def _move_proxy(self, global_pos):
+        if self._drag_proxy is None:
+            return
+        self._drag_proxy.move(self.viewport().mapFromGlobal(global_pos)
+                              - self._drag_hotspot)
+
+    def drag_to(self, global_pos):
+        if self._drag_card is None:
+            return
+        self._drag_global = global_pos
+        self._move_proxy(global_pos)
+        self.set_preview(self.slot_index_at(
+            self.grid_area.mapFromGlobal(global_pos)))
+
+    def set_preview(self, slot):
+        """把被拖动卡片放进 slot 槽位：其余卡片按新顺序平滑让位（预览）。"""
+        if self._drag_card is None:
+            return
+        slot = max(0, min(slot, len(self._drag_order) - 1))
+        if slot == self._drag_slot:
+            return
+        self._drag_slot = slot
+        others = [c for c in self._drag_order if c is not self._drag_card]
+        preview = others[:slot] + [self._drag_card] + others[slot:]
+        self._drag_preview = preview
+        for i, card in enumerate(preview):
+            self._animate_card(card, self.slot_rect(i, len(preview)))
+
+    def end_drag(self):
+        """松手：定稿顺序 + 拖影飞回槽位（卡片同步淡入）。"""
+        card, proxy = self._drag_card, self._drag_proxy
+        if card is None:
+            return
+        preview = list(self._drag_preview) or list(self._drag_order)
+        slot = preview.index(card)
+        target = self.slot_rect(slot, len(preview))
+        # 拖影与 card 同属一个坐标系换算：grid_area → viewport
+        target_vp = QRect(self.grid_area.mapTo(self.viewport(), target.topLeft()),
+                          target.size())
+        accs = self.cfg["accounts"]
+        new_accs = [c.acc for c in preview]
+        changed = (len(new_accs) != len(accs)
+                   or any(a is not b for a, b in zip(new_accs, accs)))
+        if changed:
+            accs[:] = new_accs
+            appconfig.save(self.cfg)
+            self.cards = preview
+            for i, c in enumerate(self.cards):
+                c.set_index(i)
+            tip = "「%s」现在排在第 %d 位，运行顺序即列表顺序" % (
+                card.acc.get("label") or "", slot + 1)
+            if runner.is_running():
+                tip += "；当前正在运行，新顺序从下次运行开始生效"
+            InfoBar.info("已调整账号顺序", tip, parent=self.window(),
+                         position=InfoBarPosition.TOP_RIGHT, duration=3000)
+
+        self._autoscroll.stop()
+        self._drag_card = None
+        self._drag_order = []
+        self._drag_preview = []
+        self._drag_slot = -1
+        self._drag_global = None
+
+        # 被拖动卡片淡入（此时它已在自己槽位上，只是透明）
+        effect = card.graphicsEffect()
+        if isinstance(effect, QGraphicsOpacityEffect):
+            fade = QPropertyAnimation(effect, b"opacity", self)
+            fade.setDuration(DROP_MS)
+            fade.setStartValue(0.0)
+            fade.setEndValue(1.0)
+            fade.setEasingCurve(QEasingCurve.Type.OutCubic)
+            fade.finished.connect(lambda: self._finish_landing(card))
+            fade.start()
+            self._land_ani = fade
+        else:
+            self._finish_landing(card)
+
+        if proxy is not None:
+            self._drag_proxy = None
+            self._fly_proxy(proxy, target_vp, card)
+
+    def _fly_proxy(self, proxy, target, card):
+        """拖影从鼠标位置飞回槽位；落位动画时长随距离变化（参考 dnd 的 drop）。"""
+        start = proxy.geometry()
+        span = ((start.center().x() - target.center().x()) ** 2
+                + (start.center().y() - target.center().y()) ** 2) ** 0.5
+        duration = int(max(110, min(260, 90 + span * 0.6)))
+        ani = QPropertyAnimation(proxy, b"geometry", self)
+        ani.setDuration(duration)
+        ani.setEasingCurve(QEasingCurve.Type.OutCubic)
+        ani.setStartValue(start)
+        ani.setEndValue(target)
+        ani.finished.connect(lambda: self._finish_proxy(proxy, card))
+        ani.start()
+        self._slot_anis[proxy] = ani
+
+    def _finish_proxy(self, proxy, card):
+        ani = self._slot_anis.pop(proxy, None)
+        if ani is not None:
+            ani.deleteLater()
+        proxy.hide()
+        proxy.deleteLater()
+
+    def _finish_landing(self, card):
+        ani = self._land_ani
+        self._land_ani = None
+        if ani is not None:
+            ani.deleteLater()
+        try:
+            card.setGraphicsEffect(None)     # 恢复不透明（Qt 会接管删除旧 effect）
+        except RuntimeError:
+            pass                             # 卡片已被列表重建销毁
+
+    def cancel_drag(self):
+        """中断拖动（重建列表等情况）：不提交顺序，直接回到原状。"""
+        card, proxy = self._drag_card, self._drag_proxy
+        if card is None and proxy is None:
+            return
+        self._autoscroll.stop()
+        self._drag_card = None
+        self._drag_proxy = None
+        self._drag_order = []
+        self._drag_preview = []
+        self._drag_slot = -1
+        self._drag_global = None
+        if proxy is not None:
+            ani = self._slot_anis.pop(proxy, None)
+            if ani is not None:
+                ani.deleteLater()
+            proxy.hide()
+            proxy.deleteLater()
+        # 预览期间其他卡片已经让位，这里按「未改变的顺序」把它们移回去
+        for i, c in enumerate(self.cards):
+            self._animate_card(c, self.slot_rect(i, len(self.cards)))
+        if card is not None:
+            self._finish_landing(card)
+
+    def _autoscroll_step(self):
+        """拖动时靠近上下边缘自动滚动（滚动后重新算预览槽位）。"""
+        if self._drag_card is None or self._drag_global is None:
+            return
+        viewport = self.viewport()
+        y = viewport.mapFromGlobal(self._drag_global).y()
+        height = viewport.height()
+        delta = 0
+        if y < AUTOSCROLL_ZONE:
+            delta = -max(4, min(AUTOSCROLL_STEP_MAX,
+                                int((AUTOSCROLL_ZONE - y) / 2.5)))
+        elif y > height - AUTOSCROLL_ZONE:
+            delta = max(4, min(AUTOSCROLL_STEP_MAX,
+                               int((y - (height - AUTOSCROLL_ZONE)) / 2.5)))
+        if not delta:
+            return
+        bar = self.verticalScrollBar()
+        before = bar.value()
+        bar.setValue(before + delta)
+        if bar.value() != before:
+            self.drag_to(self._drag_global)
+
+    def move_account(self, src, dest):
+        """移动账号：src 为原位置，dest 为插入位置（插到第 dest 张卡片之前）。
+
+        账号详情里的「上移 / 下移」走这里：同样用位移动画，不重建列表。
+        """
+        accs = self.cfg["accounts"]
+        cards = list(self.cards)
+        if not (0 <= src < len(accs)) or len(cards) != len(accs):
+            return
+        dest = max(0, min(int(dest), len(accs)))
+        if dest in (src, src + 1):   # 原地不动
+            return
+        acc = accs.pop(src)
+        card = cards.pop(src)
+        if dest > src:
+            dest -= 1
+        accs.insert(dest, acc)
+        cards.insert(dest, card)
+        appconfig.save(self.cfg)
+        self.cards = cards
+        for i, c in enumerate(cards):
+            c.set_index(i)
+            self._animate_card(c, self.slot_rect(i, len(cards)))
+        tip = "「%s」现在排在第 %d 位，运行顺序即列表顺序" % (
+            acc.get("label") or "", dest + 1)
+        if runner.is_running():
+            tip += "；当前正在运行，新顺序从下次运行开始生效"
+        InfoBar.info("已调整账号顺序", tip, parent=self.window(),
+                     position=InfoBarPosition.TOP_RIGHT, duration=3000)
+
+    def move_relative(self, index, delta):
+        """相对移动一位：delta=-1 上移，+1 下移（账号详情里的按钮用）。"""
+        n = len(self.cfg["accounts"])
+        if not (0 <= index < n) or not delta:
+            return
+        target = max(0, min(index + delta, n - 1))
+        if target == index:
+            return
+        self.move_account(index, target + 1 if target > index else target)
 
     def resizeEvent(self, event):
         """不做响应式重排：固定两列，窗口过窄时由横向滚动兜底。"""

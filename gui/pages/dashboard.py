@@ -607,6 +607,7 @@ class UpdateLogDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("MAA 更新")
         self.resize(620, 460)
+        self.setStyleSheet("QDialog { background: %s; }" % theme.BG)
         root = QVBoxLayout(self)
         root.setContentsMargins(20, 18, 20, 16)
         root.setSpacing(10)

@@ -297,6 +297,22 @@ def _patch_gray_info_bar():
     InfoBar.new = classmethod(_new)
 
 
+def _patch_gray_message_box():
+    """MessageBox 的白底/浅灰底统一成与主界面一致的灰阶。"""
+    orig_init = MessageBox.__init__
+
+    def _init(self, title, content, parent=None):
+        orig_init(self, title, content, parent)
+        self.widget.setStyleSheet(
+            "QFrame#centerWidget { background: %s; border: 1px solid %s;"
+            " border-radius: 10px; }"
+            "QFrame#buttonGroup { background: %s; border-top: 1px solid %s;"
+            " border-bottom-left-radius: 10px; border-bottom-right-radius: 10px; }"
+            % (theme.BG, theme.BORDER, theme.CARD, theme.BORDER))
+
+    MessageBox.__init__ = _init
+
+
 def main():
     QApplication.setHighDpiScaleFactorRoundingPolicy(
         Qt.HighDpiScaleFactorRoundingPolicy.PassThrough)
@@ -304,6 +320,7 @@ def main():
     app.setQuitOnLastWindowClosed(True)
     setThemeColor("#4b515a")
     _patch_gray_info_bar()
+    _patch_gray_message_box()
     win = MainWindow()
     win.show()
     if "--smoke" in sys.argv:
