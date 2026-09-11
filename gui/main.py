@@ -39,11 +39,27 @@ _win = None
 
 
 def swap_window():
-    """用当前配置重建主窗口（主题切换用）：先建新窗再关旧窗，桌面不留空。"""
+    """用当前配置重建主窗口（主题切换用）：先建新窗再关旧窗，桌面不留空。
+
+    旧窗的位置/尺寸/最大化状态与当前所在页面会带到新窗：先落几何、
+    落页面再 show，重建后窗口不跳回默认大小，也不闪回仪表盘。
+    """
     global _win
     old = _win
+    geo = old.geometry() if old is not None else None
+    maximized = old.isMaximized() if old is not None else False
+    page_index = old.stackedWidget.currentIndex() if old is not None else 0
     _win = MainWindow()
+    if not maximized and geo is not None:
+        _win.setGeometry(geo)
+    # 先把 _prev_page 拨到目标页再 switchTo：currentChanged 触发
+    # _on_page_changed 时因「页码未变」直接返回，重建落页不播页面过渡
+    _win._prev_page = page_index
+    _win.switchTo(_win.stackedWidget.widget(page_index))
     _win.show()
+    if maximized:
+        # 无边框窗口必须先 show 再最大化，直接 showMaximized 不会生效
+        _win.showMaximized()
     if old is not None:
         old._rebuilding = True   # 让 closeEvent 跳过「更新进行中」确认
         old.close()
