@@ -12,7 +12,7 @@ from qfluentwidgets import (BodyLabel, MessageBox, PushButton, SwitchButton,
 
 import theme
 from core import logparse, runner
-from widgets import set_switch_checked_gray
+from widgets import set_switch_checked_gray, style_button
 
 MAX_LINES = 3000
 
@@ -25,21 +25,17 @@ class LogsPage(QWidget):
         self._last_mtime = -1
 
         root = QVBoxLayout(self)
-        root.setContentsMargins(0, 16, 0, 16)
+        root.setContentsMargins(12, 16, 12, 16)
         root.setSpacing(10)
 
         # 工具栏
         bar = QHBoxLayout()
         bar.setSpacing(10)
-        refresh_btn = PushButton("刷新")
+        refresh_btn = style_button(PushButton("刷新"), small=True)
         refresh_btn.clicked.connect(self.refresh)
-        open_btn = PushButton("打开日志文件")
+        open_btn = style_button(PushButton("打开日志文件"), small=True)
         open_btn.clicked.connect(self._open_file)
-        clear_btn = PushButton("清空")
-        clear_btn.setStyleSheet(
-            "PushButton { color: %s; border: 1px solid #9aa1ab; background: %s; }"
-            "PushButton:hover { background: %s; }"
-            % (theme.ERR, theme.CARD, theme.ERR_TINT))
+        clear_btn = style_button(PushButton("清空"), "danger", small=True)
         clear_btn.clicked.connect(self._clear)
         bar.addWidget(refresh_btn)
         bar.addWidget(open_btn)
@@ -58,9 +54,9 @@ class LogsPage(QWidget):
         self.view.setReadOnly(True)
         self.view.setStyleSheet(
             "TextEdit { background: %s; color: %s;"
-            " font-family: Consolas, 'Cascadia Mono', monospace;"
-            " font-size: 12px; border-radius: 10px; padding: 12px 14px;"
-            " border: none; }" % (theme.LOG_BG, theme.LOG_FG))
+            " font-family: %s; font-size: 12px; border-radius: %dpx;"
+            " padding: 12px 14px; border: none; }"
+            % (theme.LOG_BG, theme.LOG_FG, theme.FONT_MONO, theme.RADIUS_CARD))
         root.addWidget(self.view, 1)
 
         self._body = ""  # 当前已展示的日志文本（避免无变化时重刷）

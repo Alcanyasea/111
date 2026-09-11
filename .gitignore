@@ -34,3 +34,6 @@ plugins/base_schedule/plans/
 # Installer build cache and output
 build/tools/
 build/dist/
+
+# Local tool cache
+.codely-cli/

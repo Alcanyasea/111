@@ -55,6 +55,7 @@ $updateTimeoutSec = 5400   # 默认最长等待 90 分钟
 $venvPython = "D:\1\gui\.venv\Scripts\python.exe"
 $baseSchedulePy = "D:\1\plugins\base_schedule\base_schedule.py"
 $fightStagePy = "D:\1\plugins\fight_stage\fight_stage.py"
+$fiammettaPy = "D:\1\plugins\fiammetta\fiammetta.py"
 
 # ---- 读取 GUI 配置（D:\1\config.json），字段缺失时回退上面的硬编码默认 ----
 # config.json 由「MAA 挂机控制台」GUI 生成；文件不存在时流程与旧版完全一致。
@@ -156,12 +157,36 @@ function Wait-MAADone($t, $maaDir) {
     }
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
     $lastAct = Get-Date
+    $lastLogTry = Get-Date
     $readFail = 0
+    $maaDeadCount = 0
     while ($true) {
         if (Test-Path $signalFile) {
             Log ("MAA finished! {0} min" -f [math]::Round($sw.Elapsed.TotalMinutes, 1))
             Start-Sleep 3
             return $true
+        }
+        # MAA 进程意外退出（启动即崩溃/被手动关闭）→ 不傻等心跳超时，快速判失败；
+        # 连续 2 轮（约 20 秒）检测不到才判，避开进程刚拉起的瞬间
+        if (-not (Get-Process -Name "MAA" -ErrorAction SilentlyContinue)) {
+            $maaDeadCount++
+            if ($maaDeadCount -ge 2) {
+                Log "ERROR: MAA 进程已退出且没有完成信号，判定失败"
+                return $false
+            }
+        } else {
+            $maaDeadCount = 0
+        }
+        # asst.log 启动瞬间不存在/被占用时周期性重试打开，
+        # 否则心跳全程失效，会把正常运行的 MAA 误判为卡死
+        if ($logPos -lt 0 -and ((Get-Date) - $lastLogTry).TotalSeconds -ge 30) {
+            $lastLogTry = Get-Date
+            $fs0 = $null
+            try {
+                $fs0 = [System.IO.File]::Open($logPath, 'Open', 'Read', 'ReadWrite')
+                $logPos = $fs0.Length
+                $fs0.Dispose()
+            } catch { if ($fs0) { try { $fs0.Dispose() } catch {} } }
         }
         if ($logPos -ge 0) {
             $fs = $null
@@ -199,7 +224,7 @@ function Wait-MAADone($t, $maaDir) {
 }
 
 function Run-MAA($exe, $dir, $label) {
-    Log "=== Run MAA [" + $label + "] ==="
+    Log ("=== Run MAA [" + $label + "] ===")
     Get-Process -Name "MAA" -ErrorAction SilentlyContinue | Stop-Process -Force
     Start-Sleep 2
     if (Test-Path $signalFile) { Remove-Item $signalFile -Force }
@@ -209,9 +234,28 @@ function Run-MAA($exe, $dir, $label) {
     $ok = Wait-MAADone $maaStallTimeoutSec $dir
     Get-Process -Name "MAA" -ErrorAction SilentlyContinue | Stop-Process -Force
     Start-Sleep 2
-    if ($ok) { Log "MAA [" + $label + "] completed successfully" }
-    else     { Log "ERROR: MAA [" + $label + "] FAILED or timed out" }
+    if ($ok) { Log ("MAA [" + $label + "] completed successfully") }
+    else     { Log ("ERROR: MAA [" + $label + "] FAILED or timed out") }
     return $ok
+}
+
+# ---- 插件调用模板：统一「venv/脚本存在检查 → 调用 → 逐行记日志 → 退出码检查」。
+# 不可用/执行失败都只告警、不阻断主流程（MAA 按原配置继续跑）。
+# $tag 用作每行插件输出的日志前缀；$name 用于告警文本；$missNote 是不可用时的后果说明。
+function Invoke-Plugin($pyPath, $tag, $name, $argList, $missNote) {
+    if (-not (Test-Path $venvPython) -or -not (Test-Path $pyPath)) {
+        Log ("  [WARN] " + $name + "不可用（venv python 或脚本缺失），" + $missNote)
+        return $false
+    }
+    $out = & $venvPython $pyPath @argList 2>&1
+    foreach ($l in $out) {
+        if ($l -and [string]$l) { Log ("  [" + $tag + "] " + [string]$l) }
+    }
+    if ($LASTEXITCODE -ne 0) {
+        Log ("  [WARN] " + $name + "执行失败（exit " + $LASTEXITCODE + "），继续按 MAA 原配置运行")
+        return $false
+    }
+    return $true
 }
 
 function Run-Switch($s) {
@@ -268,18 +312,19 @@ function Refresh-SlotData($Server, $Slot) {
         $m = [regex]::Match($ppc, 'name="u8sdk_cached_uid">([0-9]+)')
         if ($m.Success) { $devUid = $m.Groups[1].Value }
     } catch {}
-    Remove-Item $tmpPp -Force -ErrorAction SilentlyContinue
     $uidFile = Join-Path $slotDir "uid.txt"
     $expectUid = ""
     if (Test-Path $uidFile) { $expectUid = (Get-Content $uidFile -Raw -ErrorAction SilentlyContinue).Trim() }
     if (-not $devUid -or ($expectUid -and ($devUid -ne $expectUid))) {
+        Remove-Item $tmpPp -Force -ErrorAction SilentlyContinue
         Log ("  [WARN] Refresh slot: uid mismatch (device=" + $devUid + ", slot=" + $expectUid + "), skipped")
         return
     }
     $dstShared = Join-Path $slotDir "shared_prefs"
     $dstFiles = Join-Path $slotDir "files\zx"
     New-Item -ItemType Directory -Force $dstShared, $dstFiles | Out-Null
-    & $adb -s $device pull ("/data/data/{0}/shared_prefs/{1}" -f $pkg, $ppName) (Join-Path $dstShared $ppName) 2>$null | Out-Null
+    # uid 校验的就是这份临时文件，直接落盘：省一次 adb pull，且校验与落盘保证为同一份
+    Move-Item $tmpPp (Join-Path $dstShared $ppName) -Force
     & $adb -s $device pull "/data/data/$pkg/shared_prefs/HypergryphSdkPreferences.xml" (Join-Path $dstShared "HypergryphSdkPreferences.xml") 2>$null | Out-Null
     & $adb -s $device pull "/data/data/$pkg/files/zx/lc.cache" (Join-Path $dstFiles "lc.cache") 2>$null | Out-Null
     Log "  [Refresh] slot '$Slot' data updated from device"
@@ -514,43 +559,31 @@ $total = $accountList.Count
             $ok = $true
         } else {
             $accId = if ($null -ne $acc.id -and [string]$acc.id) { [string]$acc.id } else { "" }
-            # ---- 第二理智作战关卡：启动 MAA 前按账号写入第二个 FightTask 的关卡 ----
-            $accHasFightPlan = $false
-            $planProp = $acc.PSObject.Properties['second_fight_plan']
-            if ($null -ne $planProp -and $null -ne $planProp.Value) {
-                $planList = @($planProp.Value)
-                if ($planList.Count -gt 0) {
+            # 三个插件走同一套调用模板（Invoke-Plugin）；$accId 缺失时全部跳过
+            if ($accId) {
+                $pluginArgs = @('apply', '--config', $configPath, '--account', $accId, '--server', $accServer)
+                # ---- 第二理智作战关卡：启动 MAA 前按账号写入第二个 FightTask 的关卡 ----
+                $accHasFightPlan = $false
+                $planProp = $acc.PSObject.Properties['second_fight_plan']
+                if ($null -ne $planProp -and $null -ne $planProp.Value) {
+                    $planList = @($planProp.Value)
+                    if ($planList.Count -gt 0) {
+                        $accHasFightPlan = $true
+                    }
+                }
+                if (-not $accHasFightPlan -and $null -ne $acc.second_fight_stage -and
+                    [string]$acc.second_fight_stage) {
                     $accHasFightPlan = $true
                 }
-            }
-            if (-not $accHasFightPlan -and $null -ne $acc.second_fight_stage -and
-                [string]$acc.second_fight_stage) {
-                $accHasFightPlan = $true
-            }
-            if ($accId -and $accHasFightPlan -and (Test-Path $venvPython) -and (Test-Path $fightStagePy)) {
-                $fsOut = & $venvPython $fightStagePy apply --config $configPath --account $accId --server $accServer 2>&1
-                $fsCode = $LASTEXITCODE
-                foreach ($fsLine in $fsOut) {
-                    if ($fsLine -and [string]$fsLine) { Log ("  [理智关卡] " + [string]$fsLine) }
+                if ($accHasFightPlan) {
+                    [void](Invoke-Plugin $fightStagePy "理智关卡" "理智关卡插件" $pluginArgs "第二理智关卡未写入")
                 }
-                if ($fsCode -ne 0) {
-                    Log "  [WARN] 理智关卡插件执行失败（exit $fsCode），继续按 MAA 原配置运行"
-                }
-            } elseif ($accId -and $accHasFightPlan) {
-                Log "  [WARN] 理智关卡插件不可用（venv python 或脚本缺失），第二理智关卡未写入"
-            }
-            # ---- 精确基建派驻插件：启动 MAA 前按账号写入自定义计划（未启用则恢复 Rotation）----
-            if ($accId -and (Test-Path $venvPython) -and (Test-Path $baseSchedulePy)) {
-                $bsOut = & $venvPython $baseSchedulePy apply --config $configPath --account $accId --server $accServer --batch $bsBatch 2>&1
-                $bsCode = $LASTEXITCODE
-                foreach ($bsLine in $bsOut) {
-                    if ($bsLine -and [string]$bsLine) { Log ("  [基建插件] " + [string]$bsLine) }
-                }
-                if ($bsCode -ne 0) {
-                    Log "  [WARN] 基建插件执行失败（exit $bsCode），继续按 MAA 原配置运行"
-                }
-            } else {
-                Log "  [WARN] 基建插件不可用（venv python 或脚本缺失），继续按 MAA 原配置运行"
+                # ---- 精确基建派驻插件：启动 MAA 前按账号写入自定义计划（未启用则恢复 Rotation）----
+                [void](Invoke-Plugin $baseSchedulePy "基建插件" "基建插件" ($pluginArgs + @('--batch', $bsBatch)) "继续按 MAA 原配置运行")
+                # ---- 菲亚梅塔心情恢复：换班前先恢复目标干员心情 ----
+                # 自定义模式（精确基建）由上面生成的计划 JSON 的 Fiammetta 字段生效；
+                # 这里写的是常规模式的基建任务参数，两者互斥、都是换班前恢复。
+                [void](Invoke-Plugin $fiammettaPy "菲亚梅塔" "菲亚梅塔插件" $pluginArgs "菲亚梅塔设置未写入")
             }
             $maaExe = if ($accServer -eq "bilibili") { $maaBilibili } else { $maaOfficial }
             $maaDir = if ($accServer -eq "bilibili") { $maaBilibiliDir } else { $maaOfficialDir }

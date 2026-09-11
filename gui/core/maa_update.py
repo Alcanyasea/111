@@ -1,9 +1,13 @@
 # -*- coding: utf-8 -*-
-"""一键更新 MAA（版本更新 + 资源更新），两套 MAA 依次执行。
+"""一键更新 MAA（版本更新），两套 MAA 依次执行。
+
+资源更新不在此流程内：MAA 启动时会自动检查资源热更版本（内置 ResourceUpdater）
+但检查到新资源包不会自动下载，需要人工在 MAA 界面确认；tasks.json 等部分资源
+MAA 会自行自动更新，新活动素材随版本更新包一并到位。
 
 原理：MAA 启动时按 gui.new.json 顶层 Update 块自动检查并安装更新
 （CheckOnStartup / AutoDownloadUpdatePackage / AutoInstallUpdatePackage），
-版本更新与资源更新都由 MAA 自己完成：原地升级、目录名不变、装完自动重启。
+版本更新由 MAA 自己完成：原地升级、目录名不变、装完自动重启。
 MAA 是单实例程序（互斥锁），两套必须串行，不能同时开。
 
 GitHub 直连不稳，更新前先启动 Clash（Clash Verge Rev，配置在 config.json
@@ -37,7 +41,7 @@ UPDATER_EXE = "MAA.Updater.exe"
 # Clash Verge Rev 的 mihomo 内核进程，结束 Clash 时一并清理
 CLASH_CORE_EXES = ("verge-mihomo.exe", "verge-mihomo-alpha.exe")
 CLASH_START_WAIT_SEC = 90   # Clash 启动后等代理端口就绪的上限
-INSTALL_SETTLE_SEC = 60     # 版本装完后等 MAA 重启 + 资源更新的宽限
+INSTALL_SETTLE_SEC = 60     # 版本装完后等 MAA 重启与启动自检的宽限
 
 
 def _run(args, timeout=15):
@@ -142,15 +146,24 @@ def latest_version(maa_dir):
 
 
 def version_rows(cfg):
-    """仪表盘展示用：[(名称, 当前版本, 最新版本), ...]，缺失为 None。"""
+    """仪表盘展示用：[(名称, 当前版本, 最新版本, 缓存检查时间戳), ...]。
+
+    最新版本来自 MAA 本地缓存（cache\\version\\stable.json，MAA 自己检查后写入），
+    缓存检查时间戳 = 该文件的 mtime；两者缺失为 None。
+    """
     rows = []
     for _key, name, d in _maa_targets(cfg):
         if not d or not Path(d).is_dir():
-            rows.append((name, None, None))
+            rows.append((name, None, None, None))
             continue
         exe = Path(d) / MAA_EXE
+        ver_file = Path(d) / "cache" / "version" / "stable.json"
+        try:
+            checked = ver_file.stat().st_mtime
+        except OSError:
+            checked = None
         rows.append((name, file_version(exe) if exe.is_file() else None,
-                     latest_version(d)))
+                     latest_version(d), checked))
     return rows
 
 
@@ -362,20 +375,28 @@ def _start_maa(exe, maa_dir, log):
         return False
 
 
-def _watch_maa(exe, maa_dir, old_ver, deadline, log, expect_download=False):
+def _log_offset(log_path):
+    """日志快照：返回当前大小（文件不存在返回 0）。"""
+    try:
+        return Path(log_path).stat().st_size
+    except OSError:
+        return 0
+
+
+def _watch_maa(exe, maa_dir, old_ver, deadline, log, expect_download=False,
+               log_offset=None):
     """启动 MAA 并监控，直到得出结论。
 
     返回 (new_ver, updater_seen, outcome)：
     outcome = "updated"（版本已变） | "latest"（检查完无更新）
             | "pending"（更新包已下载，需重启 MAA 安装） | "exited"（MAA 退出了）
     expect_download=True 时（第二阶段安装）不做 "latest" 判断，只等版本变化。
+    log_offset = 启动 MAA **之前**的日志快照：MAA 启动头几秒就会写版本检查/
+    残留包检测等关键行，快照晚于启动会把这些行漏在盲区里。
     """
     maa_dir = Path(maa_dir)
     log_path = maa_dir / GUI_LOG
-    try:
-        offset = log_path.stat().st_size
-    except OSError:
-        offset = 0
+    offset = _log_offset(log_path) if log_offset is None else log_offset
     started = time.time()
     updater_seen = False
     saw_summary = saw_download = downloaded = False
@@ -425,8 +446,8 @@ def update_one(name, maa_dir, proxy_url, timeout_min, log):
 
     MAA 的版本更新分两跳：启动时检查并后台下载更新包（不立即安装），下次
     启动检测到待安装包才交给 MAA.Updater 原地安装并自动重启。因此下载完成后
-    要把 MAA 重启一次触发安装。资源更新由 MAA 启动时自行检查（不自动下载，
-    只在 MAA 界面提示，见 run_full_update 说明）。
+    要把 MAA 重启一次触发安装。资源热更包 MAA 只检查不下载（需在 MAA 界面
+    人工确认），资源随版本更新包与 tasks.json 自动更新到位，见模块说明。
     """
     maa_dir = Path(maa_dir)
     exe = maa_dir / MAA_EXE
@@ -436,7 +457,7 @@ def update_one(name, maa_dir, proxy_url, timeout_min, log):
     latest = latest_version(maa_dir)
     log("当前版本：%s；缓存最新版本：%s" % (old_ver or "未知", latest or "未知"))
     if old_ver and latest and not _ver_gt(latest, old_ver):
-        log("版本已是最新，仍启动一次检查版本与资源更新")
+        log("版本已是最新，仍启动一次检查版本更新")
 
     try:
         saved = _apply_update_config(maa_dir, proxy_url)
@@ -447,19 +468,24 @@ def update_one(name, maa_dir, proxy_url, timeout_min, log):
     try:
         deadline = time.time() + timeout_min * 60
         log("启动 MAA 检查更新…")
+        offset = _log_offset(maa_dir / GUI_LOG)   # 启动前快照，防关键行落在盲区
         if not _start_maa(exe, maa_dir, log):
             return False, "启动 MAA 失败"
         new_ver, updater_seen, outcome = _watch_maa(
-            exe, maa_dir, old_ver, deadline, log)
+            exe, maa_dir, old_ver, deadline, log, log_offset=offset)
 
         if outcome == "pending":
             # 下载完成但没装（MAA 装更新靠下次启动），重启触发安装
             _kill_maa(log)
             log("重启 MAA 安装已下载的更新…")
+            # 安装阶段重新计时：下载可能已用掉大半预算，否则装到一半被判超时
+            deadline = time.time() + timeout_min * 60
+            offset = _log_offset(maa_dir / GUI_LOG)
             if not _start_maa(exe, maa_dir, log):
                 return False, "重启 MAA 安装更新失败"
             new_ver, updater_seen, outcome = _watch_maa(
-                exe, maa_dir, old_ver, deadline, log, expect_download=True)
+                exe, maa_dir, old_ver, deadline, log, expect_download=True,
+                log_offset=offset)
 
         if new_ver:
             log("版本已更新到 %s，等待 MAA 自动重启与启动自检…" % new_ver)

@@ -30,13 +30,15 @@ import theme
 from core import runner
 from pages.stage_plan_dialog import (format_stage_plan, maa_second_fight_plan,
                                      show_stage_plan_dialog)
-from widgets import Card, IconBadge, Pill, set_switch_checked_gray
+from widgets import (Card, IconBadge, Pill, _label_transparent,
+                     set_switch_checked_gray, style_button,
+                     style_primary_button, style_scroll_area)
 
 CREATE_NO_WINDOW = 0x08000000
 
 # ---- 拖动排序的版式与节奏（数值参考 SortableJS / react-beautiful-dnd）----
 GRID_COLS = 2          # 每行 2 张卡片
-GRID_SPACING = 16      # 卡片间距（px）
+GRID_SPACING = 20      # 卡片间距（px）
 CARD_MIN_H = 86        # 卡片最小高度，实际取内容高度
 MOVE_MS = 150          # 其他卡片让位动画时长（SortableJS 默认 150ms）
 DROP_MS = 170          # 松手落位动画时长（按距离微调）
@@ -44,17 +46,6 @@ AUTOSCROLL_ZONE = 54   # 拖到上下边缘这个范围内开始自动滚动
 AUTOSCROLL_STEP_MAX = 26
 
 SERVER_LABELS = {"official": "官服", "bilibili": "B 服"}
-
-
-def _label_transparent(widget):
-    """让 Fluent 文本标签透明，避免在灰卡片上画出底色方块。
-
-    qfluentwidgets 的 FluentLabelBase 样式本身不设背景，但在带背景色
-    样式表的父级里会把调色板 Window 色画出来，补一条 background 规则覆盖。
-    """
-    old = widget.styleSheet() or ""
-    if "background: transparent" not in old:
-        widget.setStyleSheet(old + "\nFluentLabelBase { background: transparent; }")
 
 
 class ClickLabel(QLabel):
@@ -238,16 +229,17 @@ class CaptureDialog(QDialog):
         self.log_view = QPlainTextEdit()
         self.log_view.setReadOnly(True)
         self.log_view.setStyleSheet(
-            "QPlainTextEdit { background: %s; color: %s; font-family: Consolas,"
-            " 'Courier New', monospace; font-size: 12px; border: 1px solid %s;"
-            " border-radius: 6px; }" % (theme.LOG_BG, theme.LOG_FG, theme.BORDER))
+            "QPlainTextEdit { background: %s; color: %s; font-family: %s;"
+            " font-size: 12px; border: none; border-radius: %dpx;"
+            " padding: 12px 14px; }"
+            % (theme.LOG_BG, theme.LOG_FG, theme.FONT_MONO, theme.RADIUS_CARD))
         self.log_view.setMinimumHeight(220)
         root.addWidget(self.log_view, 1)
 
         btns = QHBoxLayout()
         btns.setSpacing(10)
-        self.start_btn = PrimaryPushButton("开始捕获")
-        self.close_btn = PushButton("关闭")
+        self.start_btn = style_primary_button(PrimaryPushButton("开始捕获"))
+        self.close_btn = style_button(PushButton("关闭"))
         btns.addWidget(self.start_btn)
         btns.addStretch(1)
         btns.addWidget(self.close_btn)
@@ -287,6 +279,10 @@ class CaptureDialog(QDialog):
         password = self.pass_edit.text()
         if not label or not username or not password:
             self._show_error("名称 / 账号 / 密码不能为空")
+            return
+        # PowerShell -File 传参时，以「-」开头的值会被当成参数名导致绑定失败、捕获报错
+        if username.startswith("-") or password.startswith("-"):
+            self._show_error("账号 / 密码不能以「-」开头（无法通过命令行传给捕获脚本）")
             return
         server = "bilibili" if self.server_combo.currentIndex() == 1 else "official"
         self._slot = (self.acc or {}).get("slot") or ("acc_" + uuid.uuid4().hex[:8])
@@ -393,13 +389,12 @@ class AccountRow(Card):
         row.addStretch(1)
         self.uid_pill = Pill()
         row.addWidget(self.uid_pill)
-        self.base_sw = set_switch_checked_gray(SwitchButton())
-        self.base_sw.setText("精确基建")
+        self.base_sw = set_switch_checked_gray(SwitchButton(), "精确基建")
         self.base_sw.setChecked(bool((acc.get("base_schedule") or {}).get("enabled", False)))
         self.base_sw.setToolTip("启用精确基建派驻；关闭时使用 MAA 自带基建换班")
         self.base_sw.checkedChanged.connect(self._on_base_toggle)
         row.addWidget(self.base_sw)
-        self.base_btn = PushButton("基建")
+        self.base_btn = style_button(PushButton("基建"), small=True)
         self.base_btn.setToolTip("精确选择各设施进驻干员（批次随启动时间，支持333/243布局）")
         self.base_btn.clicked.connect(self._on_base_config)
         row.addWidget(self.base_btn)
@@ -407,13 +402,11 @@ class AccountRow(Card):
         self.sw.setChecked(bool(acc.get("enabled", True)))
         self.sw.checkedChanged.connect(self._on_toggle)
         row.addWidget(self.sw)
-        self.cap_btn = PushButton("捕获")
+        self.cap_btn = style_button(PushButton("捕获"), small=True)
         self.cap_btn.setToolTip("清空登录态并重新登录，拉取该账号的登录数据")
         self.cap_btn.clicked.connect(self._on_capture)
         row.addWidget(self.cap_btn)
-        self.del_btn = PushButton("删除")
-        self.del_btn.setStyleSheet(
-            "PushButton { color: %s; border: 1px solid #9aa1ab; }" % theme.ERR)
+        self.del_btn = style_button(PushButton("删除"), "danger", small=True)
         self.del_btn.clicked.connect(self._on_delete)
         row.addWidget(self.del_btn)
         self.vbox.addLayout(row)
@@ -424,7 +417,7 @@ class AccountRow(Card):
         lab = BodyLabel("候选关卡:")
         lab.setStyleSheet("color: %s; font-size: 12px;" % theme.TEXT_2)
         sub.addWidget(lab)
-        self.fight_btn = PushButton()
+        self.fight_btn = style_button(PushButton(), small=True)
         self.fight_btn.setMinimumWidth(300)
         self.fight_btn.setToolTip(
             "编辑该账号第二个理智作战的候选关卡，界面与 MAA 一致：\n"
@@ -550,15 +543,14 @@ class AccountDetailDialog(QDialog):
 
         grid = QGridLayout()
         grid.setSpacing(10)
-        self.capture_btn = PushButton("重新捕获登录数据")
+        self.capture_btn = style_button(PushButton("重新捕获登录数据"))
         self.capture_btn.setToolTip("清空登录态并重新登录，拉取该账号的登录数据")
-        self.bs_btn = PushButton("精确基建配置")
-        self.bs_btn.setToolTip("配置该账号精确基建派驻（布局/批次/干员）")
-        self.fight_btn = PushButton("第二理智候选关卡")
+        self.bs_btn = style_button(PushButton("精确基建配置"))
+        self.bs_btn.setToolTip(
+            "配置该账号精确基建派驻（布局/批次/干员/无人机/菲亚梅塔恢复）")
+        self.fight_btn = style_button(PushButton("第二理智候选关卡"))
         self.fight_btn.setToolTip("按 MAA 候选关卡界面修改该账号刷图候选")
-        self.delete_btn = PushButton("删除该账号")
-        self.delete_btn.setStyleSheet(
-            "PushButton { color: %s; border: 1px solid #9aa1ab; }" % theme.ERR)
+        self.delete_btn = style_button(PushButton("删除该账号"), "danger")
         for i, b in enumerate((self.capture_btn, self.bs_btn,
                                self.fight_btn, self.delete_btn)):
             b.setMinimumHeight(38)
@@ -574,9 +566,9 @@ class AccountDetailDialog(QDialog):
         order_lab.setStyleSheet("color: %s; font-size: 12.5px;" % theme.TEXT_2)
         _label_transparent(order_lab)
         order_row.addWidget(order_lab)
-        self.up_btn = PushButton("↑ 上移")
+        self.up_btn = style_button(PushButton("↑ 上移"), small=True)
         self.up_btn.setToolTip("与上一个账号交换位置（运行顺序 = 列表顺序）")
-        self.down_btn = PushButton("↓ 下移")
+        self.down_btn = style_button(PushButton("↓ 下移"), small=True)
         self.down_btn.setToolTip("与下一个账号交换位置（运行顺序 = 列表顺序）")
         order_row.addWidget(self.up_btn)
         order_row.addWidget(self.down_btn)
@@ -908,18 +900,17 @@ class AccountsPage(ScrollArea):
         self.view = QWidget()
         self.setWidget(self.view)
         self.setWidgetResizable(True)
-        # 与仪表盘一致：滚动区背景透明，露出窗口统一底色
-        self.setStyleSheet("QScrollArea { border: none; background: transparent; }")
-        self.viewport().setStyleSheet("background: transparent;")
+        # 与仪表盘一致：滚动区透明 + 浅色细滚动条；右侧让出 12px 给滑块
+        style_scroll_area(self)
         root = QVBoxLayout(self.view)
-        root.setContentsMargins(0, 16, 0, 16)
-        root.setSpacing(16)
+        root.setContentsMargins(12, 16, 12, 16)
+        root.setSpacing(20)
 
         # 「添加账号」操作放最上面；账号卡片与仪表盘一样直接铺在页面背景上
         action = Card()
         bar = QHBoxLayout()
         bar.setSpacing(10)
-        self.add_btn = PrimaryPushButton("＋ 添加账号")
+        self.add_btn = style_primary_button(PrimaryPushButton("添加账号"))
         self.add_btn.setToolTip("添加账号：输入名称/服务器/账号/密码，自动登录并保存登录数据")
         self.add_btn.clicked.connect(self._on_add)
         bar.addWidget(self.add_btn)
@@ -1177,7 +1168,10 @@ class AccountsPage(ScrollArea):
         if ani is not None:
             ani.deleteLater()
         try:
-            card.setGraphicsEffect(None)     # 恢复不透明（Qt 会接管删除旧 effect）
+            # 移除拖动用的透明度特效（Qt 会接管删除旧 effect），
+            # 卡片自身的投影特效在换特效时已被替换删除，这里补回
+            card.setGraphicsEffect(None)
+            card.apply_shadow()
         except RuntimeError:
             pass                             # 卡片已被列表重建销毁
 

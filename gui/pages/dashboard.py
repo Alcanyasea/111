@@ -14,8 +14,9 @@ from qfluentwidgets import (BodyLabel, InfoBar, InfoBarPosition, LineEdit,
 import config as appconfig
 import theme
 from core import adb, logparse, maa_update, runner, scheduler
-from widgets import (Card, IconBadge, Pill, big_number, kv_row,
-                     set_switch_checked_gray)
+from widgets import (Card, IconBadge, Pill, big_number, inset_row, kv_row,
+                     set_switch_checked_gray, style_button,
+                     style_primary_button, style_scroll_area)
 
 LEGACY_LOG_NAMES = {"official1": "Official 1", "official2": "Official 2",
                     "bilibili": "Bilibili"}
@@ -52,15 +53,38 @@ def fmt_ts(ts):
     return dt.strftime("%m-%d %H:%M")
 
 
-def _label(text, size="12.5px", weight="400", color=theme.TEXT):
+def _label(text, size="12.5px", weight="400", color=None):
+    # color 缺省时在调用时读取主题色（不能写成默认参数 theme.TEXT，
+    # 否则会在模块导入时固化，切换主题后仍旧值）
     lab = QLabel(text)
-    lab.setStyleSheet("font-size: %s; font-weight: %s; color: %s;" % (size, weight, color))
+    lab.setStyleSheet(
+        "font-family: %s; font-size: %s; font-weight: %s; color: %s;"
+        % (theme.FONT_FAMILY, size, weight, color or theme.TEXT))
     return lab
 
 
 def _set_big_num(big_widget, num):
     """更新 big_number 组件的数字（数字 label 是第一个子控件）。"""
     big_widget.findChild(QLabel).setText(str(num))
+
+
+def kv_pair(key_text, value_text="—"):
+    """带引用的键值行：返回 (row, key_label, value_label)，便于运行时改文案。
+
+    注意不要把 QLabel 传给 widgets.kv_row 的 key_text：qfluentwidgets 会把
+    非 str 参数当 parent 重载，键名会凭空消失。
+    """
+    key = _label(key_text, color=theme.TEXT_2)
+    val = _label(value_text)
+    val.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+    row = QWidget()
+    lay = QHBoxLayout(row)
+    lay.setContentsMargins(0, 0, 0, 0)
+    lay.setSpacing(8)
+    lay.addWidget(key)
+    lay.addStretch(1)
+    lay.addWidget(val)
+    return row, key, val
 
 
 class AccountCard(Card):
@@ -83,16 +107,12 @@ class AccountCard(Card):
         self.vbox.addLayout(head)
         self.vbox.addSpacing(8)
 
-        # kv1：今日耗时（大数字）或当前进度（文本）
-        self.kv1_key = _label("今日耗时", color=theme.TEXT_2)
-        self.kv1_val = _label("—")
-        self.kv1_val.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-        self.vbox.addWidget(kv_row(self.kv1_key, self.kv1_val))
+        # kv1：今日耗时（大数字）或当前进度（文本）；kv2：最近运行/已用时间
+        row1, self.kv1_key, self.kv1_val = kv_pair("今日耗时")
+        self.vbox.addWidget(row1)
         self.vbox.addSpacing(4)
-        self.kv2_key = _label("最近运行", color=theme.TEXT_2)
-        self.kv2_val = _label("—")
-        self.kv2_val.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-        self.vbox.addWidget(kv_row(self.kv2_key, self.kv2_val))
+        row2, self.kv2_key, self.kv2_val = kv_pair("最近运行")
+        self.vbox.addWidget(row2)
 
     def _set_kv1_big(self, num):
         self.kv1_val.setText(
@@ -191,7 +211,7 @@ class ScheduleCard(Card):
 
         bar = QHBoxLayout()
         bar.setSpacing(10)
-        self.add_btn = PushButton("添加时间")
+        self.add_btn = style_button(PushButton("添加时间"))
         self.add_btn.setToolTip(
             "新增一个启动时间点，加完后可修改为任意 HH:MM（如 08:00 / 00:00）。\n"
             "新时间立即写入计划任务。")
@@ -230,10 +250,10 @@ class ScheduleCard(Card):
         hint.setText(" · ".join(parts))
 
     def _make_row(self, entry):
-        row_widget = QWidget()
+        row_widget = inset_row()   # iOS 设置列表式内嵌行：深半档底色 + 6px 圆角
         row = QHBoxLayout(row_widget)
-        row.setContentsMargins(0, 0, 0, 0)
-        row.setSpacing(6)
+        row.setContentsMargins(10, 7, 10, 7)
+        row.setSpacing(8)
 
         lab = BodyLabel(appconfig.batch_name(entry["time"]))
         lab.setStyleSheet("color: %s; font-size: 13px;" % theme.TEXT_2)
@@ -243,23 +263,21 @@ class ScheduleCard(Card):
         edit.setClearButtonEnabled(False)
         edit.setText(entry["time"])
         edit.setToolTip("启动时间，HH:MM；00:00 显示为 24点")
-        sw = set_switch_checked_gray(SwitchButton())
-        sw.setText("启用")
+        sw = set_switch_checked_gray(SwitchButton(), "启用")
         sw.setFixedWidth(75)
         sw.setChecked(bool(entry.get("enabled", True)))
         sw.setToolTip(
             "开启：该时间点写入计划任务，到点自动开始挂机。\n"
             "关闭：该时间点不触发（保留在列表，随时可重新打开）。\n"
             "全部关闭时计划任务整体禁用。")
-        shutdown_sw = set_switch_checked_gray(SwitchButton())
-        shutdown_sw.setText("关机")
+        shutdown_sw = set_switch_checked_gray(SwitchButton(), "关机")
         shutdown_sw.setFixedWidth(75)
         shutdown_sw.setChecked(bool(entry.get("shutdown", False)))
         shutdown_sw.setToolTip(
             "开启：该时间点运行成功后 60 秒自动关机（无需确认）。\n"
             "关闭：跑完保持开机。失败时一律不关机，只弹窗提示。\n"
             "手动点「立即运行」不受此开关影响，永不关机。")
-        del_btn = PushButton("删除")
+        del_btn = style_button(PushButton("删除"), "danger", small=True)
         del_btn.setFixedWidth(56)
         del_btn.setToolTip(
             "删除该时间点，计划任务中的对应触发立即移除。")
@@ -414,7 +432,7 @@ class StatusCard(Card):
     """连接状态 + MAA 更新 合并卡片：内部左右两列（1×2）。
 
     窗口变窄时通过 set_compact 缩小字号/内边距保持两列并排，不改堆叠。
-    更新逻辑在 core/maa_update：开 Clash → 两套 MAA 依次自更新（版本+资源）
+    更新逻辑在 core/maa_update：开 Clash → 两套 MAA 依次自更新（版本更新）
     → 恢复配置 → 关 Clash。配置（Clash 路径/端口）在「运行设置 → MAA 更新」。
     """
 
@@ -461,14 +479,15 @@ class StatusCard(Card):
             pill = Pill("未知")
             self.pills[name] = pill
             right.addWidget(self._kv("%s MAA" % name, pill))
-        self.hint = _label("版本更新 + 资源更新一次完成；自动开关 Clash 代理，"
+        self.hint = _label("版本更新一次完成（资源随版本包到位）；自动开关 Clash 代理，"
                            "全程几分钟到十几分钟，期间请勿关闭控制台",
                            size="12px", color=theme.TEXT_3)
         self.hint.setWordWrap(True)
         right.addWidget(self.hint)
         right.addSpacing(4)
         btn_row = QHBoxLayout()
-        self.update_btn = PrimaryPushButton("⟳ 一键更新两套 MAA")
+        self.update_btn = style_primary_button(
+            PrimaryPushButton("一键更新两套 MAA"))
         self.update_btn.setToolTip(
             "更新前自动启动 Clash 并把 MAA 下载代理指向它，全部结束后关闭；\n"
             "更新前 Clash 已开着则复用，不会主动关闭。挂机运行时不可用。")
@@ -517,10 +536,17 @@ class StatusCard(Card):
             pill.set_compact(flag)
         self.hint.setStyleSheet("font-size: %s; color: %s;"
                                 % ("11px" if flag else "12px", theme.TEXT_3))
+        # 实例样式表会整体替换 Fluent qss，这里与 style_primary_button 同款全量样式
         self.update_btn.setStyleSheet(
-            "PrimaryPushButton { font-size: %s; padding: 4px 10px; }"
-            % ("11.5px" if flag else "13px"))
-        self.update_btn.setText("⟳ 一键更新" if flag else "⟳ 一键更新两套 MAA")
+            "PrimaryPushButton { background: %s; color: #ffffff; border: none;"
+            " border-radius: %dpx; padding: 4px 12px; font-family: %s; %s }"
+            "PrimaryPushButton:hover { background: #5b6470; }"
+            "PrimaryPushButton:pressed { background: #3d434b; }"
+            "PrimaryPushButton:disabled { background: rgba(75, 81, 90, 0.35);"
+            " color: rgba(255, 255, 255, 0.75); }"
+            % (theme.ACCENT, theme.RADIUS_BTN, theme.FONT_FAMILY,
+               theme.font_stack(11.5 if flag else 13, "600")))
+        self.update_btn.setText("一键更新" if flag else "一键更新两套 MAA")
         self._render_rd()
 
     # ---------- 刷新 ----------
@@ -569,15 +595,28 @@ class StatusCard(Card):
         self.rd_val.setToolTip("\n".join(tips))
 
     def refresh_versions(self, cfg):
-        """刷新版本号显示（ctypes 读版本 + 读本地缓存文件，毫秒级，不派生子进程）。"""
-        for name, cur, latest in maa_update.version_rows(cfg):
+        """刷新版本号显示（ctypes 读版本 + 读本地缓存文件，毫秒级，不派生子进程）。
+
+        「最新版本」来自 MAA 本地缓存（MAA 自己检查后写入），可能过期：
+        tooltip 标注缓存检查时间，超过 7 天在文案上提示缓存可能过期。
+        """
+        for name, cur, latest, checked in maa_update.version_rows(cfg):
             pill = self.pills[name]
+            if checked:
+                checked_dt = datetime.fromtimestamp(checked)
+                age_days = int((datetime.now() - checked_dt).total_seconds()) // 86400
+                tip = "缓存检查于 %s（MAA 上次启动检查，一键更新会刷新）" % checked_dt.strftime("%Y-%m-%d %H:%M")
+            else:
+                age_days = None
+                tip = "MAA 尚未检查过版本（无缓存，一键更新后生成）"
+            pill.setToolTip(tip)
+            stale = "（缓存 %d 天前）" % age_days if age_days is not None and age_days >= 7 else ""
             if maa_update.has_update(cur, latest):
                 pill.set_state("fail", "有更新 %s → %s"
                                % (maa_update.fmt_version(cur),
                                   maa_update.fmt_version(latest)))
             elif cur:
-                pill.set_state("ok", "已最新 %s" % maa_update.fmt_version(cur))
+                pill.set_state("ok", "已最新 %s%s" % (maa_update.fmt_version(cur), stale))
             else:
                 pill.set_state("wait", "未知")
 
@@ -614,14 +653,16 @@ class UpdateLogDialog(QDialog):
         self.log_view = QPlainTextEdit()
         self.log_view.setReadOnly(True)
         self.log_view.setStyleSheet(
-            "QPlainTextEdit { background: %s; color: %s; font-family: Consolas,"
-            " 'Courier New', monospace; font-size: 12px; border: 1px solid %s;"
-            " border-radius: 6px; }" % (theme.LOG_BG, theme.LOG_FG, theme.BORDER))
+            "QPlainTextEdit { background: %s; color: %s; font-family: %s;"
+            " font-size: 12px; border: none; border-radius: %dpx;"
+            " padding: 12px 14px; }"
+            % (theme.LOG_BG, theme.LOG_FG, theme.FONT_MONO, theme.RADIUS_CARD))
         root.addWidget(self.log_view, 1)
         btns = QHBoxLayout()
         tip = BodyLabel("关闭窗口不会中断更新，完成后右上有提示")
-        tip.setStyleSheet("color: %s; font-size: 12px;" % theme.TEXT_3)
-        close_btn = PushButton("后台运行")
+        tip.setStyleSheet("font-family: %s; font-size: 12px; color: %s;"
+                          % (theme.FONT_FAMILY, theme.TEXT_3))
+        close_btn = style_button(PushButton("后台运行"))
         close_btn.clicked.connect(self.accept)
         btns.addWidget(tip)
         btns.addStretch(1)
@@ -639,15 +680,15 @@ class DashboardPage(ScrollArea):
         self.view = QWidget()
         self.setWidget(self.view)
         self.setWidgetResizable(True)
-        # 视口透明化：露出的滚动区底色改用窗口灰底（默认调色板底色会发黑/发白）
-        self.setStyleSheet("QScrollArea { border: none; background: transparent; }")
-        self.viewport().setStyleSheet("background: transparent;")
+        # 视口透明化 + 浅色细滚动条（默认深色悬浮条会压在卡片右缘上）
+        style_scroll_area(self)
         root = QVBoxLayout(self.view)
-        root.setContentsMargins(0, 16, 0, 16)
+        # 左右对称 12px：卡片两侧都有留白，右侧同时让位给悬浮滚动条
+        root.setContentsMargins(12, 16, 12, 16)
         root.setSpacing(16)
 
         self.acc_grid = QGridLayout()
-        self.acc_grid.setSpacing(16)
+        self.acc_grid.setSpacing(20)
         root.addLayout(self.acc_grid)
 
         # 上次运行汇总：紧贴账号卡片的同一区块（全局总耗时 + 模拟器状态）
@@ -701,7 +742,7 @@ class DashboardPage(ScrollArea):
                     if mu.get("use_vpn", True) else "未启用 Clash，MAA 将直连下载")
         box = MessageBox(
             "一键更新 MAA",
-            "将依次更新官服与B服两套 MAA（版本更新 + 资源更新）。\n\n"
+            "将依次更新官服与B服两套 MAA（版本更新，资源随版本包一并更新）。\n\n"
             "· %s\n· 更新期间会临时修改 MAA 配置，结束后自动恢复\n"
             "· 全程可能需要几分钟到十几分钟，期间请勿关闭控制台\n\n"
             "确定开始吗？" % vpn_line,

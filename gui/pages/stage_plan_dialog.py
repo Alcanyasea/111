@@ -18,7 +18,8 @@ from qfluentwidgets import (BodyLabel, InfoBar, InfoBarPosition,
 
 import config as appconfig
 import theme
-from widgets import set_switch_checked_gray
+from widgets import (set_switch_checked_gray, style_button,
+                     style_primary_button, style_scroll_area)
 
 PERMANENT_STAGE_OPTIONS = (
     ("1-7", "1-7"),
@@ -208,10 +209,11 @@ def maa_second_fight_plan(cfg, server=None):
     return [], True
 
 
-def _label(text, size="12px", color=theme.TEXT_3, weight="400"):
+def _label(text, size="12px", color=None, weight="400"):
+    # color 缺省时调用时读取主题色（默认参数会在导入期固化）
     lab = QLabel(text)
     lab.setStyleSheet("font-size: %s; font-weight: %s; color: %s;"
-                      % (size, weight, color))
+                      % (size, weight, color or theme.TEXT_3))
     return lab
 
 
@@ -291,7 +293,7 @@ class StagePlanDialog(QDialog):
         self._populate_picker()
         self.picker.currentIndexChanged.connect(self._refresh_add_btn)
         pb.addWidget(self.picker, 1)
-        self.add_btn = PrimaryPushButton("添加候选关卡")
+        self.add_btn = style_primary_button(PrimaryPushButton("添加候选关卡"))
         self.add_btn.clicked.connect(self._on_pick_stage)
         pb.addWidget(self.add_btn)
         root.addWidget(picker)
@@ -310,8 +312,7 @@ class StagePlanDialog(QDialog):
         scroll.setWidgetResizable(True)
         scroll.setAlignment(Qt.AlignmentFlag.AlignLeft
                             | Qt.AlignmentFlag.AlignTop)
-        scroll.setStyleSheet("QScrollArea { border: none; background: transparent; }")
-        scroll.viewport().setStyleSheet("background: transparent;")
+        style_scroll_area(scroll)
         host = QWidget()
         self.tags_layout = QVBoxLayout(host)
         self.tags_layout.setContentsMargins(0, 0, 6, 0)
@@ -331,9 +332,9 @@ class StagePlanDialog(QDialog):
         self.summary = _label("", "12px", theme.TEXT_2)
         bb.addWidget(self.summary)
         bb.addStretch(1)
-        cancel_btn = PushButton("取消")
+        cancel_btn = style_button(PushButton("取消"))
         cancel_btn.clicked.connect(self.reject)
-        save_btn = PrimaryPushButton("保存并映射到 MAA")
+        save_btn = style_primary_button(PrimaryPushButton("保存并映射到 MAA"))
         save_btn.clicked.connect(self._on_save)
         bb.addWidget(cancel_btn)
         bb.addWidget(save_btn)

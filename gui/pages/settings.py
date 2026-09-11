@@ -5,14 +5,15 @@ from datetime import datetime
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QFileDialog, QHBoxLayout, QLabel, QVBoxLayout, QWidget
 
-from qfluentwidgets import (BodyLabel, InfoBar, InfoBarPosition, LineEdit,
-                            MessageBox, PrimaryPushButton, PushButton, ScrollArea,
-                            SpinBox, SwitchButton)
+from qfluentwidgets import (BodyLabel, ComboBox, InfoBar, InfoBarPosition,
+                            LineEdit, MessageBox, PrimaryPushButton, PushButton,
+                            ScrollArea, SpinBox, SwitchButton)
 
 import config as appconfig
 import theme
 from core import cleanup, maa_setup, runner, scheduler
-from widgets import Card, set_switch_checked_gray
+from widgets import (Card, set_switch_checked_gray, style_button,
+                     style_primary_button, style_scroll_area)
 
 PATH_KEYS = (
     ("maa_official", "MAA 官服"),
@@ -23,24 +24,46 @@ PATH_KEYS = (
 
 def _row_label(text, width=96):
     lab = BodyLabel(text)
-    lab.setStyleSheet("color: %s; font-size: 13px;" % theme.TEXT_2)
+    lab.setStyleSheet("font-family: %s; font-size: 13px; color: %s;"
+                      % (theme.FONT_FAMILY, theme.TEXT_2))
     lab.setFixedWidth(width)
     return lab
 
 
 class SettingsPage(ScrollArea):
-    def __init__(self, cfg):
+    def __init__(self, cfg, on_theme_change=None):
         super().__init__()
         self.cfg = cfg
+        self._on_theme_change = on_theme_change
         self.view = QWidget()
         self.setWidget(self.view)
         self.setWidgetResizable(True)
-        # 视口透明化：露出的滚动区底色改用窗口灰底
-        self.setStyleSheet("QScrollArea { border: none; background: transparent; }")
-        self.viewport().setStyleSheet("background: transparent;")
+        # 视口透明化 + 浅色细滚动条；右侧让出 12px 给滑块
+        style_scroll_area(self)
         root = QVBoxLayout(self.view)
-        root.setContentsMargins(0, 16, 0, 16)
+        root.setContentsMargins(12, 16, 12, 16)
         root.setSpacing(16)
+
+        # ---- 外观（明亮 / 暗夜）----
+        self.appearance_card = Card("外观")
+        self.theme_combo = ComboBox()
+        self.theme_combo.addItems(["明亮（暖雾灰）", "暗夜（暮色灰）"])
+        self.theme_combo.setFixedWidth(180)
+        self.theme_combo.setCurrentIndex(
+            1 if (cfg.get("appearance") or {}).get("theme") == "dark" else 0)
+        self.theme_combo.currentIndexChanged.connect(self._on_theme_index)
+        appear_row = QHBoxLayout()
+        appear_row.setSpacing(10)
+        appear_row.addWidget(_row_label("界面主题"))
+        appear_row.addWidget(self.theme_combo)
+        appear_hint = BodyLabel("切换后界面立即刷新；MAA 更新进行中暂不可切换")
+        appear_hint.setStyleSheet("font-family: %s; font-size: 12px; color: %s;"
+                                  % (theme.FONT_FAMILY, theme.TEXT_3))
+        appear_row.addWidget(appear_hint)
+        appear_row.addStretch(1)
+        self.appearance_card.vbox.addLayout(appear_row)
+        self.appearance_card.vbox.addSpacing(10)
+        root.addWidget(self.appearance_card)
 
         # ---- 程序路径 ----
         self.path_card = Card("程序路径")
@@ -48,7 +71,7 @@ class SettingsPage(ScrollArea):
         for key, label in PATH_KEYS:
             edit = LineEdit()
             edit.setClearButtonEnabled(False)
-            browse = PushButton("浏览…")
+            browse = style_button(PushButton("浏览…"), small=True)
             browse.setFixedWidth(76)
             browse.clicked.connect(lambda _=False, k=key: self._browse(k))
             row = QHBoxLayout()
@@ -106,10 +129,10 @@ class SettingsPage(ScrollArea):
         self.maa_setup_card.vbox.addSpacing(10)
         setup_row = QHBoxLayout()
         setup_row.setSpacing(10)
-        self.maa_official_btn = PushButton("配置官服 MAA")
+        self.maa_official_btn = style_button(PushButton("配置官服 MAA"))
         self.maa_official_btn.setToolTip("修正官服 MAA：客户端类型 Official、ADB、直接运行、结束脚本、常用任务")
         self.maa_official_btn.clicked.connect(lambda: self._on_maa_setup("official"))
-        self.maa_bili_btn = PushButton("配置B服 MAA")
+        self.maa_bili_btn = style_button(PushButton("配置B服 MAA"))
         self.maa_bili_btn.setToolTip("修正B服 MAA：客户端类型 Bilibili、ADB、直接运行、结束脚本、常用任务")
         self.maa_bili_btn.clicked.connect(lambda: self._on_maa_setup("bilibili"))
         setup_row.addWidget(self.maa_official_btn)
@@ -122,8 +145,8 @@ class SettingsPage(ScrollArea):
         # ---- MAA 更新（一键更新按钮在仪表盘；这里只放 Clash 代理配置）----
         self.upd_card = Card("MAA 更新")
         upd_hint = BodyLabel(
-            "「仪表盘 → 一键更新」会依次更新两套 MAA（版本更新 + 资源更新，由 MAA "
-            "启动时自动完成）。更新前自动启动 Clash 并把 MAA 下载代理指向它，"
+            "「仪表盘 → 一键更新」会依次更新两套 MAA（版本更新，由 MAA "
+            "启动时自动完成，资源随版本包到位）。更新前自动启动 Clash 并把 MAA 下载代理指向它，"
             "全部结束后关闭 Clash 并恢复 MAA 原配置；更新前 Clash 已开着则复用，"
             "不会主动关闭。挂机运行或 MAA 正在打开时不能更新。")
         upd_hint.setWordWrap(True)
@@ -135,7 +158,7 @@ class SettingsPage(ScrollArea):
                        "关闭后 MAA 更新直连下载（不推荐，GitHub 直连不稳）")
         self.vpn_edit = LineEdit()
         self.vpn_edit.setClearButtonEnabled(False)
-        vpn_browse = PushButton("浏览…")
+        vpn_browse = style_button(PushButton("浏览…"), small=True)
         vpn_browse.setFixedWidth(76)
         vpn_browse.clicked.connect(self._browse_vpn)
         vpn_row = QHBoxLayout()
@@ -165,7 +188,7 @@ class SettingsPage(ScrollArea):
         self._card_row(self.clean_card, "清理间隔", self.clean_interval, "天（默认 7）")
         clean_row = QHBoxLayout()
         clean_row.setSpacing(10)
-        clean_btn = PushButton("立即清理")
+        clean_btn = style_button(PushButton("立即清理"))
         clean_btn.clicked.connect(self.on_clean)
         clean_row.addWidget(_row_label("手动清理"))
         clean_row.addWidget(clean_btn)
@@ -181,9 +204,9 @@ class SettingsPage(ScrollArea):
         self.action_card = Card()
         bar = QHBoxLayout()
         bar.setSpacing(10)
-        save_btn = PrimaryPushButton("保存配置")
+        save_btn = style_primary_button(PrimaryPushButton("保存配置"))
         save_btn.clicked.connect(self.on_save)
-        reset_btn = PushButton("恢复默认")
+        reset_btn = style_button(PushButton("恢复默认"))
         reset_btn.clicked.connect(self.on_reset)
         bar.addWidget(save_btn)
         bar.addWidget(reset_btn)
@@ -196,6 +219,16 @@ class SettingsPage(ScrollArea):
         root.addStretch(1)
 
         self.load_from_cfg()
+
+    def _on_theme_index(self, index):
+        """切换明亮/暗夜：回调成功后由主窗口整窗重建；被拒绝则回退下拉框。"""
+        name = "dark" if index == 1 else "light"
+        if (self.cfg.get("appearance") or {}).get("theme", "light") == name:
+            return
+        if self._on_theme_change is None or not self._on_theme_change(name):
+            self.theme_combo.blockSignals(True)
+            self.theme_combo.setCurrentIndex(0 if name == "dark" else 1)
+            self.theme_combo.blockSignals(False)
 
     def _card_row(self, card, label, widget, hint=None):
         row = QHBoxLayout()

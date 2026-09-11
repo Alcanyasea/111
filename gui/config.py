@@ -57,8 +57,9 @@ def default_base_schedule(layout="333", batches=None):
         dormitory  干员休整宿舍 5 人/间（二维列表，固定 4 间，留空自动安排）
         office     办公室  1 人（列表）
         processing 加工站  1 人（列表，可选；留空时 MAA 在自定义模式下跳过加工站）
-    （可选）每个批次还可带 fiammetta：{enable, target, order} —— 该批次是否使用
-    菲亚梅塔、目标干员、换班前/后；一般由「导入排班文件」功能写入。
+    每个批次还可带 fiammetta：{enable, target} —— 该批次是否在换班前先用菲亚梅塔
+    恢复目标干员心情、恢复谁；一般由「导入排班文件」功能从计划 JSON 的
+    Fiammetta 字段写入，也可以在配置窗口里按批次单独开关。
     drones      无人机（全局，每个批次都投放）：
         {room: manufacture/trading, index: 站号 1 起,
          enable: 是否启用, order: pre 换班前/post 换班后}
@@ -78,6 +79,8 @@ def default_base_schedule(layout="333", batches=None):
             "dormitory": [[""] * 5 for _ in range(4)],
             "office": [""],
             "processing": [""],
+            # 菲亚梅塔心情恢复：按批次独立（换班前先恢复目标干员心情）
+            "fiammetta": {"enable": False, "target": ""},
         }
 
     if not batches:
@@ -149,6 +152,9 @@ DEFAULTS = {
         "interval_days": 7,    # 自动清理间隔（天）
         "last_run": "",        # 上次清理时间 "YYYY-MM-DD HH:MM"，空 = 从未清理
     },
+    "appearance": {
+        "theme": "light",      # 界面主题：light 明亮（暖雾灰）/ dark 暗夜（暮色灰）
+    },
 }
 
 
@@ -205,7 +211,27 @@ def _migrate_accounts(cfg):
                     plan = []
                 a["second_fight_plan"] = plan
             a.setdefault("second_fight_use_optional", True)
-            a.setdefault("base_schedule", default_base_schedule())
+            # 精确基建（base_schedule）。菲亚梅塔心情恢复是其中「按批次」的一项：
+            # base_schedule.batches[<批次>].fiammetta = {"enable", "target"}
+            # 旧版曾写在账号级 a["fiammetta"] 或精确基建全局 bs["fiammetta"]，
+            # 这里迁移到各批次并删掉旧字段。
+            if not isinstance(a.get("base_schedule"), dict):
+                a["base_schedule"] = default_base_schedule()
+            bs = a["base_schedule"]
+            legacy_fia = a.pop("fiammetta", None)
+            global_fia = bs.pop("fiammetta", None)
+            if not isinstance(legacy_fia, dict):
+                legacy_fia = global_fia
+            if isinstance(legacy_fia, dict):
+                legacy_target = str(legacy_fia.get("target") or "").strip()
+                if legacy_target:
+                    for batch in (bs.get("batches") or {}).values():
+                        if (isinstance(batch, dict)
+                                and not isinstance(batch.get("fiammetta"), dict)):
+                            batch["fiammetta"] = {
+                                "enable": bool(legacy_fia.get("enabled")),
+                                "target": legacy_target,
+                            }
 
 
 def _migrate_schedule(cfg):

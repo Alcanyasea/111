@@ -12,6 +12,9 @@
 # v2 优化：OCR 引擎全程复用（引擎创建是单次识别最慢的部分）；画面未变化时跳过重复
 # 识别；轮询节奏自适应（动作后 2 秒、有文字 3 秒、纯加载 6 秒）；已过标题的稳定确认
 # 由 4 帧减为 3 帧——成功路径每号可省 10~25 秒，失败路径判定不变。
+# v3 优化：更新/公告标记与匹配函数收敛到 game_state_lib.ps1（一次行分组匹配全部
+# 标记）；公告页判定同一轮内复用；更新等待只在标记变化时记日志、轮询 6→10 秒；
+# 自动登录提交改用本轮 OCR 结果，删掉重复的二次截图识别。
 # ============================================================
 param(
     [string]$Server = "official",
@@ -64,8 +67,9 @@ if ($Server -eq "bilibili") {
     $serverName = "官服"
 }
 
-# OCR 库（主机端 Windows OCR）
+# OCR 库（主机端 Windows OCR）+ 共用画面标记库（与 game_update_wait.ps1 同一套）
 . (Join-Path $scriptDir "ocr_lib.ps1")
+. (Join-Path $scriptDir "game_state_lib.ps1")
 if (-not (Test-Path $debugDir)) { New-Item -ItemType Directory $debugDir -Force | Out-Null }
 $png = Join-Path $debugDir ("login_check_{0}.png" -f $(if ($Slot) { $Slot } else { $Server }))
 
@@ -81,22 +85,9 @@ $captchaMarkers = @("安全验证", "依次点击", "滑动验证", "拼图")
 $inGameMarkers = @("公开招募", "干员寻访", "理智", "终端", "采购中心", "寻访一次", "寻访十次")
 # 启动公告弹窗页签（弹窗盖住主界面）：右上角 X 是纯图标、OCR 无文本，坐标实测固定
 # （2026-08-28 实测：点 (1215,75) 弹窗即关，主界面特征词立即出现）
-$announceMarkers = @("活动公告", "系统公告", "资讯速报")
+# 页签标记与游戏更新标记在 game_state_lib.ps1（与 game_update_wait.ps1 共用）
 $announceCloseX = 1215
 $announceCloseY = 75
-# 游戏更新界面标记（版本更新/资源下载/校验/安装；公告页出现同样文字时由
-# 上面公告分支先接管，不会误判成“更新中”）
-$updateMarkers = @(
-    "正在获取更新", "获取更新配置", "获取资源更新配置", "更新配置",
-    "开始下载更新", "开始下载", "正在下载更新", "正在下载", "下载更新包",
-    "正在校验资源", "正在校验", "校验资源", "资源校验",
-    "正在解压", "解压资源", "资源解压",
-    "正在安装更新", "正在安装", "安装更新", "安装中",
-    "正在更新", "正在更新资源", "更新中", "资源更新", "更新资源",
-    "版本更新", "强制更新", "更新内容",
-    "更新完成", "重新启动游戏", "正在重新启动",
-    "更新下载失败", "下载更新失败", "更新资源损坏", "安装更新失败"
-)
 
 function Invoke-Tap($x, $y) {
     & $adb -s $device shell "input tap $x $y" 2>$null | Out-Null
@@ -208,15 +199,6 @@ function Update-SlotData([bool]$ExpectVoiceKeys) {
     return $true
 }
 
-function Find-Marker($words, $markers) {
-    # 返回第一个命中的 {X,Y,Name}；无命中返回 $null
-    foreach ($m in $markers) {
-        $hit = Find-OcrText $words $m
-        if ($hit) { return [PSCustomObject]@{ X = $hit.X; Y = $hit.Y; Name = $m } }
-    }
-    return $null
-}
-
 LogLine ("=== Login check: {0} (slot: {1}) ===" -f $serverName, $(if ($Slot) { $Slot } else { "(无槽位)" }))
 
 # ---- 阶段 1：轮询屏幕，区分「已登录」与「登录界面」----
@@ -240,6 +222,7 @@ $lastAnnounceTapAt = (Get-Date).AddSeconds(-60)
 $blindPokeCount = 0
 $lastPngHash = ""
 $lastWords = $null
+$lastUpdateMarker = ""
 $deadline = (Get-Date).AddSeconds($ScreenTimeoutSec)
 # 游戏更新等待的最长封顶：超过后即使仍在更新也不断延长（防止无限卡死）
 $hardDeadline = (Get-Date).AddHours(2)
@@ -255,12 +238,12 @@ while ((Get-Date) -lt $deadline) {
         $lastPngHash = $pngHash
         $lastWords = $words
     }
-    $cap = Find-Marker $words $captchaMarkers
+    $cap = Find-AnyMarker $words $captchaMarkers
     if ($cap) {
         LogLine ("ERROR: 检测到验证码界面（{0}），无人值守无法处理" -f $cap.Name)
         exit 1
     }
-    $lm = Find-Marker $words $loginMarkers
+    $lm = Find-AnyMarker $words $loginMarkers
     if (-not $lm) {
         # 密码表单可能只剩裸「登录」按钮（无本机/密码登录链接），用整行精确匹配兜底
         $lmExact = Find-OcrText $words "登录" -Exact
@@ -269,24 +252,30 @@ while ((Get-Date) -lt $deadline) {
     if ($lm) { $reachedLogin = $true; $loginHit = $lm; break }
     # 游戏更新中：只等待不点击（下载/安装期间盲点可能打断更新）；
     # 公告页的“更新公告”正文用公告分支处理，不在此误判
-    $annNow = Find-Marker $words $announceMarkers
+    $annNow = Find-AnyMarker $words $AnnounceMarkers
     $upNow = $null
-    if (-not $annNow) { $upNow = Find-Marker $words $updateMarkers }
+    if (-not $annNow) { $upNow = Find-AnyMarker $words $GameUpdateMarkers }
     if ($upNow) {
         $stableCount = 0
         $posCount = 0
         $lastActionAt = Get-Date
-        LogLine ("[update] 检测到游戏更新界面（{0}），等待更新完成（不点击）" -f $upNow.Name)
+        # 只在命中的标记变化时记日志：更新下载常持续几十分钟，每轮都记会刷屏
+        if ($upNow.Name -ne $lastUpdateMarker) {
+            LogLine ("[update] 检测到游戏更新界面（{0}），等待更新完成（不点击）" -f $upNow.Name)
+            $lastUpdateMarker = $upNow.Name
+        }
         if ((Get-Date) -lt $hardDeadline) {
             # 更新下载/安装可能超过默认登录超时：每次检测到更新顺延一轮
             $deadline = (Get-Date).AddSeconds($ScreenTimeoutSec)
         }
-        Start-Sleep 6
+        # 更新以分钟计，更密的轮询没有收益，10 秒足够及时
+        Start-Sleep 10
         continue
     }
     # 启动公告弹窗：优先处理（盖住主界面时特征词不可见，且要求优先关弹窗再看主界面）。
     # 点右上角 X 关闭；限频 8 秒防连点；不刷新 $lastActionAt，若 X 点不掉仍保留盲点兜底
-    $ann = Find-Marker $words $announceMarkers
+    # $annNow 与上面更新检测共用同一轮判定结果，不再重复扫描
+    $ann = $annNow
     if ($ann) {
         $stableCount = 0
         if (((Get-Date) - $lastAnnounceTapAt).TotalSeconds -ge 8) {
@@ -298,7 +287,7 @@ while ((Get-Date) -lt $deadline) {
         continue
     }
     # 主界面特征词（B服 无标题直接进主界面；官服正常路径也能提前放行）
-    $ig = Find-Marker $words $inGameMarkers
+    $ig = Find-AnyMarker $words $inGameMarkers
     if ($ig) {
         $posCount++
         if ($posCount -ge 2) {
@@ -471,7 +460,7 @@ while ((Get-Date) -lt $deadline5) {
     if (-not (Ocr-Screenshot $adb $device $png)) { continue }
     $w = Get-OcrWords $png
 
-    $cap2 = Find-Marker $w $captchaMarkers
+    $cap2 = Find-AnyMarker $w $captchaMarkers
     if ($cap2) {
         LogLine ("ERROR: 登录触发验证码（{0}），无人值守无法处理" -f $cap2.Name)
         exit 1
@@ -481,7 +470,7 @@ while ((Get-Date) -lt $deadline5) {
         exit 1
     }
 
-    $lm2 = Find-Marker $w $loginMarkers
+    $lm2 = Find-AnyMarker $w $loginMarkers
     if (-not $lm2) { $e = Find-OcrText $w "登录" -Exact; if ($e) { $lm2 = [PSCustomObject]@{ X = $e.X; Y = $e.Y; Name = "登录" } } }
     if (-not $lm2) {
         $wake = Find-OcrText $w "开始唤醒"
@@ -491,7 +480,7 @@ while ((Get-Date) -lt $deadline5) {
             $loggedIn = $true
             break
         }
-        $ig2 = Find-Marker $w $inGameMarkers
+        $ig2 = Find-AnyMarker $w $inGameMarkers
         if ($ig2) {
             LogLine ("[login] 检测到主界面（{0}），登录成功" -f $ig2.Name)
             $loggedIn = $true
@@ -503,9 +492,10 @@ while ((Get-Date) -lt $deadline5) {
         } else { $stableCount2 = 0 }
     } else {
         $stableCount2 = 0
+        # 提交点击复用本轮 OCR 结果 $w（原先在这里再截一次屏识别「登录」按钮，
+        # 既多一次最耗时的截图+识别，又与画面状态产生竞态）
         if (($submitCount -eq 0) -and (((Get-Date) - $lastSubmitAt).TotalSeconds -ge 25)) {
-            $btn = $null
-            if (Ocr-Screenshot $adb $device $png) { $btn = Find-OcrText (Get-OcrWords $png) "登录" -Exact }
+            $btn = Find-OcrText $w "登录" -Exact
             if ($btn) { Invoke-Tap $btn.X $btn.Y } else { Invoke-Tap 640 516 }
             LogLine "[login] 提交登录..."
             $submitCount = 1
@@ -513,8 +503,7 @@ while ((Get-Date) -lt $deadline5) {
         } elseif (($submitCount -eq 1) -and (((Get-Date) - $lastSubmitAt).TotalSeconds -ge 25)) {
             Invoke-Tap 440 440
             Start-Sleep 1
-            $btn = $null
-            if (Ocr-Screenshot $adb $device $png) { $btn = Find-OcrText (Get-OcrWords $png) "登录" -Exact }
+            $btn = Find-OcrText $w "登录" -Exact
             if ($btn) { Invoke-Tap $btn.X $btn.Y } else { Invoke-Tap 640 516 }
             LogLine "[login] 仍停在表单，补点协议复选框并重新提交"
             $submitCount = 2

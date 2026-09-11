@@ -139,6 +139,8 @@ def default_batch(layout="333"):
         "dormitory": [[""] * 5 for _ in range(4)],
         "office": [""],
         "processing": [""],
+        # 菲亚梅塔心情恢复：按批次独立设置（换班开始前先恢复目标干员心情）
+        "fiammetta": {"enable": False, "target": ""},
     }
 
 
@@ -241,6 +243,12 @@ def normalize(bs, batches=None):
     for b in batches_src:
         if b not in names:
             names.append(b)
+
+    # 菲亚梅塔心情恢复：按批次独立设置（时机固定换班前），生成计划时写进该批次
+    # 计划 JSON 的 ["Fiammetta"]，MAA 在该批次换班任务前先恢复目标干员心情。
+    # 兼容早期写成全局 bs["fiammetta"] 的配置：没有单独设置的批次沿用它。
+    global_fia = bs.get("fiammetta") if isinstance(bs.get("fiammetta"), dict) else None
+
     for b in names:
         src = batches_src.get(b)
         if not isinstance(src, dict):
@@ -256,17 +264,20 @@ def normalize(bs, batches=None):
             "office": single(src, "office", 1),
             "processing": single(src, "processing", 1),
         }
-        # 菲亚梅塔（每个批次可选）：保留导入文件/手动配置里的设置，供生成器写回
-        # MAA 计划 JSON 的 plan["Fiammetta"] 字段。
         fi = src.get("fiammetta")
-        if isinstance(fi, dict):
-            target = str(fi.get("target") or "").strip()
-            order = str(fi.get("order") or "pre")
-            out["batches"][b]["fiammetta"] = {
-                "enable": bool(fi.get("enable", bool(target))),
-                "target": target,
-                "order": order if order in ("pre", "post") else "pre",
-            }
+        if not isinstance(fi, dict):
+            fi = {}
+        fi_target = str(fi.get("target") or "").strip()
+        if not fi_target and isinstance(global_fia, dict):
+            # 该批次没填目标（含空模板 / 老配置）：沿用早期的全局设置
+            fi = global_fia
+            fi_target = str(fi.get("target") or "").strip()
+        # 字段名兼容：批次级/排班文件用 enable，早期的全局写法用 enabled
+        fi_enable = fi.get("enable", fi.get("enabled", False))
+        out["batches"][b]["fiammetta"] = {
+            "enable": bool(fi_enable) and bool(fi_target),
+            "target": fi_target,
+        }
     return out
 
 
@@ -309,6 +320,8 @@ def build_plan_document(bs, entries=None, title="自定义基建",
 
     entries: 启用的启动时间点（升序），缺省 04:00/16:00；批次名与生效区间
     按时间点自动推导，MAA 按当前时间自动选计划。
+    批次里 fiammetta 启用的（精确基建配置里按批次设的菲亚梅塔心情恢复）给该计划
+    写 plan["Fiammetta"] = {enable, target, order: "pre"}。
     """
     if not entries:
         entries = [{"time": "04:00"}, {"time": "16:00"}]
@@ -351,15 +364,16 @@ def build_plan_document(bs, entries=None, title="自定义基建",
                 "enable": True,
                 "order": drones.get("order") or "pre",
             }
-        fiammetta = b.get("fiammetta")
-        if isinstance(fiammetta, dict) and fiammetta.get("enable"):
+        # 菲亚梅塔心情恢复（按批次）：order 固定 pre，MAA 把
+        # 「目标单独进宿舍 → 目标+菲亚梅塔进宿舍」插到换班任务最前面
+        fiammetta = b.get("fiammetta") or {}
+        if fiammetta.get("enable"):
             target = str(fiammetta.get("target") or "").strip()
             if target:
                 plan["Fiammetta"] = {
                     "enable": True,
                     "target": target,
-                    "order": (fiammetta.get("order") or "pre")
-                    if fiammetta.get("order") in ("pre", "post") else "pre",
+                    "order": "pre",
                 }
         plans.append(plan)
     return {
@@ -739,14 +753,12 @@ def _convert_import_plan(plan, layout):
         "office": single("hire", 1),
         "processing": single("processing", 1),
     }
+    # 菲亚梅塔心情恢复（按批次）：该计划里启用就落到对应批次的设置上
     fia = plan.get("Fiammetta")
     if isinstance(fia, dict):
-        target = str(fia.get("target") or "").strip()
-        order = str(fia.get("order") or "pre")
         batch["fiammetta"] = {
-            "enable": bool(fia.get("enable", bool(target))),
-            "target": target,
-            "order": order if order in ("pre", "post") else "pre",
+            "enable": bool(fia.get("enable", True)),
+            "target": str(fia.get("target") or "").strip(),
         }
     return batch
 
@@ -863,12 +875,24 @@ def convert_import_document(cfg, doc):
     plan_names = {}
     drones = None
     drones_explicit = False
+    fiammetta_post_noted = False
     for t, idx in sorted(mapping.items()):
         plan = plans[idx]
         bname = batch_name(t)
         batches[bname] = _convert_import_plan(plan, layout)
         plan_names[bname] = str(plan.get("name") or "").strip()
         notes.extend(_room_import_notes(plan))
+        # 菲亚梅塔心情恢复（按批次）：plan["Fiammetta"] 落到该批次的设置上
+        fia = plan.get("Fiammetta")
+        if isinstance(fia, dict):
+            fia_target = str(fia.get("target") or "").strip()
+            if str(fia.get("order") or "pre") == "post" and not fiammetta_post_noted:
+                fiammetta_post_noted = True
+                notes.append("排班文件里有计划标为「换班后」使用菲亚梅塔，"
+                             "控制台固定按「换班前先恢复心情，再换班」处理。")
+            if fia.get("enable", True) and not fia_target:
+                notes.append("「%s」写了使用菲亚梅塔但没填目标，该批次不做恢复。"
+                             % plan_names[bname])
         d = plan.get("drones")
         if isinstance(d, dict):
             drones_explicit = True

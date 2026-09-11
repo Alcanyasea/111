@@ -23,7 +23,8 @@ from qfluentwidgets import (BodyLabel, ComboBox, InfoBar, InfoBarPosition,
 
 import config as appconfig
 import theme
-from widgets import Card, set_switch_checked_gray
+from widgets import (Card, set_switch_checked_gray, style_button,
+                     style_primary_button, style_scroll_area)
 
 PLUGIN_DIR = Path(r"D:\1\plugins\base_schedule")
 if str(PLUGIN_DIR) not in sys.path:
@@ -39,6 +40,9 @@ TRADING_OPTIONS = [
     ("赤金（龙门币订单）", "LMD"),
     ("原石碎片（合成玉订单）", "Orundum"),
 ]
+
+# MAA「菲亚梅塔恢复目标」候选项（与 MaaWpfGui 的基建设置一致）
+FIAMMETTA_TARGETS = ("清流", "可露希尔", "但书", "巫恋", "龙舌兰", "歌蕾蒂娅")
 
 
 def _batch_labels(cfg):
@@ -133,6 +137,37 @@ class BaseScheduleDialog(QDialog):
         root.addLayout(drones_row)
         self._refresh_drones_index()
 
+        # 菲亚梅塔心情恢复（按批次：跟着上面的「批次」下拉切换）
+        fia_row = QHBoxLayout()
+        fia_row.setSpacing(10)
+        fia_row.addWidget(BodyLabel("菲亚梅塔:"))
+        self.fia_switch = set_switch_checked_gray(SwitchButton())
+        self.fia_switch.setText("本批次换班前恢复心情")
+        fia_row.addWidget(self.fia_switch)
+        fia_row.addSpacing(8)
+        fia_row.addWidget(BodyLabel("恢复目标"))
+        self.fia_combo = ComboBox()
+        for name in FIAMMETTA_TARGETS:
+            self.fia_combo.addItem(name, userData=name)
+        tip = ("开启后，换班开始前会把恢复目标与满心情的菲亚梅塔放进宿舍互换心情"
+               "（菲亚梅塔随后留在宿舍恢复），之后再按计划换班。\n"
+               "每个批次单独设置：可以是有的批次开、有的批次不开。\n"
+               "需要该账号拥有菲亚梅塔且她当前心情是满的，否则 MAA 会跳过本次恢复。\n"
+               "MAA 不推荐选「巫恋 / 龙舌兰」。自定义模式每个计划只能指定 1 个目标。")
+        self.fia_switch.setToolTip(tip)
+        self.fia_combo.setToolTip(tip)
+        fia_row.addWidget(self.fia_combo)
+        self.fia_batch_lab = BodyLabel("")
+        self.fia_batch_lab.setStyleSheet("color: %s; font-size: 12px;"
+                                        % theme.TEXT_3)
+        fia_row.addWidget(self.fia_batch_lab)
+        fia_row.addStretch(1)
+        root.addLayout(fia_row)
+        self.fia_switch.checkedChanged.connect(
+            lambda _=None: self._refresh_fiammetta())
+        self._fia_batch = self.batches[0]
+        self._load_fiammetta(self._fia_batch)
+
         self.hint = BodyLabel()
         self.hint.setWordWrap(True)
         self.hint.setStyleSheet("color: %s; font-size: 12px;" % theme.TEXT_2)
@@ -147,19 +182,19 @@ class BaseScheduleDialog(QDialog):
 
         btns = QHBoxLayout()
         btns.setSpacing(10)
-        self.import_btn = PushButton("导入排班文件")
+        self.import_btn = style_button(PushButton("导入排班文件"))
         self.import_btn.setToolTip(
             "选择一图流基建排班表 / MAA 自定义基建导出的 JSON，"
             "自动识别换班时段、布局与干员配置，填入当前账号对应批次。\n"
             "识别后仍需点「保存并生成计划」才会写入配置并生成 MAA 计划文件。")
         self.import_btn.clicked.connect(self._on_import)
-        self.export_btn = PushButton("导出排班文件")
+        self.export_btn = style_button(PushButton("导出排班文件"))
         self.export_btn.setToolTip(
             "把当前弹窗里的排班按一图流 / MAA 自定义基建 JSON 格式保存。\n"
             "默认保存到桌面，方便备份或导入其它工具 / MAA。")
         self.export_btn.clicked.connect(self._on_export)
-        self.cancel_btn = PushButton("取消")
-        self.save_btn = PrimaryPushButton("保存并生成计划")
+        self.cancel_btn = style_button(PushButton("取消"))
+        self.save_btn = style_primary_button(PrimaryPushButton("保存并生成计划"))
         btns.addWidget(self.import_btn)
         btns.addWidget(self.export_btn)
         btns.addStretch(1)
@@ -187,7 +222,10 @@ class BaseScheduleDialog(QDialog):
             "（全部留空也自动安排）。其他设施：全部留空时 MAA 自动补满；"
             "只填了部分时，剩余位置保持空着（MAA 自定义模式不支持自动补位）。"
             "干员名需与游戏内名称一致（MAA 靠截图识别干员）。"
-            "无人机：顶部开启后，每个班次换班时都会按设置向目标站台投放无人机。")
+            "无人机：顶部开启后，每个班次换班时都会按设置向目标站台投放无人机。"
+            "菲亚梅塔：按批次单独设置（跟着「批次」下拉切换）——该批次开启后，"
+            "换班开始前会先把恢复目标与满心情的菲亚梅塔放进宿舍互换心情"
+            "（菲亚梅塔随后留在宿舍恢复），再执行换班。")
 
     @staticmethod
     def _make_edits(values, placeholders):
@@ -281,8 +319,7 @@ class BaseScheduleDialog(QDialog):
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         # 与主界面各页面一致：滚动区透明，露出下层弹窗灰底
-        scroll.setStyleSheet("QScrollArea { border: none; background: transparent; }")
-        scroll.viewport().setStyleSheet("background: transparent;")
+        style_scroll_area(scroll)
         inner = QWidget()
         v = QVBoxLayout(inner)
         v.setContentsMargins(2, 2, 2, 2)
@@ -315,7 +352,13 @@ class BaseScheduleDialog(QDialog):
     # ---------- 交互 ----------
 
     def _on_batch_changed(self, index):
+        prev = getattr(self, "_fia_batch", None)
+        if prev is not None and hasattr(self, "fia_switch"):
+            self._capture_fiammetta(prev)   # 先把上一批次的设置读回数据
         self.stack.setCurrentIndex(index)
+        if 0 <= index < len(self.batches):
+            self._fia_batch = self.batches[index]
+            self._load_fiammetta(self._fia_batch)
 
     def _on_import(self):
         """导入一图流/MAA 自定义基建 JSON：识别后填入当前账号各批次（不自动保存）。"""
@@ -341,6 +384,7 @@ class BaseScheduleDialog(QDialog):
         # 先把当前页面各批次读回 self.data，未覆盖到的批次保留未保存的修改
         for b in self.batches:
             self._capture(b)
+        self._capture_fiammetta(self._fia_batch)
         self.layout = result["layout"]
         self.layout_combo.blockSignals(True)
         self.layout_combo.setCurrentIndex(0 if self.layout == "333" else 1)
@@ -353,25 +397,11 @@ class BaseScheduleDialog(QDialog):
             {"layout": self.layout, "batches": self.data}, self.batches)
         self.data = norm["batches"]
 
-        drones = result.get("drones")
-        if drones is not None:
-            idx = self.drones_room_combo.findData(drones.get("room"))
-            if idx >= 0:
-                self.drones_room_combo.setCurrentIndex(idx)
-            self._refresh_drones_index()
-            d_idx = self.drones_index_combo.findData(drones.get("index"))
-            if d_idx >= 0:
-                self.drones_index_combo.setCurrentIndex(d_idx)
-            o_idx = self.drones_order_combo.findData(drones.get("order"))
-            if o_idx >= 0:
-                self.drones_order_combo.setCurrentIndex(o_idx)
-            self.drones_switch.setChecked(True)
-        elif result.get("drones_explicit"):
-            # 文件里明确写了不使用无人机：关掉，而不是沿用旧设置
-            self.drones_switch.setChecked(False)
+        self._apply_import_globals(result)
 
         self._rebuild_pages()
         self._refresh_drones_index()
+        self._load_fiammetta(self._fia_batch)
         self._refresh_hint()
 
         summary = []
@@ -385,15 +415,13 @@ class BaseScheduleDialog(QDialog):
             summary.append("  %s批 ← %s" % (b, src or "计划"))
         fia_lines = []
         for b in self.batches:
-            fia = self.data.get(b, {}).get("fiammetta")
-            if isinstance(fia, dict) and fia.get("enable") and fia.get("target"):
-                fia_lines.append("  %s批：菲亚梅塔 → %s（%s）"
-                                 % (b, fia["target"],
-                                    "换班前" if fia.get("order") == "pre"
-                                    else "换班后"))
+            fia = (self.data.get(b) or {}).get("fiammetta") or {}
+            if fia.get("enable") and str(fia.get("target") or "").strip():
+                fia_lines.append("  %s批：菲亚梅塔 → %s（换班前恢复）"
+                                 % (b, fia["target"]))
         if fia_lines:
             summary.append("")
-            summary.append("菲亚梅塔设置：")
+            summary.append("菲亚梅塔心情恢复（按批次，跟着上面「批次」下拉切换）：")
             summary.extend(fia_lines)
         if result.get("drones"):
             d = result["drones"]
@@ -413,6 +441,29 @@ class BaseScheduleDialog(QDialog):
         box.yesButton.setText("知道了")
         box.cancelButton.hide()
         box.exec()
+
+    def _apply_import_globals(self, result):
+        """把排班文件里的全局设置（无人机）填到顶部控件。
+
+        菲亚梅塔是「按批次」的，已随各批次一起合并进 self.data，
+        由 _load_fiammetta() 显示当前批次的值。
+        """
+        drones = result.get("drones")
+        if drones is not None:
+            idx = self.drones_room_combo.findData(drones.get("room"))
+            if idx >= 0:
+                self.drones_room_combo.setCurrentIndex(idx)
+            self._refresh_drones_index()
+            d_idx = self.drones_index_combo.findData(drones.get("index"))
+            if d_idx >= 0:
+                self.drones_index_combo.setCurrentIndex(d_idx)
+            o_idx = self.drones_order_combo.findData(drones.get("order"))
+            if o_idx >= 0:
+                self.drones_order_combo.setCurrentIndex(o_idx)
+            self.drones_switch.setChecked(True)
+        elif result.get("drones_explicit"):
+            # 文件里明确写了不使用无人机：关掉，而不是沿用旧设置
+            self.drones_switch.setChecked(False)
 
     def _refresh_drones_index(self, *_):
         """按目标设施与布局刷新无人机站号下拉（制造 3/4 台，贸易 2/3 台）。"""
@@ -436,9 +487,43 @@ class BaseScheduleDialog(QDialog):
         self.layout = "243" if index == 1 else "333"
         for b in self.batches:
             self._capture(b)
+        self._capture_fiammetta(self._fia_batch)
         self._rebuild_pages()
         self._refresh_drones_index()
         self._refresh_hint()
+
+    def _refresh_fiammetta(self):
+        """菲亚梅塔目标下拉只在「本批次」开关打开时可编辑。"""
+        self.fia_combo.setEnabled(self.fia_switch.isChecked())
+
+    def _load_fiammetta(self, batch):
+        """把某批次的菲亚梅塔设置显示到顶部那一行。"""
+        fia = (self.data.get(batch) or {}).get("fiammetta") or {}
+        target = str(fia.get("target") or "").strip()
+        if target:
+            idx = self.fia_combo.findData(target)
+            if idx < 0:   # 排班文件里是候选之外的干员名：原样保留
+                self.fia_combo.addItem(target, userData=target)
+                idx = self.fia_combo.count() - 1
+        else:
+            idx = 0
+        self.fia_switch.blockSignals(True)
+        self.fia_switch.setChecked(bool(fia.get("enable")))
+        self.fia_switch.blockSignals(False)
+        self.fia_combo.blockSignals(True)
+        self.fia_combo.setCurrentIndex(idx)
+        self.fia_combo.blockSignals(False)
+        self.fia_batch_lab.setText("（仅 %s批 生效）" % batch)
+        self._refresh_fiammetta()
+
+    def _capture_fiammetta(self, batch):
+        """把顶部那一行的设置存回指定批次。"""
+        if batch not in self.data:
+            return
+        self.data[batch]["fiammetta"] = {
+            "enable": bool(self.fia_switch.isChecked()),
+            "target": str(self.fia_combo.currentData() or ""),
+        }
 
     def _rebuild_pages(self):
         for i, b in enumerate(self.batches):
@@ -521,6 +606,7 @@ class BaseScheduleDialog(QDialog):
         """把当前界面状态收集为规范化后的 base_schedule 结构。"""
         for b in self.batches:
             self._capture(b)
+        self._capture_fiammetta(self._fia_batch)
         bs = {
             "enabled": bool(self.bs.get("enabled")),
             "layout": self.layout,

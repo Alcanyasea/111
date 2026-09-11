@@ -1,12 +1,12 @@
 @echo off
 chcp 65001 >nul
-title MAA Auto Farm - 3 Accounts
+title MAA Auto Farm
 echo ========================================
 echo   MAA Auto Farm - Starting...
 echo   Log: D:\1\scripts\master_log.txt
 echo ========================================
 echo.
-powershell.exe -ExecutionPolicy Bypass -File "D:\1\scripts\master.ps1"
+powershell.exe -ExecutionPolicy Bypass -File "D:\1\scripts\master.ps1" -NoShutdown
 echo.
 echo All done! Press any key to close...
 pause >nul

@@ -31,13 +31,23 @@ $null = & $adb -s $device shell monkey -p $packageOfficial -c android.intent.cat
 Start-Sleep 18
 
 # Screenshot after launch for debugging
+# Use Start-Process -RedirectStandardOutput to write raw binary PNG
+# (PowerShell > / Out-File corrupt binary data by re-encoding as UTF-16)
 $timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
 $path = Join-Path $debugDir ("switch_Official_{0}.png" -f $timestamp)
 try {
-    & $adb -s $device exec-out screencap -p > $path 2>$null
-    Write-Output "  [screenshot] $path"
+    $tmpFile = "$path.tmp"
+    Start-Process -FilePath $adb -ArgumentList "-s `"$device`" exec-out screencap -p" -NoNewWindow -Wait -RedirectStandardOutput $tmpFile
+    if ((Test-Path $tmpFile) -and (Get-Item $tmpFile).Length -gt 100) {
+        Move-Item $tmpFile $path -Force
+        Write-Output "  [screenshot] $path"
+    } else {
+        Remove-Item $tmpFile -Force -ErrorAction SilentlyContinue
+        Write-Output "  [WARN] Screenshot empty"
+    }
 } catch {
     Write-Output "  [WARN] Screenshot failed"
+    Remove-Item $tmpFile -Force -ErrorAction SilentlyContinue
 }
 
 Write-Output "[Switch] Official ready"
