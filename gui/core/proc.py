@@ -88,3 +88,31 @@ def process_running(exe_name):
         return False
     finally:
         kernel32.CloseHandle(snapshot)
+
+
+def process_name(pid):
+    """PID 对应的进程 exe 名（如 "powershell.EXE"），不存在返回 None。
+
+    用于锁文件 PID 复用防护：只查存活会把复用 PID 的无关进程误判成挂机。
+    """
+    try:
+        pid = int(pid)
+    except (TypeError, ValueError):
+        return None
+    if pid <= 0:
+        return None
+    snapshot = kernel32.CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)
+    invalid = ctypes.c_void_p(-1).value
+    if not snapshot or snapshot == invalid:
+        return None
+    try:
+        entry = _ProcessEntry32W()
+        entry.dwSize = ctypes.sizeof(_ProcessEntry32W)
+        ok = kernel32.Process32FirstW(snapshot, ctypes.byref(entry))
+        while ok:
+            if entry.th32ProcessID == pid:
+                return str(entry.szExeFile)
+            ok = kernel32.Process32NextW(snapshot, ctypes.byref(entry))
+        return None
+    finally:
+        kernel32.CloseHandle(snapshot)

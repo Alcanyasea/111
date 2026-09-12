@@ -51,3 +51,42 @@ class AdbPoller(QThread):
                 if self._stop_flag:
                     return
                 self.msleep(500)
+
+
+class SchedulerApplyWorker(QThread):
+    """一次性同步计划任务（apply + 成功后回查一次），结果回 GUI 线程。
+
+    Register/Set-ScheduledTask 典型 1~3 秒、卡住可到 40 秒，不能在界面线程
+    同步跑——否则每改一次班次「点击没反应」。查询结果 apply 失败时为 None，
+    由后台 SchedulerPoller 周期刷新兜底。
+    """
+
+    done = Signal(bool, str, object)
+
+    def __init__(self, cfg, parent=None):
+        super().__init__(parent)
+        self.cfg = cfg
+
+    def run(self):
+        ok, msg = scheduler.apply(self.cfg)
+        info = scheduler.query() if ok else None
+        self.done.emit(ok, msg, info)
+
+
+class FuncWorker(QThread):
+    """通用一次性函数工作线程：fn 后台执行，结果 ("ok", 值)/("error", 异常) 回 GUI。
+
+    给「会卡界面几十秒」的一次性操作用（如复制整套 MAA 目录）。
+    """
+
+    done = Signal(object)
+
+    def __init__(self, fn, parent=None):
+        super().__init__(parent)
+        self.fn = fn
+
+    def run(self):
+        try:
+            self.done.emit(("ok", self.fn()))
+        except Exception as exc:  # 兜底：工作线程异常必须回传，不能静默
+            self.done.emit(("error", exc))

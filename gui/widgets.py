@@ -24,7 +24,6 @@ class Pill(QLabel):
 
     def __init__(self, text="", parent=None):
         super().__init__(text, parent)
-        self.compact = False
         self._kind = "wait"
         self.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
@@ -44,28 +43,33 @@ class Pill(QLabel):
         self._apply_style()
         self.setText(text)
 
-    def set_compact(self, flag):
-        """紧凑模式：更小字号与内边距（用于空间不足时缩小卡片）。"""
-        if self.compact == flag:
-            return
-        self.compact = flag
-        self._apply_style()
-
     def _apply_style(self):
         fg, bg = self._styles().get(self._kind, self._styles()["wait"])
-        if self.compact:
-            size, pad = "10px", "2px 8px"
-        else:
-            size, pad = "11px", "2.5px 10px"
         self.setStyleSheet(
             "QLabel { background: %s; color: %s; border-radius: 99px;"
-            " padding: %s; %s font-family: %s; }"
-            % (bg, fg, pad, theme.font_stack(size, "600"), theme.FONT_FAMILY)
+            " padding: 2.5px 10px; %s font-family: %s; }"
+            % (bg, fg, theme.font_stack("11px", "600"), theme.FONT_FAMILY)
         )
 
 
-def kv_row(key_text, value_widget, value_min_width=0):
-    """一行「键 … 值」，值右对齐。value_widget 可为 QWidget 或纯文本 str。"""
+def dark_log_qss(selector="QPlainTextEdit"):
+    """深色日志框统一样式：账号捕获 / MAA 更新 / 导出等实时输出框共用。"""
+    return (
+        "%s { background: %s; color: %s; font-family: %s;"
+        " font-size: 12px; border: none; border-radius: %dpx;"
+        " padding: 12px 14px; }"
+        % (selector, theme.LOG_BG, theme.LOG_FG, theme.FONT_MONO,
+           theme.RADIUS_CARD)
+    )
+
+
+def kv_row(key_text, value_widget, value_min_width=0, refs=False):
+    """一行「键 … 值」，值右对齐。value_widget 可为 QWidget 或纯文本 str。
+
+    refs=True 时返回 (row, key_label, value_label)，运行时要改文案的场景用；
+    注意 key_text 不要传 QLabel：qfluentwidgets 会把非 str 参数当 parent 重载，
+    键名会凭空消失。
+    """
     row = QWidget()
     lay = QHBoxLayout(row)
     lay.setContentsMargins(0, 0, 0, 0)
@@ -81,7 +85,7 @@ def kv_row(key_text, value_widget, value_min_width=0):
     lay.addWidget(value_widget, 0, Qt.AlignmentFlag.AlignRight)
     if value_min_width:
         value_widget.setMinimumWidth(value_min_width)
-    return row
+    return (row, key, value_widget) if refs else row
 
 
 def big_number(num_text, unit_text):

@@ -6,11 +6,9 @@
 """
 import json
 import re
-import subprocess
 from datetime import datetime
-from pathlib import Path
 
-CREATE_NO_WINDOW = 0x08000000
+from core.util import decode_console, run as _run
 
 TASK_NAME = "MAA_明日方舟自动挂机"
 RUN_CMD = r"powershell.exe -ExecutionPolicy Bypass -WindowStyle Minimized -File D:\1\scripts\master.ps1"
@@ -18,26 +16,14 @@ RUN_CMD = r"powershell.exe -ExecutionPolicy Bypass -WindowStyle Minimized -File 
 _PS_DATE_RE = re.compile(r"/Date\((\d+)\)/")
 _HHMM_RE = re.compile(r"T(\d{2}:\d{2})")
 
-
-def _ps(script, timeout=40):
-    try:
-        r = subprocess.run(
-            ["powershell", "-NoProfile", "-Command", script],
-            capture_output=True, timeout=timeout, creationflags=CREATE_NO_WINDOW,
-        )
-        return r.returncode, r.stdout, r.stderr
-    except (subprocess.TimeoutExpired, OSError):
-        return -1, b"", b""
+# 查询超时：主窗口关闭时要 wait 轮询线程，查询必须等得起（应用 40s 的
+# 是 Register/Set-ScheduledTask，只有 apply 需要）
+QUERY_TIMEOUT = 12
+APPLY_TIMEOUT = 40
 
 
-def _dec(b):
-    """PS 5.1 重定向输出可能是 GBK 或 UTF-8，都试一下。"""
-    for enc in ("utf-8", "gbk"):
-        try:
-            return b.decode(enc)
-        except UnicodeDecodeError:
-            continue
-    return b.decode(errors="replace")
+def _ps(script, timeout=QUERY_TIMEOUT):
+    return _run(["powershell", "-NoProfile", "-Command", script], timeout=timeout)
 
 
 def _parse_date(value):
@@ -73,7 +59,7 @@ def query():
     if code != 0:
         return empty
     try:
-        data = json.loads(_dec(out))
+        data = json.loads(decode_console(out))
         if isinstance(data, list):
             data = data[0]
     except (json.JSONDecodeError, IndexError, TypeError):
@@ -124,9 +110,9 @@ def apply(cfg):
         "else { Disable-ScheduledTask -TaskName $name };"
         "'APPLIED'"
     ) % (TASK_NAME, times_ps, en_ps)
-    code, out, err = _ps(script)
-    err_text = _dec(err).strip()
-    if code != 0 or "APPLIED" not in _dec(out):
+    code, out, err = _ps(script, timeout=APPLY_TIMEOUT)
+    err_text = decode_console(err).strip()
+    if code != 0 or "APPLIED" not in decode_console(out):
         if re.search(r"denied|拒绝访问|权限", err_text, re.IGNORECASE):
             return False, "更新计划任务需要管理员权限：请以管理员身份运行本程序"
         return False, err_text[-300:] or "计划任务更新失败"

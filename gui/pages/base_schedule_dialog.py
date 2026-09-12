@@ -69,7 +69,7 @@ class BaseScheduleDialog(QDialog):
         self.batches = appconfig.schedule_batches(cfg)
         self.batch_labels = _batch_labels(cfg)
         self.bs = bsplugin.normalize(acc.get("base_schedule"), self.batches)
-        self.layout = self.bs["layout"]
+        self.layout_name = self.bs["layout"]
         self.data = {
             b: copy.deepcopy(self.bs["batches"][b]) for b in self.batches
         }
@@ -95,7 +95,7 @@ class BaseScheduleDialog(QDialog):
         ])
         self.layout_combo.currentIndexChanged.connect(self._on_layout_changed)
         self.layout_combo.blockSignals(True)
-        self.layout_combo.setCurrentIndex(0 if self.layout == "333" else 1)
+        self.layout_combo.setCurrentIndex(0 if self.layout_name == "333" else 1)
         self.layout_combo.blockSignals(False)
         top.addWidget(self.layout_combo)
         top.addStretch(1)
@@ -282,8 +282,8 @@ class BaseScheduleDialog(QDialog):
     def _build_page(self, batch):
         data = self.data[batch]
         em = {}
-        m = 4 if self.layout in ("423", "243") else 3
-        t = 2 if self.layout in ("423", "243") else 3
+        m = 4 if self.layout_name in ("423", "243") else 3
+        t = 2 if self.layout_name in ("423", "243") else 3
 
         control = self._make_edits(
             data["control"], ["干员 1", "干员 2", "干员 3", "干员 4", "干员 5"])
@@ -374,8 +374,9 @@ class BaseScheduleDialog(QDialog):
             with open(fname, "r", encoding="utf-8-sig") as f:
                 doc = json.load(f)
             result = bsplugin.convert_import_document(self.cfg, doc)
-        except (OSError, ValueError, json.JSONDecodeError) as exc:
-            box = MessageBox("无法识别该排班文件", str(exc), self.window())
+        except Exception as exc:  # 结构怪异的 JSON 可能抛 KeyError/TypeError 等，统一弹给用户
+            box = MessageBox("无法识别该排班文件", str(exc) or exc.__class__.__name__,
+                             self.window())
             box.yesButton.setText("知道了")
             box.cancelButton.hide()
             box.exec()
@@ -385,16 +386,16 @@ class BaseScheduleDialog(QDialog):
         for b in self.batches:
             self._capture(b)
         self._capture_fiammetta(self._fia_batch)
-        self.layout = result["layout"]
+        self.layout_name = result["layout"]
         self.layout_combo.blockSignals(True)
-        self.layout_combo.setCurrentIndex(0 if self.layout == "333" else 1)
+        self.layout_combo.setCurrentIndex(0 if self.layout_name == "333" else 1)
         self.layout_combo.blockSignals(False)
         for b, data in result["batches"].items():
             if b in self.data:
                 self.data[b] = data
         # 统一按文件布局规范化：旧批次多余站台裁剪、旧数组格式转新格式
         norm = bsplugin.normalize(
-            {"layout": self.layout, "batches": self.data}, self.batches)
+            {"layout": self.layout_name, "batches": self.data}, self.batches)
         self.data = norm["batches"]
 
         self._apply_import_globals(result)
@@ -406,7 +407,7 @@ class BaseScheduleDialog(QDialog):
 
         summary = []
         if result.get("title"):
-            summary.append("识别到排班：%s（%s 布局）" % (result["title"], self.layout))
+            summary.append("识别到排班：%s（%s 布局）" % (result["title"], self.layout_name))
         summary.append("已填入 %d 个批次：" % len(result["batches"]))
         for b in self.batches:
             if b not in result["batches"]:
@@ -469,9 +470,9 @@ class BaseScheduleDialog(QDialog):
         """按目标设施与布局刷新无人机站号下拉（制造 3/4 台，贸易 2/3 台）。"""
         room = self.drones_room_combo.currentData()
         if room == "trading":
-            n = 2 if self.layout in ("423", "243") else 3
+            n = 2 if self.layout_name in ("423", "243") else 3
         else:
-            n = 4 if self.layout in ("423", "243") else 3
+            n = 4 if self.layout_name in ("423", "243") else 3
         cur = self.drones_index_combo.currentData()
         self.drones_index_combo.blockSignals(True)
         self.drones_index_combo.clear()
@@ -484,7 +485,7 @@ class BaseScheduleDialog(QDialog):
         self.drones_index_combo.blockSignals(False)
 
     def _on_layout_changed(self, index):
-        self.layout = "243" if index == 1 else "333"
+        self.layout_name = "243" if index == 1 else "333"
         for b in self.batches:
             self._capture(b)
         self._capture_fiammetta(self._fia_batch)
@@ -609,7 +610,7 @@ class BaseScheduleDialog(QDialog):
         self._capture_fiammetta(self._fia_batch)
         bs = {
             "enabled": bool(self.bs.get("enabled")),
-            "layout": self.layout,
+            "layout": self.layout_name,
             "drones": {
                 "room": self.drones_room_combo.currentData(),
                 "index": int(self.drones_index_combo.currentData() or 1),

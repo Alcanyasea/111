@@ -26,6 +26,13 @@ param(
 $ErrorActionPreference = "Continue"
 $ProgressPreference = "SilentlyContinue"
 
+# 账号密码可经环境变量传入（GUI 侧这样传，避免密码留在命令行上被本机其他进程读到）：
+# 命令行参数优先，为空时回退读环境变量；读完全进程内清掉
+if (-not $Username) { $Username = [Environment]::GetEnvironmentVariable("MAA_CAPTURE_USERNAME") }
+if (-not $Password) { $Password = [Environment]::GetEnvironmentVariable("MAA_CAPTURE_PASSWORD") }
+[Environment]::SetEnvironmentVariable("MAA_CAPTURE_USERNAME", $null)
+[Environment]::SetEnvironmentVariable("MAA_CAPTURE_PASSWORD", $null)
+
 $adb = "D:\软件\MuMu模拟器\MuMuPlayer\nx_main\adb.exe"
 $device = "127.0.0.1:16384"
 $cli = "D:\软件\MuMu模拟器\MuMuPlayer\nx_main\mumu-cli.exe"

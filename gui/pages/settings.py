@@ -1,9 +1,9 @@
 # -*- coding: utf-8 -*-
 """运行设置：程序路径 / 连接与超时 / 行为开关 / 数据清理。保存 → config.json + 计划任务同步。"""
 from datetime import datetime
+from pathlib import Path
 
-from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QFileDialog, QHBoxLayout, QLabel, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QFileDialog, QHBoxLayout, QVBoxLayout, QWidget
 
 from qfluentwidgets import (BodyLabel, ComboBox, InfoBar, InfoBarPosition,
                             LineEdit, MessageBox, PrimaryPushButton, PushButton,
@@ -11,7 +11,7 @@ from qfluentwidgets import (BodyLabel, ComboBox, InfoBar, InfoBarPosition,
 
 import config as appconfig
 import theme
-from core import cleanup, maa_setup, runner, scheduler
+from core import cleanup, maa_setup, poller, runner
 from widgets import (Card, set_switch_checked_gray, style_button,
                      style_primary_button, style_scroll_area)
 
@@ -35,6 +35,8 @@ class SettingsPage(ScrollArea):
         super().__init__()
         self.cfg = cfg
         self._on_theme_change = on_theme_change
+        self._apply_worker = None    # 计划任务同步后台线程（保存后）
+        self._setup_worker = None    # MAA 服务器配置后台线程（可能复制整套目录）
         self.view = QWidget()
         self.setWidget(self.view)
         self.setWidgetResizable(True)
@@ -274,9 +276,15 @@ class SettingsPage(ScrollArea):
                      parent=self.window(), position=InfoBarPosition.TOP_RIGHT, duration=3000)
 
     def on_save(self):
+        paths_cfg = self.cfg.setdefault("paths", {})
         for key, edit in self.path_edits.items():
-            self.cfg["paths"][key] = edit.text().strip()
-        self.cfg["paths"]["device"] = self.device_edit.text().strip()
+            paths_cfg[key] = edit.text().strip()
+        paths_cfg["device"] = self.device_edit.text().strip()
+        # script_dir 是所有脚本的定位根（本页不提供编辑框，只防它被外部清空）
+        if not paths_cfg.get("script_dir"):
+            InfoBar.error("无法保存", "「script_dir」不能为空", parent=self.window(),
+                          position=InfoBarPosition.TOP_RIGHT, duration=5000)
+            return
         self.cfg["timeouts"]["maa_min"] = self.maa_spin.value()
         self.cfg["timeouts"]["launch_wait_sec"] = self.launch_spin.value()
         self.cfg["timeouts"]["game_update_min"] = self.update_spin.value()
@@ -291,8 +299,32 @@ class SettingsPage(ScrollArea):
         u["proxy_port"] = self.port_spin.value()
         u["timeout_min"] = self.upd_timeout.value()
 
-        appconfig.save(self.cfg)
-        ok, msg = scheduler.apply(self.cfg)
+        try:
+            appconfig.save(self.cfg)
+        except OSError as exc:
+            InfoBar.error("保存失败", "写入 config.json 失败：%s" % exc,
+                          parent=self.window(),
+                          position=InfoBarPosition.TOP_RIGHT, duration=8000)
+            return
+        # 填了但不存在的路径给个提醒（不阻断保存，可能是还没装）
+        missing = [label for key, label in PATH_KEYS
+                   if self.path_edits[key].text().strip()
+                   and not Path(self.path_edits[key].text().strip()).exists()]
+        if missing:
+            InfoBar.warning("以下程序路径不存在：%s" % "、".join(missing),
+                            "请确认是否填错", parent=self.window(),
+                            position=InfoBarPosition.TOP_RIGHT, duration=6000)
+        # 计划任务同步（1~40 秒）放后台，保存动作本身立即完成
+        if self._apply_worker is not None and self._apply_worker.isRunning():
+            InfoBar.info("上一次计划任务同步仍在进行", "配置已保存，稍后自动按新配置同步",
+                         parent=self.window(), position=InfoBarPosition.TOP_RIGHT,
+                         duration=5000)
+            return
+        self._apply_worker = poller.SchedulerApplyWorker(self.cfg, self)
+        self._apply_worker.done.connect(self._on_apply_done)
+        self._apply_worker.start()
+
+    def _on_apply_done(self, ok, msg, _info):
         if ok:
             InfoBar.success("配置已保存", "计划任务已同步更新",
                             parent=self.window(), position=InfoBarPosition.TOP_RIGHT,
@@ -345,6 +377,11 @@ class SettingsPage(ScrollArea):
                             duration=4000)
 
     def _on_maa_setup(self, server):
+        if self._setup_worker is not None and self._setup_worker.isRunning():
+            InfoBar.info("MAA 配置正在进行中", "请等当前操作结束后再试",
+                         parent=self.window(), position=InfoBarPosition.TOP_RIGHT,
+                         duration=4000)
+            return
         name = "官服" if server == "official" else "B服"
         client = "Official" if server == "official" else "Bilibili"
         box = MessageBox(
@@ -353,14 +390,32 @@ class SettingsPage(ScrollArea):
             "· 客户端类型（%s）\n· ADB 路径与地址\n"
             "· RunDirectly（直接运行）\n· 结束脚本 signal_done.bat\n"
             "· 启用常用任务\n\n"
-            "若该服 MAA 目录不存在，会自动从另一服复制一份再修正。\n"
-            "修改前会先备份原配置文件。确定继续吗？" % (name, client),
+            "若该服 MAA 目录不存在，会自动从另一服复制一份再修正（可能耗时较久，"
+            "期间请勿关闭窗口）。\n修改前会先备份原配置文件。确定继续吗？" % (name, client),
             self.window())
         box.yesButton.setText("开始配置")
         box.cancelButton.setText("取消")
         if not box.exec():
             return
-        ok, msg = maa_setup.apply_server_config(self.cfg, server)
+        # 目录缺失时会 copytree 整套 MAA（数百 MB），放后台跑避免界面冻结
+        self.maa_official_btn.setEnabled(False)
+        self.maa_bili_btn.setEnabled(False)
+        self._setup_worker = poller.FuncWorker(
+            lambda: maa_setup.apply_server_config(self.cfg, server), self)
+        self._setup_worker.done.connect(
+            lambda result, n=name: self._on_setup_done(n, result))
+        self._setup_worker.start()
+
+    def _on_setup_done(self, name, result):
+        self.maa_official_btn.setEnabled(True)
+        self.maa_bili_btn.setEnabled(True)
+        state, payload = result
+        if state == "error":
+            InfoBar.error("%s MAA 配置失败" % name, str(payload),
+                          parent=self.window(),
+                          position=InfoBarPosition.TOP_RIGHT, duration=8000)
+            return
+        ok, msg = payload
         if ok:
             InfoBar.success("%s MAA 配置完成" % name, msg,
                             parent=self.window(),

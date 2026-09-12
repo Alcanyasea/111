@@ -37,6 +37,9 @@ PAGE_TITLES = ["仪表盘", "账号管理", "运行设置", "日志"]
 # 当前主窗口引用（主题切换时会整窗重建，运行设置页通过 swap_window 换窗）
 _win = None
 
+# 关窗时仍在运行的后台线程引用（防 GC），线程随进程退出而非随窗口析构
+_detached_threads = []
+
 
 def swap_window():
     """用当前配置重建主窗口（主题切换用）：先建新窗再关旧窗，桌面不留空。
@@ -81,6 +84,7 @@ class HeaderBar(QWidget):
         super().__init__(parent)
         self.setObjectName("headerBar")
         self.setStyleSheet("QWidget#headerBar { background: transparent; }")
+        self._exporting = False   # 导出运行中：update_state 刷新也不重新启用按钮
         lay = QHBoxLayout(self)
         lay.setContentsMargins(2, 6, 2, 4)
         lay.setSpacing(12)
@@ -97,6 +101,10 @@ class HeaderBar(QWidget):
             % (theme.FONT_FAMILY, theme.font_stack(12.5), theme.TEXT_2))
         lay.addWidget(self.detail, 0, Qt.AlignmentFlag.AlignVCenter)
         lay.addStretch(1)
+        self.export_btn = style_button(PushButton("导出干员"))
+        self.export_btn.setToolTip(
+            "逐账号运行 MAA 干员识别，把 roster 导出到 exports\\。\n"
+            "只导「账号管理」里打开「导出」开关的账号；与挂机互斥。")
         self.stop_btn = style_button(PushButton("停止"))
         self.stop_btn.setToolTip(
             "停止当前挂机（结束 master.ps1 与 MAA 进程），\n"
@@ -105,6 +113,7 @@ class HeaderBar(QWidget):
         self.run_btn.setToolTip(
             "手动运行一次完整挂机流程（启动模拟器 → 切号 → 跑 MAA → 关模拟器）。\n"
             "手动运行即使成功也不会自动关机。")
+        lay.addWidget(self.export_btn)
         lay.addWidget(self.stop_btn)
         lay.addWidget(self.run_btn)
 
@@ -113,26 +122,12 @@ class HeaderBar(QWidget):
         self.detail.setText(detail)
         self.stop_btn.setEnabled(running)
         self.run_btn.setEnabled(not running)
+        self.export_btn.setEnabled(not running and not self._exporting)
 
-    def mousePressEvent(self, event):
-        """按住页头空白处（除按钮外）即可拖动整个窗口。"""
-        if event.button() == Qt.MouseButton.LeftButton:
-            wnd = self.window().windowHandle()
-            if wnd is not None:
-                wnd.startSystemMove()
-            event.accept()
-            return
-        super().mousePressEvent(event)
-
-    def mousePressEvent(self, event):
-        """按住控制栏空白处（除按钮外）即可拖动整个窗口。"""
-        if event.button() == Qt.MouseButton.LeftButton:
-            wnd = self.window().windowHandle()
-            if wnd is not None:
-                wnd.startSystemMove()
-            event.accept()
-            return
-        super().mousePressEvent(event)
+    def set_export_busy(self, busy):
+        """导出运行中：锁住导出按钮（结束后由 _on_export_done 解锁）。"""
+        self._exporting = busy
+        self.export_btn.setEnabled(not busy)
 
 
 class MainWindow(FluentWindow):
@@ -199,6 +194,8 @@ class MainWindow(FluentWindow):
         self.titleBar.raise_()
         self.header.run_btn.clicked.connect(self.on_run)
         self.header.stop_btn.clicked.connect(self.on_stop)
+        self.header.export_btn.clicked.connect(self.on_export)
+        self.dash.export_done.connect(self._on_export_done)
         # 关闭 qfluentwidgets 自带的「向上弹出」切换动画，改用 iOS 式
         # 推入/推出过渡（_on_page_changed 里按切换方向滑入滑出）
         self.stackedWidget.setAnimationEnabled(False)
@@ -346,9 +343,8 @@ class MainWindow(FluentWindow):
         self._maybe_auto_clean()
         running = runner.is_running()
         if running:
-            # 当前跑到哪个号、什么阶段（日志解析）
-            text = logparse.read_text(self.cfg["paths"]["log_file"])
-            stage = logparse.current_stage(text)
+            # 当前跑到哪个号、什么阶段（日志解析，内部带变更缓存）
+            stage = logparse.snapshot(self.cfg["paths"]["log_file"])["stage"]
             if stage:
                 detail = "当前：%s · %s" % (stage["account"], stage["stage"])
                 if stage.get("elapsed_min") is not None:
@@ -363,35 +359,93 @@ class MainWindow(FluentWindow):
         self.header.update_state(running, detail)
 
     def closeEvent(self, event):
-        """关窗前停掉后台轮询线程，避免 QThread 泄漏告警。"""
+        """关窗前收尾：更新线程先恢复配置再退，轮询线程停净，导出转后台。"""
         if not self._rebuilding and self.dash.update_running():
             box = MessageBox(
                 "MAA 更新进行中",
-                "MAA 正在后台更新，现在退出会中断更新：\n"
-                "Clash 可能保持开启、MAA 代理配置可能未恢复。\n\n确定退出吗？",
+                "MAA 正在后台更新，现在退出会中止更新。\n\n"
+                "退出前会等更新流程恢复 MAA 配置并关闭 Clash（最多约半分钟），"
+                "确定退出吗？",
                 self)
             box.yesButton.setText("仍要退出")
             box.cancelButton.setText("继续更新")
             if not box.exec():
                 event.ignore()
                 return
+            self.dash.request_update_stop()
+            self.dash.wait_update_worker(30000)
         for p in (self.poller, self.adb_poller):
             p.stop()
-            p.wait(3000)
+            # 不带超时：底层查询超时已压到 12 秒，等到位再退，
+            # 避免 QThread 运行中被析构直接 abort
+            p.wait()
+        # 导出子进程独立于控制台存活：断开工作线程父级，关窗不中断导出，
+        # 结果仍写入 exports\（实时日志窗口随主窗口关闭）
+        detached = self.dash.detach_export_worker()
+        if detached is not None:
+            _detached_threads.append(detached)
         event.accept()
 
     def on_run(self):
         if runner.is_running():
             return
-        if runner.stale_lock() is not None:
-            try:
-                runner.LOCK_FILE.unlink()
-            except OSError:
-                pass
+        if self.dash.export_running():
+            InfoBar.warning("干员导出进行中", "导出正在占用模拟器，请等导出结束后再运行挂机",
+                            parent=self, position=InfoBarPosition.TOP_RIGHT,
+                            duration=5000)
+            return
+        runner.clear_stale_lock()
         runner.start(self.cfg)
         InfoBar.success("已启动挂机流程", "日志页可查看实时进度",
                         parent=self, position=InfoBarPosition.TOP_RIGHT, duration=4000)
         self.refresh_status()
+
+    def on_export(self):
+        if runner.is_running():
+            InfoBar.warning("挂机运行中", "请先停止挂机再导出干员资料",
+                            parent=self, position=InfoBarPosition.TOP_RIGHT,
+                            duration=4000)
+            return
+        if self.dash.update_running():
+            InfoBar.warning("MAA 更新进行中", "更新会占用 MAA，请等更新结束后再导出",
+                            parent=self, position=InfoBarPosition.TOP_RIGHT,
+                            duration=4000)
+            return
+        if self.dash.export_running():
+            InfoBar.info("导出进行中", "干员导出正在后台执行，请稍候",
+                         parent=self, position=InfoBarPosition.TOP_RIGHT,
+                         duration=4000)
+            return
+        accs = self.dash.export_accounts()
+        if not accs:
+            InfoBar.warning("没有可导出的账号",
+                            "在「账号管理」页打开账号的「导出」开关后重试",
+                            parent=self, position=InfoBarPosition.TOP_RIGHT,
+                            duration=5000)
+            return
+        names = "、".join(a.get("label") or a.get("slot") or "?" for a in accs)
+        box = MessageBox(
+            "导出干员资料",
+            "将为以下 %d 个账号逐号运行 MAA 干员识别（约 3 分钟/号）：\n\n%s\n\n"
+            "期间会占用模拟器，不能同时运行挂机；结果写入 exports\\。\n确定开始吗？"
+            % (len(accs), names), self)
+        box.yesButton.setText("开始导出")
+        box.cancelButton.setText("取消")
+        if not box.exec():
+            return
+        self.header.set_export_busy(True)
+        self.dash.start_export()
+
+    def _on_export_done(self, ok, summary):
+        self.header.set_export_busy(False)
+        if ok:
+            InfoBar.success("干员资料导出完成", summary,
+                            parent=self, position=InfoBarPosition.TOP_RIGHT,
+                            duration=8000)
+        else:
+            InfoBar.warning("干员资料导出未全部成功", summary,
+                            parent=self, position=InfoBarPosition.TOP_RIGHT,
+                            duration=10000)
 
     def on_stop(self):
         box = MessageBox(
@@ -472,6 +526,12 @@ def main():
     global _win
     _win = MainWindow()
     _win.show()
+    if appconfig.LAST_LOAD_WARNING:
+        # 配置损坏已备份：必须让用户知道，避免误以为账号还在列表里
+        box = MessageBox("配置文件异常", appconfig.LAST_LOAD_WARNING, _win)
+        box.yesButton.setText("知道了")
+        box.cancelButton.hide()
+        box.exec()
     if "--smoke" in sys.argv:
         # 自检模式：加载所有页面后自动退出，供无交互验证
         QTimer.singleShot(1500, app.quit)

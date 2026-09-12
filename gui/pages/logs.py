@@ -1,14 +1,18 @@
 # -*- coding: utf-8 -*-
-"""日志：深色视图 + 工具栏（刷新 / 打开 / 清空 / 自动滚动），运行中自动 tail。"""
+"""日志：深色视图 + 工具栏（刷新 / 打开 / 清空 / 自动滚动），运行中自动 tail。
+
+增量渲染：按 (size, mtime) 判变更后只追加新增的完整行，不再每 3 秒
+setHtml 重渲染整个视图；文件被截断/清空时整体重载。
+"""
 import os
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import QTimer
 from PySide6.QtGui import QTextCursor
-from PySide6.QtWidgets import QHBoxLayout, QLabel, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QHBoxLayout, QVBoxLayout, QWidget
 
-from qfluentwidgets import (BodyLabel, MessageBox, PushButton, SwitchButton,
-                            TextEdit)
+from qfluentwidgets import (BodyLabel, InfoBar, InfoBarPosition, MessageBox,
+                            PushButton, SwitchButton, TextEdit)
 
 import theme
 from core import logparse, runner
@@ -23,6 +27,8 @@ class LogsPage(QWidget):
         self.cfg = cfg
         self._last_size = -1
         self._last_mtime = -1
+        self._offset = 0        # 已渲染到的文件字节位置
+        self._pending = b""     # 尾部不完整行（等下次凑齐再渲染）
 
         root = QVBoxLayout(self)
         root.setContentsMargins(12, 16, 12, 16)
@@ -59,7 +65,6 @@ class LogsPage(QWidget):
             % (theme.LOG_BG, theme.LOG_FG, theme.FONT_MONO, theme.RADIUS_CARD))
         root.addWidget(self.view, 1)
 
-        self._body = ""  # 当前已展示的日志文本（避免无变化时重刷）
         self.refresh()
 
         self.timer = QTimer(self)
@@ -69,16 +74,19 @@ class LogsPage(QWidget):
     def _log_path(self):
         return Path(self.cfg["paths"]["log_file"])
 
-    def _read(self):
+    def _read_all(self):
+        """全量读尾部 MAX_LINES 行（初始化/截断后重载用），并记录渲染位置。"""
         path = self._log_path()
-        if not path.exists():
-            return ""
         try:
-            data = path.read_bytes()
-            text = data.decode("utf-8", errors="ignore")
+            with open(path, "rb") as f:
+                data = f.read()
+            self._offset = len(data)
+            self._pending = b""
         except OSError:
+            self._offset = 0
+            self._pending = b""
             return ""
-        # 只保留最后 MAX_LINES 行，避免超长日志卡 UI
+        text = data.decode("utf-8", errors="ignore")
         return "\n".join(text.splitlines()[-MAX_LINES:])
 
     def _changed(self):
@@ -90,37 +98,87 @@ class LogsPage(QWidget):
         return (st.st_size, st.st_mtime) != (self._last_size, self._last_mtime)
 
     def refresh(self):
-        text = self._read()
+        """整体重载（初始化 / 点刷新 / 日志被截断）。"""
+        text = self._read_all()
         path = self._log_path()
         try:
             st = path.stat()
             self._last_size, self._last_mtime = st.st_size, st.st_mtime
         except OSError:
             self._last_size = self._last_mtime = -1
-        if text == self._body:
-            return
-        self._body = text
-        self._render(text)
-
-    def _render(self, text):
         html = ("<html><head><style>%s</style></head><body>%s</body></html>"
                 % (logparse.log_css(), logparse.to_html(text, MAX_LINES)))
-        scroll_to_end = self.autoscroll.isChecked()
         self.view.setHtml(html)
-        if scroll_to_end:
+        if self.autoscroll.isChecked():
             self.view.moveCursor(QTextCursor.MoveOperation.End)
 
     def _poll(self):
-        if self._changed():
+        if not self._changed():
+            return
+        path = self._log_path()
+        try:
+            st = path.stat()
+            size, mtime = st.st_size, st.st_mtime
+        except OSError:
+            return
+        if size < self._offset:
+            # 日志被清空/截断（master.ps1 或清理）：回退到整体重载
+            self._last_size, self._last_mtime = size, mtime
             self.refresh()
+            return
+        self._last_size, self._last_mtime = size, mtime
+        try:
+            with open(path, "rb") as f:
+                f.seek(self._offset)
+                data = f.read()
+        except OSError:
+            return
+        if not data:
+            return
+        self._offset += len(data)
+        buf = self._pending + data
+        cut = buf.rfind(b"\n")
+        if cut == -1:
+            self._pending = buf      # 还没有完整行，全部留待下次
+            return
+        self._pending = buf[cut + 1:]
+        lines = buf[:cut].decode("utf-8", errors="ignore").splitlines()
+        cursor_at_end = self.view.textCursor().atEnd()
+        for line in lines:
+            self.view.append(logparse.line_html(line))
+        self._trim_blocks()
+        if self.autoscroll.isChecked() or cursor_at_end:
+            self.view.moveCursor(QTextCursor.MoveOperation.End)
+
+    def _trim_blocks(self):
+        """只保留最近 MAX_LINES 行（删掉文档开头的多余块）。"""
+        doc = self.view.document()
+        extra = doc.blockCount() - (MAX_LINES + 1)
+        if extra <= 0:
+            return
+        cursor = QTextCursor(doc)
+        cursor.movePosition(QTextCursor.MoveOperation.Start)
+        cursor.movePosition(QTextCursor.MoveOperation.NextBlock,
+                            QTextCursor.MoveMode.KeepAnchor, extra)
+        cursor.removeSelectedText()
 
     def _open_file(self):
         path = self._log_path()
         if not path.exists():
             return
-        os.startfile(str(path))
+        try:
+            os.startfile(str(path))
+        except OSError as exc:
+            InfoBar.warning("无法打开日志", str(exc), parent=self.window(),
+                            position=InfoBarPosition.TOP_RIGHT, duration=4000)
 
     def _clear(self):
+        if runner.is_running():
+            InfoBar.warning("挂机运行中", "运行期间不能清空日志（master.ps1 正在写入），"
+                            "请停止后再试",
+                            parent=self.window(),
+                            position=InfoBarPosition.TOP_RIGHT, duration=5000)
+            return
         box = MessageBox("清空日志", "确定清空 master_log.txt 吗？此操作不可恢复。", self.window())
         box.yesButton.setText("清空")
         box.cancelButton.setText("取消")
@@ -130,6 +188,7 @@ class LogsPage(QWidget):
             self._log_path().write_text("", encoding="utf-8")
         except OSError:
             return
-        self._body = ""
+        self._offset = 0
+        self._pending = b""
         self._last_size = self._last_mtime = -1
         self.refresh()

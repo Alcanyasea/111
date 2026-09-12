@@ -1,4 +1,4 @@
-﻿# Python virtual environment
+# Python virtual environment
 gui/.venv/
 
 # Local Claude workspace data
@@ -20,6 +20,13 @@ scripts/_t*.*
 scripts/debug/
 scripts/master_log.txt
 scripts/maa_done.signal
+scripts/operbox_export.log
+
+# Operator roster exports (generated data)
+exports/
+
+# Corrupted-config backups (config.load 生成)
+config.json.corrupt-*
 
 # Python caches
 __pycache__/
@@ -27,6 +34,8 @@ __pycache__/
 
 # Runtime lock file
 scripts/master.lock
+scripts/master.lock.tmp
+scripts/switch_output.tmp
 
 # Generated base schedule plan files
 plugins/base_schedule/plans/

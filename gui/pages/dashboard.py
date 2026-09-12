@@ -2,6 +2,7 @@
 """仪表盘：3 账号卡片 + 上次运行汇总条 + 班次计划 + 状态与更新合并卡片（1×2）。"""
 import re
 from datetime import datetime
+from pathlib import Path
 
 from PySide6.QtCore import Qt, QThread, QTimer, Signal
 from PySide6.QtWidgets import (QDialog, QFrame, QGridLayout, QHBoxLayout,
@@ -13,9 +14,11 @@ from qfluentwidgets import (BodyLabel, InfoBar, InfoBarPosition, LineEdit,
 
 import config as appconfig
 import theme
-from core import adb, logparse, maa_update, runner, scheduler
-from widgets import (Card, IconBadge, Pill, big_number, inset_row, kv_row,
-                     set_switch_checked_gray, style_button,
+from core import (adb, export_runner, logparse, maa_update, poller, runner,
+                  scheduler)
+from pages.export_dialog import ExportDialog
+from widgets import (Card, IconBadge, Pill, big_number, dark_log_qss, inset_row,
+                     kv_row, set_switch_checked_gray, style_button,
                      style_primary_button, style_scroll_area)
 
 LEGACY_LOG_NAMES = {"official1": "Official 1", "official2": "Official 2",
@@ -69,22 +72,12 @@ def _set_big_num(big_widget, num):
 
 
 def kv_pair(key_text, value_text="—"):
-    """带引用的键值行：返回 (row, key_label, value_label)，便于运行时改文案。
+    """带引用的键值行（widgets.kv_row 的 refs 版）：返回 (row, key_label, value_label)。
 
     注意不要把 QLabel 传给 widgets.kv_row 的 key_text：qfluentwidgets 会把
     非 str 参数当 parent 重载，键名会凭空消失。
     """
-    key = _label(key_text, color=theme.TEXT_2)
-    val = _label(value_text)
-    val.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-    row = QWidget()
-    lay = QHBoxLayout(row)
-    lay.setContentsMargins(0, 0, 0, 0)
-    lay.setSpacing(8)
-    lay.addWidget(key)
-    lay.addStretch(1)
-    lay.addWidget(val)
-    return row, key, val
+    return kv_row(key_text, value_text, refs=True)
 
 
 class AccountCard(Card):
@@ -146,9 +139,13 @@ class AccountCard(Card):
             self.pill.set_state("wait", "等待中")
 
         # 展示最近一次已完成的运行结果
-        result = next((a for a in (run or {}).get("accounts", [])
-                       if a["key"] == self.acc["key"]
-                       or a["name"] == self.acc["name"]), None)
+        # 优先按 id（key）匹配；日志 SUMMARY 只有账号名，id 匹配不上再按名兜底
+        results = (run or {}).get("accounts", [])
+        result = next((a for a in results
+                       if self.acc["key"] and a["key"] == self.acc["key"]), None)
+        if result is None:
+            result = next((a for a in results
+                           if a["name"] == self.acc["name"]), None)
         self.kv1_key.setText("今日耗时")
         self.kv2_key.setText("最近运行")
         if result is None:
@@ -181,6 +178,7 @@ class ScheduleCard(Card):
         self.cfg = cfg
         self._row_widgets = []
         self._edits = {}
+        self._apply_worker = None   # 计划任务同步的后台线程（改完行立即生效）
 
         # 列标题：与下方每行控件同宽对齐（44 班次 / 68 时间 / 75 启用 / 75 关机 / 56 操作）
         head = QHBoxLayout()
@@ -313,8 +311,19 @@ class ScheduleCard(Card):
 
     def _apply(self):
         appconfig.save(self.cfg)
-        ok, msg = scheduler.apply(self.cfg)
-        self.refresh_scheduler(scheduler.query())
+        # 计划任务同步（Register/Set-ScheduledTask）会卡 1~40 秒，必须后台跑：
+        # 配置已保存，界面行不变，任务更新完成后回填提示与「下次运行」
+        if self._apply_worker is not None and self._apply_worker.isRunning():
+            return   # 上一次同步还没完：配置已落盘，由它按最新配置重试即可
+        self.add_btn.setEnabled(False)
+        self._apply_worker = poller.SchedulerApplyWorker(self.cfg, self)
+        self._apply_worker.done.connect(self._on_apply_done)
+        self._apply_worker.start()
+
+    def _on_apply_done(self, ok, msg, info):
+        self.add_btn.setEnabled(True)
+        if info is not None:
+            self.refresh_scheduler(info)
         if ok:
             InfoBar.success("已更新计划任务", "", parent=self.window(),
                             position=InfoBarPosition.TOP_RIGHT, duration=2500)
@@ -431,16 +440,12 @@ class LastRunStrip(Card):
 class StatusCard(Card):
     """连接状态 + MAA 更新 合并卡片：内部左右两列（1×2）。
 
-    窗口变窄时通过 set_compact 缩小字号/内边距保持两列并排，不改堆叠。
     更新逻辑在 core/maa_update：开 Clash → 两套 MAA 依次自更新（版本更新）
     → 恢复配置 → 关 Clash。配置（Clash 路径/端口）在「运行设置 → MAA 更新」。
     """
 
     def __init__(self):
         super().__init__("连接状态与 MAA 更新")
-        self._compact = False
-        self._key_labels = []
-        self._section_labels = []
         self._last_rd = {}
 
         cols = QHBoxLayout()
@@ -496,58 +501,14 @@ class StatusCard(Card):
         right.addLayout(btn_row)
         cols.addLayout(right, 1)
 
-    # ---------- 构建 / 缩放 ----------
+    # ---------- 构建 ----------
 
     def _section_label(self, text):
-        lab = _label(text, size="12px", weight="600", color=theme.TEXT_2)
-        self._section_labels.append(lab)
-        return lab
+        return _label(text, size="12px", weight="600", color=theme.TEXT_2)
 
     def _kv(self, key_text, value_widget):
-        """同 widgets.kv_row，但保留 key label 引用以支持缩放字号。"""
-        row = QWidget()
-        lay = QHBoxLayout(row)
-        lay.setContentsMargins(0, 0, 0, 0)
-        lay.setSpacing(8)
-        key = BodyLabel(key_text)
-        self._key_labels.append(key)
-        self._apply_key_style(key)
-        lay.addWidget(key)
-        lay.addStretch(1)
-        lay.addWidget(value_widget, 0, Qt.AlignmentFlag.AlignRight)
-        return row
-
-    def _apply_key_style(self, key):
-        key.setStyleSheet("color: %s; font-size: %s;"
-                          % (theme.TEXT_2, "11px" if self._compact else "12.5px"))
-
-    def set_compact(self, flag):
-        """空间不足：整体缩小字号/内边距，保持左右两列不变。"""
-        if flag == self._compact:
-            return
-        self._compact = flag
-        for key in self._key_labels:
-            self._apply_key_style(key)
-        for lab in self._section_labels:
-            lab.setStyleSheet("font-size: %s; font-weight: 600; color: %s;"
-                              % ("11px" if flag else "12px", theme.TEXT_2))
-        for pill in (self.mumu_pill, self.adb_pill, self.maa_pill,
-                     *self.pills.values()):
-            pill.set_compact(flag)
-        self.hint.setStyleSheet("font-size: %s; color: %s;"
-                                % ("11px" if flag else "12px", theme.TEXT_3))
-        # 实例样式表会整体替换 Fluent qss，这里与 style_primary_button 同款全量样式
-        self.update_btn.setStyleSheet(
-            "PrimaryPushButton { background: %s; color: #ffffff; border: none;"
-            " border-radius: %dpx; padding: 4px 12px; font-family: %s; %s }"
-            "PrimaryPushButton:hover { background: #5b6470; }"
-            "PrimaryPushButton:pressed { background: #3d434b; }"
-            "PrimaryPushButton:disabled { background: rgba(75, 81, 90, 0.35);"
-            " color: rgba(255, 255, 255, 0.75); }"
-            % (theme.ACCENT, theme.RADIUS_BTN, theme.FONT_FAMILY,
-               theme.font_stack(11.5 if flag else 13, "600")))
-        self.update_btn.setText("一键更新" if flag else "一键更新两套 MAA")
-        self._render_rd()
+        """同 widgets.kv_row 的键值行。"""
+        return kv_row(key_text, value_widget)
 
     # ---------- 刷新 ----------
 
@@ -580,11 +541,7 @@ class StatusCard(Card):
                 True: "RunDirectly 已开启",
                 False: "RunDirectly 已关闭",
             }.get(v, "配置缺失")))
-            if self._compact:
-                mark = {True: "✓", False: "✗", None: "?"}.get(v, "?")
-                color = {True: theme.OK, False: theme.ERR}.get(v, theme.WARN)
-                parts.append('<span style="color:%s">%s %s</span>' % (color, label, mark))
-            elif v is True:
+            if v is True:
                 parts.append('<span style="color:%s">%s ✓</span>' % (theme.OK, label))
             elif v is False:
                 parts.append('<span style="color:%s">%s ✗ RunDirectly 已关闭</span>'
@@ -622,7 +579,11 @@ class StatusCard(Card):
 
 
 class MaaUpdateWorker(QThread):
-    """后台跑 run_full_update：逐行转发日志，结束发 done(ok, summary)。"""
+    """后台跑 run_full_update：逐行转发日志，结束发 done(ok, summary)。
+
+    closeEvent 里「仍要退出」时调 request_stop()：更新循环会尽快收尾，
+    finally 里的恢复逻辑（MAA 配置 / Clash / 系统代理）保证不被跳过。
+    """
 
     line = Signal(str)
     done = Signal(bool, str)
@@ -630,10 +591,15 @@ class MaaUpdateWorker(QThread):
     def __init__(self, cfg, parent=None):
         super().__init__(parent)
         self.cfg = cfg
+        self._stop = False
+
+    def request_stop(self):
+        self._stop = True
 
     def run(self):
         try:
-            ok, summary = maa_update.run_full_update(self.cfg, self.line.emit)
+            ok, summary = maa_update.run_full_update(
+                self.cfg, self.line.emit, cancel=lambda: self._stop)
         except Exception as exc:  # 兜底：更新流程异常不能让线程崩掉
             ok, summary = False, "更新过程异常：%s" % exc
         self.done.emit(ok, summary)
@@ -652,11 +618,7 @@ class UpdateLogDialog(QDialog):
         root.setSpacing(10)
         self.log_view = QPlainTextEdit()
         self.log_view.setReadOnly(True)
-        self.log_view.setStyleSheet(
-            "QPlainTextEdit { background: %s; color: %s; font-family: %s;"
-            " font-size: 12px; border: none; border-radius: %dpx;"
-            " padding: 12px 14px; }"
-            % (theme.LOG_BG, theme.LOG_FG, theme.FONT_MONO, theme.RADIUS_CARD))
+        self.log_view.setStyleSheet(dark_log_qss())
         root.addWidget(self.log_view, 1)
         btns = QHBoxLayout()
         tip = BodyLabel("关闭窗口不会中断更新，完成后右上有提示")
@@ -674,6 +636,10 @@ class UpdateLogDialog(QDialog):
 
 
 class DashboardPage(ScrollArea):
+    """仪表盘。export_done = 干员导出结束（含后台运行的情况）回主窗口提示。"""
+
+    export_done = Signal(bool, str)
+
     def __init__(self, cfg):
         super().__init__()
         self.cfg = cfg
@@ -705,6 +671,9 @@ class DashboardPage(ScrollArea):
         self.status_card.refresh_versions(self.cfg)
         self._upd_worker = None
         self._upd_dialog = None
+        # 干员资料导出（core/export_runner 驱动 scripts/export_operbox.py）
+        self._export_worker = None
+        self._export_dialog = None
         root.addStretch(1)
 
         self.acc_cards = []
@@ -725,6 +694,18 @@ class DashboardPage(ScrollArea):
         """MAA 一键更新是否正在后台执行（主窗口关闭前检查）。"""
         w = self._upd_worker
         return w is not None and w.isRunning()
+
+    def request_update_stop(self):
+        """请更新线程尽快收尾：更新循环取消后 finally 会恢复 MAA 配置/关 Clash。"""
+        w = self._upd_worker
+        if w is not None:
+            w.request_stop()
+
+    def wait_update_worker(self, timeout_ms):
+        """等更新线程退出（收尾含恢复配置与杀 MAA，给足超时）。"""
+        w = self._upd_worker
+        if w is not None and w.isRunning():
+            w.wait(timeout_ms)
 
     def on_maa_update(self):
         if runner.is_running():
@@ -774,6 +755,51 @@ class DashboardPage(ScrollArea):
             InfoBar.warning("MAA 更新未全部完成", summary, parent=self.window(),
                             position=InfoBarPosition.TOP_RIGHT, duration=10000)
 
+    # ---------- 干员资料导出 ----------
+
+    def export_running(self):
+        """干员导出是否正在后台执行（主窗口「立即运行」/关闭前检查）。"""
+        w = self._export_worker
+        return w is not None and w.isRunning()
+
+    def export_accounts(self):
+        """本次导出范围：启用且打开「导出」开关的账号。"""
+        return [a for a in self.cfg.get("accounts", [])
+                if a.get("enabled", True) and a.get("export_enabled", False)]
+
+    def start_export(self):
+        """启动导出（调用方已确认互斥与账号列表非空）。"""
+        script = Path(self.cfg["paths"]["script_dir"]) / "export_operbox.py"
+        out_dir = Path(self.cfg["paths"]["script_dir"]).parent / "exports"
+        self._export_dialog = ExportDialog(self.export_accounts(),
+                                           parent=self.window())
+        self._export_worker = export_runner.ExportWorker(script, out_dir,
+                                                         parent=self)
+        self._export_worker.line.connect(self._export_dialog.append)
+        self._export_worker.done.connect(self._on_export_done)
+        self._export_worker.start()
+        self._export_dialog.show()
+
+    def _on_export_done(self, ok, summary):
+        dlg = self._export_dialog
+        if dlg is not None:
+            dlg.append("")
+            dlg.append("==== %s ====" % ("导出完成" if ok else "导出未全部成功"))
+            dlg.append(summary)
+        self.export_done.emit(ok, summary)
+
+    def detach_export_worker(self):
+        """主窗口关闭时调用：导出子进程独立于控制台存活，断开父级让线程自然收尾。
+
+        返回被断开的工作线程（调用方持有引用防止 GC），没有导出在跑返回 None。
+        """
+        w = self._export_worker
+        self._export_worker = None
+        if w is not None and w.isRunning():
+            w.setParent(None)
+            return w
+        return None
+
     def _acc_sig(self):
         return tuple((a.get("id"), a.get("label"), bool(a.get("enabled")),
                       a.get("server")) for a in self.cfg.get("accounts", []))
@@ -810,21 +836,19 @@ class DashboardPage(ScrollArea):
             self.acc_sig = sig
             self._rebuild_accounts()
         log_path = self.cfg["paths"]["log_file"]
-        text = logparse.read_text(log_path)
-        run = logparse.last_run(text)
-        stage = logparse.current_stage(text) if runner.is_running() else None
-        enabled_map = {a.get("id"): bool(a.get("enabled", True))
+        # snapshot：一次读盘+一次行匹配同时取摘要与阶段（内部带变更缓存）
+        snap = logparse.snapshot(log_path)
+        run = snap["run"]
+        stage = snap["stage"] if runner.is_running() else None
+        enabled_map = {a.get("id") or a.get("label"): bool(a.get("enabled", True))
                        for a in self.cfg.get("accounts", [])}
         for card in self.acc_cards:
             card.refresh(run, stage, enabled_map.get(card.acc["key"], True))
         self.last_strip.refresh(run)
         self.status_card.refresh(self.cfg, self.adb_ok)
-        # 残留锁清理（上次运行中断）
-        if runner.stale_lock() is not None:
-            try:
-                runner.LOCK_FILE.unlink()
-            except OSError:
-                pass
+        # 残留锁清理（上次运行中断）：clear_stale_lock 内部复核 PID 与内容，
+        # 避免和 master.ps1 的抢锁写入竞态
+        if runner.clear_stale_lock() is not None:
             InfoBar.warning("已清理残留锁文件", "上次运行可能被中断，本次可正常启动",
                             parent=self.window(), position=InfoBarPosition.TOP_RIGHT,
                             duration=5000)

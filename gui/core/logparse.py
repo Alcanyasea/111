@@ -3,7 +3,12 @@
 
 注意 PS 5.1 的坑（见探索记录）：`=== Run MAA [`、`MAA finished! ` 等行被截断，
 账号名要从 `********** [n/3] Label **********` 横幅取，不能从 MAA 行取。
+
+性能：日志上限 1MB，主窗口每 2 秒、仪表盘每 5 秒、日志页每 3 秒都会来读，
+所以 read_text 只读尾部并按 (路径, size, mtime) 缓存；snapshot() 让
+last_run / current_stage 共享一次行匹配结果。
 """
+import os
 import re
 from datetime import datetime
 from html import escape
@@ -15,15 +20,35 @@ BANNER_RE = re.compile(r"^\*{10} \[(\d+)/(\d+)\] (.+?) \*{10}$")
 
 ACCOUNT_KEYS = {"Official 1": "official1", "Official 2": "official2", "Bilibili": "bilibili"}
 
+_TAIL_BYTES = 512 * 1024   # 解析只需要最后一轮运行，读尾部足够
+_TEXT_CACHE = {"sig": None, "text": ""}
+_LINES_CACHE = {"sig": None, "lines": []}
+
 
 def read_text(path, max_lines=3000):
-    """读日志文件（容忍编码损坏），返回最近 max_lines 行的完整文本。"""
+    """读日志尾部（容忍编码损坏），返回最近 max_lines 行的完整文本。"""
     try:
-        with open(path, "r", encoding="utf-8", errors="ignore") as f:
-            lines = f.readlines()
-        return "".join(lines[-max_lines:])
+        st = os.stat(path)
+        sig = (str(path), st.st_size, st.st_mtime)
+    except (OSError, ValueError):
+        return ""
+    if _TEXT_CACHE["sig"] == sig:
+        return _TEXT_CACHE["text"]
+    size = st.st_size
+    try:
+        with open(path, "rb") as f:
+            if size > _TAIL_BYTES:
+                f.seek(size - _TAIL_BYTES)
+            data = f.read()
     except OSError:
         return ""
+    lines = data.decode("utf-8", errors="ignore").splitlines()
+    if size > _TAIL_BYTES and lines:
+        lines = lines[1:]   # 尾部起点可能截了半行，丢掉
+    text = "\n".join(lines[-max_lines:])
+    _TEXT_CACHE["sig"] = sig
+    _TEXT_CACHE["text"] = text
+    return text
 
 
 def _matched_lines(text):
@@ -36,6 +61,33 @@ def _matched_lines(text):
     return out
 
 
+def _file_lines(path):
+    """带缓存的行匹配（last_run / current_stage / snapshot 共用）。"""
+    try:
+        st = os.stat(path)
+        sig = (str(path), st.st_size, st.st_mtime)
+    except (OSError, ValueError):
+        return []
+    if _LINES_CACHE["sig"] == sig:
+        return _LINES_CACHE["lines"]
+    lines = _matched_lines(read_text(path))
+    _LINES_CACHE["sig"] = sig
+    _LINES_CACHE["lines"] = lines
+    return lines
+
+
+def snapshot(path, now=None):
+    """一次解析同时取上次运行摘要与当前阶段（主窗口/仪表盘轮询共用）。
+
+    返回 {"run": last_run() 结果, "stage": current_stage() 结果}。
+    """
+    lines = _file_lines(path)
+    return {
+        "run": _last_run_from_lines(lines),
+        "stage": _current_stage_from_lines(lines, now),
+    }
+
+
 def last_run(text):
     """解析最后一次运行的摘要。
 
@@ -43,7 +95,10 @@ def last_run(text):
           "passed", "failed", "final": "success"/"fail", "emulator_closed": bool}
     日志里没有 SUMMARY 时返回 None。
     """
-    lines = _matched_lines(text)
+    return _last_run_from_lines(_matched_lines(text))
+
+
+def _last_run_from_lines(lines):
     if not lines:
         return None
     # 从后往前找 SUMMARY 横幅
@@ -110,7 +165,10 @@ def current_stage(text, now=None):
     返回 {"account": 账号名, "stage": 阶段文本, "elapsed_min": 距 MAA 启动的分钟数}
     不在运行中（没有未完成的 banner 段）时返回 None。
     """
-    lines = _matched_lines(text)
+    return _current_stage_from_lines(_matched_lines(text), now)
+
+
+def _current_stage_from_lines(lines, now=None):
     if not lines:
         return None
     # 找最后一次 banner
@@ -170,21 +228,22 @@ def classify(msg):
     return ""
 
 
+def line_html(line):
+    """单行日志 → HTML（与 to_html 同款式），供日志页增量追加。"""
+    m = TS_RE.match(line)
+    if m:
+        ts, msg = m.group(1), escape(m.group(2))
+        cls = classify(m.group(2))
+        if cls:
+            msg = '<span class="%s">%s</span>' % (cls, msg)
+        return '<span class="t">%s</span> - %s' % (ts, msg)
+    return escape(line)
+
+
 def to_html(text, max_lines=3000):
     """日志文本转 HTML（配色同 mockup .log-view），只取最近 max_lines 行。"""
     lines = text.splitlines()[-max_lines:]
-    out = []
-    for line in lines:
-        m = TS_RE.match(line)
-        if m:
-            ts, msg = m.group(1), escape(m.group(2))
-            cls = classify(m.group(2))
-            if cls:
-                msg = '<span class="%s">%s</span>' % (cls, msg)
-            out.append('<span class="t">%s</span> - %s' % (ts, msg))
-        else:
-            out.append(escape(line))
-    return "<br>".join(out)
+    return "<br>".join(line_html(line) for line in lines)
 
 
 def log_css():

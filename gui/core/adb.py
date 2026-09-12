@@ -3,37 +3,28 @@
 
 截图走 adb exec-out screencap（mumu-cli 没有截图子命令）。
 """
-import subprocess
 import time
 
 from core import proc
+from core.util import decode_console, run as _run
 
-CREATE_NO_WINDOW = 0x08000000
-
-
-def _run(args, timeout=20):
-    try:
-        r = subprocess.run(
-            args, capture_output=True, timeout=timeout, creationflags=CREATE_NO_WINDOW
-        )
-        return r.returncode, r.stdout, r.stderr
-    except (subprocess.TimeoutExpired, OSError, FileNotFoundError):
-        return -1, b"", b""
+_TIMEOUT_QUICK = 12   # adb devices / connect：偶发卡顿时也要让关窗等待等得起
 
 
 def is_connected(cfg):
     """ADB 设备是否在线（adb devices 输出包含 device 且状态为 device）。"""
     paths = cfg["paths"]
-    code, out, _ = _run([paths["adb"], "devices"])
-    text = out.decode(errors="ignore")
+    code, out, _ = _run([paths["adb"], "devices"], timeout=_TIMEOUT_QUICK)
+    text = decode_console(out)
     return code == 0 and f"{paths['device']}\tdevice" in text
 
 
 def connect(cfg):
     """连接设备（与 master.ps1 相同的探测方式），返回输出文本。"""
     paths = cfg["paths"]
-    code, out, _ = _run([paths["adb"], "connect", paths["device"]])
-    return out.decode(errors="ignore").strip()
+    code, out, _ = _run([paths["adb"], "connect", paths["device"]],
+                        timeout=_TIMEOUT_QUICK)
+    return decode_console(out).strip()
 
 
 def screenshot_bytes(cfg):

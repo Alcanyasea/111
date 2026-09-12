@@ -8,9 +8,13 @@ import json
 import os
 import re
 from copy import deepcopy
+from datetime import datetime
 from pathlib import Path
 
 CONFIG_PATH = Path(r"D:\1\config.json")
+
+# 最近一次 load() 的警告（配置损坏已备份等），由主窗口启动时弹出提示
+LAST_LOAD_WARNING = ""
 
 
 def batch_name(time):
@@ -119,13 +123,16 @@ DEFAULTS = {
         # 账号数组（顺序即运行顺序）。slot = scripts\accounts\<slot> 登录数据目录
         # 旧版 {official1: bool, ...} 对象形式由 _migrate_accounts() 自动迁移
         {"id": "official1", "label": "官服 1", "server": "official",
-         "enabled": True, "slot": "official_1", "username": "", "password": "",
+         "enabled": True, "export_enabled": False, "slot": "official_1",
+         "username": "", "password": "",
          "base_schedule": default_base_schedule()},
         {"id": "official2", "label": "官服 2", "server": "official",
-         "enabled": True, "slot": "official_2", "username": "", "password": "",
+         "enabled": True, "export_enabled": False, "slot": "official_2",
+         "username": "", "password": "",
          "base_schedule": default_base_schedule()},
         {"id": "bilibili", "label": "B 服", "server": "bilibili",
-         "enabled": True, "slot": "bilibili_1", "username": "", "password": "",
+         "enabled": True, "export_enabled": False, "slot": "bilibili_1",
+         "username": "", "password": "",
          "base_schedule": default_base_schedule()},
     ],
     "behavior": {
@@ -211,6 +218,9 @@ def _migrate_accounts(cfg):
                     plan = []
                 a["second_fight_plan"] = plan
             a.setdefault("second_fight_use_optional", True)
+            # 干员资料导出：每个账号单独开关，「仪表盘 → 导出干员」只导打开了
+            # 开关且启用的账号（默认关，避免无意中把所有号都跑一遍识别）
+            a.setdefault("export_enabled", False)
             # 精确基建（base_schedule）。菲亚梅塔心情恢复是其中「按批次」的一项：
             # base_schedule.batches[<批次>].fiammetta = {"enable", "target"}
             # 旧版曾写在账号级 a["fiammetta"] 或精确基建全局 bs["fiammetta"]，
@@ -285,14 +295,33 @@ def _migrate_schedule(cfg):
     sched.pop("evening", None)
 
 def load() -> dict:
-    """读取配置；文件缺失/损坏/字段缺失时用默认值补齐。"""
+    """读取配置；文件缺失/损坏/字段缺失时用默认值补齐。
+
+    配置损坏（JSON 解析失败）时先把原文件改名备份为
+    config.json.corrupt-<时间戳> 再回退默认值：后续任何一次 save() 都会
+    整份覆盖 config.json，没有备份的话账号数据（含槽位、账密）就没了。
+    """
+    global LAST_LOAD_WARNING
+    LAST_LOAD_WARNING = ""
     cfg = deepcopy(DEFAULTS)
     if CONFIG_PATH.exists():
         try:
             with open(CONFIG_PATH, "r", encoding="utf-8") as f:
                 cfg = _deep_merge(cfg, json.load(f))
-        except (json.JSONDecodeError, OSError):
-            pass  # 损坏时回退默认，不阻塞 GUI 启动
+        except json.JSONDecodeError as exc:
+            backup = CONFIG_PATH.with_name(
+                "config.json.corrupt-%s" % datetime.now().strftime("%Y%m%d_%H%M%S"))
+            try:
+                CONFIG_PATH.replace(backup)
+                LAST_LOAD_WARNING = (
+                    "config.json 解析失败（%s），已备份为 %s 并使用默认配置启动。\n"
+                    "原文件里的账号列表可在备份文件中找回。" % (exc, backup.name))
+            except OSError:
+                LAST_LOAD_WARNING = (
+                    "config.json 解析失败（%s），本次使用默认配置启动；"
+                    "备份失败，请勿在「运行设置」点保存以免覆盖原文件。" % exc)
+        except OSError:
+            pass  # 读取失败（占用等）不阻塞 GUI 启动，保留原文件
     _migrate_accounts(cfg)
     _migrate_schedule(cfg)
     return cfg

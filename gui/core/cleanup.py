@@ -20,6 +20,7 @@ from datetime import datetime
 from pathlib import Path
 
 from core import runner
+from core.util import to_int
 
 SCRIPT_DIR = Path(r"D:\1\scripts")
 PROJECT_ROOT = SCRIPT_DIR.parent
@@ -29,9 +30,11 @@ LOCK_FILE = SCRIPT_DIR / "master.lock"
 CACHE_ROOTS = (PROJECT_ROOT / "gui", PROJECT_ROOT / "plugins")
 PLANS_DIR = PROJECT_ROOT / "plugins" / "base_schedule" / "plans"
 
-# 日志截断阈值：超过 max_size 时保留末尾 keep_size 字节
-LOG_MAX_SIZE = 1_000_000
-LOG_KEEP_SIZE = 512_000
+# 日志截断阈值：超过 max_size 时保留末尾 keep_size 字节。
+# 必须与 master.ps1 Clear-UnnecessaryData 里的 1048576/524288 保持一致，
+# 两边谁先触发效果都一样。
+LOG_MAX_SIZE = 1_048_576
+LOG_KEEP_SIZE = 524_288
 
 # 测试遗留文件（调试时 dump 到 scripts\ 根目录的登录缓存，含 token，不再需要）
 LEFTOVERS = ("_t1.xml", "_t2.xml", "_t3.bin")
@@ -96,10 +99,11 @@ def scan(cfg=None):
         it = _item(script_dir / name, "tmp")
         if it:
             items.append(it)
-    # 陈旧的 master.lock（调用方保证当前未运行）
-    it = _item(LOCK_FILE, "tmp")
-    if it:
-        items.append(it)
+    # 陈旧的 master.lock：经 runner 复核（PID 已死且不是活着的 powershell）才列入
+    if runner.stale_lock() is not None:
+        it = _item(LOCK_FILE, "tmp")
+        if it:
+            items.append(it)
 
     # 测试遗留文件
     for name in LEFTOVERS:
@@ -184,26 +188,25 @@ def perform(items):
     for it in items:
         kind = it["kind"]
         path = Path(it["path"])
-        n = 0
+        # 手动清理有确认弹窗间隔，期间挂机可能刚启动：活动锁绝不删
+        if path == LOCK_FILE and runner.is_running():
+            continue
         if kind == "log":
             n = _trim_log(it["path"])
             if n > 0:
                 freed += n
                 ok += 1
+            else:
+                fail += 1
             continue
         try:
             if kind == "cache" and path.is_dir():
-                n = it["size"]
                 shutil.rmtree(path)
             else:
-                n = path.stat().st_size
                 path.unlink()
-        except OSError:
-            n = 0
-        if n > 0:
-            freed += n
+            freed += it["size"]
             ok += 1
-        else:
+        except OSError:
             fail += 1
     return freed, ok, fail
 
@@ -218,7 +221,7 @@ def is_due(cfg):
         last_dt = datetime.strptime(last, "%Y-%m-%d %H:%M")
     except ValueError:
         return True
-    days = int(c.get("interval_days", 7))
+    days = to_int(c.get("interval_days"), 7)
     return (datetime.now() - last_dt).total_seconds() >= days * 86400
 
 

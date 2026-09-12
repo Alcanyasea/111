@@ -10,6 +10,7 @@
   master.ps1 按它逐个切号运行（正在挂机时改动从下次运行生效）。
 - 切换账号不再走游戏内点击流程：master.ps1 用 slot_switch.ps1 重启游戏+推入数据。
 """
+import os
 import subprocess
 import uuid
 from pathlib import Path
@@ -28,13 +29,11 @@ from qfluentwidgets import (BodyLabel, ComboBox, InfoBar, InfoBarPosition,
 import config as appconfig
 import theme
 from core import runner
-from pages.stage_plan_dialog import (format_stage_plan, maa_second_fight_plan,
-                                     show_stage_plan_dialog)
+from core.util import CREATE_NO_WINDOW, decode_console
+from pages.stage_plan_dialog import show_stage_plan_dialog
 from widgets import (Card, IconBadge, Pill, _label_transparent,
                      set_switch_checked_gray, style_button,
                      style_primary_button, style_scroll_area)
-
-CREATE_NO_WINDOW = 0x08000000
 
 # ---- 拖动排序的版式与节奏（数值参考 SortableJS / react-beautiful-dnd）----
 GRID_COLS = 2          # 每行 2 张卡片
@@ -46,6 +45,10 @@ AUTOSCROLL_ZONE = 54   # 拖到上下边缘这个范围内开始自动滚动
 AUTOSCROLL_STEP_MAX = 26
 
 SERVER_LABELS = {"official": "官服", "bilibili": "B 服"}
+
+# 关窗时杀不死的工作线程在这里「断线」保活：线程随进程退出，而不是随
+# 对话框析构（QThread 运行中被析构会直接 abort 整个进程）
+_detached_threads = []
 
 
 class ClickLabel(QLabel):
@@ -129,7 +132,7 @@ def slot_uid(cfg, slot):
         return None
     p = Path(cfg["paths"]["script_dir"]) / "accounts" / slot / "uid.txt"
     try:
-        return p.read_text(encoding="ascii").strip() or None
+        return p.read_text(encoding="utf-8", errors="replace").strip() or None
     except OSError:
         return None
 
@@ -139,29 +142,37 @@ class CaptureWorker(QThread):
 
     subprocess.Popen + CREATE_NO_WINDOW（无控制台窗口闪现），
     阻塞 readline 放在工作线程里，GUI 线程不卡。
+    账号密码经环境变量传递（命令行参数对本机任意进程可见）。
     """
 
     line = Signal(str)
     done = Signal(int)
 
-    def __init__(self, args, parent=None):
+    def __init__(self, args, env=None, parent=None):
         super().__init__(parent)
         self.args = args
+        self.env = env
         self.proc = None
 
     def run(self):
         try:
             self.proc = subprocess.Popen(
                 self.args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                creationflags=CREATE_NO_WINDOW)
+                creationflags=CREATE_NO_WINDOW, env=self.env)
         except OSError as e:
             self.line.emit(">>> 启动捕获脚本失败：%s" % e)
             self.done.emit(-1)
             return
-        for raw in iter(self.proc.stdout.readline, b""):
-            self.line.emit(raw.decode("gbk", errors="replace").rstrip())
-        self.proc.stdout.close()
-        self.done.emit(self.proc.wait())
+        try:
+            for raw in iter(self.proc.stdout.readline, b""):
+                self.line.emit(decode_console(raw).rstrip())
+        finally:
+            # 兜底保证 done 必发：任何未预期异常都不能让「捕获中」状态卡死
+            try:
+                self.proc.stdout.close()
+            except OSError:
+                pass
+            self.done.emit(self.proc.wait())
 
     def kill(self):
         if self.proc is not None and self.proc.poll() is None:
@@ -280,9 +291,9 @@ class CaptureDialog(QDialog):
         if not label or not username or not password:
             self._show_error("名称 / 账号 / 密码不能为空")
             return
-        # PowerShell -File 传参时，以「-」开头的值会被当成参数名导致绑定失败、捕获报错
-        if username.startswith("-") or password.startswith("-"):
-            self._show_error("账号 / 密码不能以「-」开头（无法通过命令行传给捕获脚本）")
+        # -Label 仍走命令行传参：以「-」开头的值会被 PowerShell 当成参数名
+        if label.startswith("-"):
+            self._show_error("名称不能以「-」开头")
             return
         server = "bilibili" if self.server_combo.currentIndex() == 1 else "official"
         self._slot = (self.acc or {}).get("slot") or ("acc_" + uuid.uuid4().hex[:8])
@@ -291,9 +302,12 @@ class CaptureDialog(QDialog):
         args = [
             "powershell", "-NoProfile", "-ExecutionPolicy", "Bypass",
             "-File", str(script),
-            "-Server", server, "-Slot", self._slot,
-            "-Username", username, "-Password", password, "-Label", label,
+            "-Server", server, "-Slot", self._slot, "-Label", label,
         ]
+        # 账号密码走环境变量：命令行参数在进程存活期内对本机任意进程可读
+        env = dict(os.environ)
+        env["MAA_CAPTURE_USERNAME"] = username
+        env["MAA_CAPTURE_PASSWORD"] = password
         self.log_view.clear()
         self._append_log(">>> 开始捕获：%s（%s）槽位 %s" % (label, SERVER_LABELS[server], self._slot))
         self._append_log(">>> 正在启动捕获脚本...")
@@ -303,7 +317,7 @@ class CaptureDialog(QDialog):
             "在模拟器窗口手动登录。")
         self.hint_label.setStyleSheet("color: %s; font-size: 12px;" % theme.TEXT_3)
 
-        self.worker = CaptureWorker(args, parent=self)
+        self.worker = CaptureWorker(args, env=env, parent=self)
         self.worker.line.connect(self._append_log)
         self.worker.done.connect(self._on_finished)
         self.worker.start()
@@ -347,148 +361,28 @@ class CaptureDialog(QDialog):
         else:
             self.cfg["accounts"].append(entry)
         appconfig.save(self.cfg)
-        if self.page is not None:
-            self.page.refresh()
+        # 不在这里刷新列表：三个调用方都在 exec() 返回后各自刷新。
+        # 弹窗还挂着就 page.refresh() 会把「卡片 → 详情弹窗 → 本弹窗」整条
+        # 父子链排进延迟删除队列，之后对已销毁 C++ 对象的访问会抛 RuntimeError
+        return
 
     def on_close(self):
         self._closing = True
         if self.worker is not None:
             self.worker.kill()
-            self.worker.wait(3000)
+            if not self.worker.wait(3000):
+                # PowerShell 偶发僵死：terminate 兜底；仍不退出就摘掉 parent，
+                # 让线程随进程退出，避免对话框析构时杀掉运行中的 QThread 直接 abort
+                self.worker.terminate()
+                if not self.worker.wait(1000):
+                    self.worker.setParent(None)
+                    _detached_threads.append(self.worker)
             self.worker = None
         self.reject()
 
     def closeEvent(self, event):
         self.on_close()
         event.accept()
-
-
-class AccountRow(Card):
-    """单账号行：徽标 + 名称 + 服务器 + 槽位状态 + 启用开关 + 捕获/删除。"""
-
-    def __init__(self, cfg, acc, index, page=None, parent=None):
-        super().__init__(parent=parent)
-        self.cfg = cfg
-        self.acc = acc
-        self.page = page
-        server = acc.get("server", "official")
-        row = QHBoxLayout()
-        row.setSpacing(12)
-        row.addWidget(IconBadge(str(index + 1)))
-        name_box = QVBoxLayout()
-        name_box.setSpacing(1)
-        name = SubtitleLabel(acc.get("label", "?"))
-        _label_transparent(name)
-        meta = BodyLabel("%s · 槽位 %s" % (SERVER_LABELS.get(server, server),
-                                           acc.get("slot", "未设置")))
-        meta.setStyleSheet("color: %s; font-size: 12px;" % theme.TEXT_2)
-        _label_transparent(meta)
-        name_box.addWidget(name)
-        name_box.addWidget(meta)
-        row.addLayout(name_box)
-        row.addStretch(1)
-        self.uid_pill = Pill()
-        row.addWidget(self.uid_pill)
-        self.base_sw = set_switch_checked_gray(SwitchButton(), "精确基建")
-        self.base_sw.setChecked(bool((acc.get("base_schedule") or {}).get("enabled", False)))
-        self.base_sw.setToolTip("启用精确基建派驻；关闭时使用 MAA 自带基建换班")
-        self.base_sw.checkedChanged.connect(self._on_base_toggle)
-        row.addWidget(self.base_sw)
-        self.base_btn = style_button(PushButton("基建"), small=True)
-        self.base_btn.setToolTip("精确选择各设施进驻干员（批次随启动时间，支持333/243布局）")
-        self.base_btn.clicked.connect(self._on_base_config)
-        row.addWidget(self.base_btn)
-        self.sw = set_switch_checked_gray(SwitchButton())
-        self.sw.setChecked(bool(acc.get("enabled", True)))
-        self.sw.checkedChanged.connect(self._on_toggle)
-        row.addWidget(self.sw)
-        self.cap_btn = style_button(PushButton("捕获"), small=True)
-        self.cap_btn.setToolTip("清空登录态并重新登录，拉取该账号的登录数据")
-        self.cap_btn.clicked.connect(self._on_capture)
-        row.addWidget(self.cap_btn)
-        self.del_btn = style_button(PushButton("删除"), "danger", small=True)
-        self.del_btn.clicked.connect(self._on_delete)
-        row.addWidget(self.del_btn)
-        self.vbox.addLayout(row)
-
-        # 第二理智作战候选关卡：仿 MAA，点开用下拉逐行添加/调整候选
-        sub = QHBoxLayout()
-        sub.setSpacing(10)
-        lab = BodyLabel("候选关卡:")
-        lab.setStyleSheet("color: %s; font-size: 12px;" % theme.TEXT_2)
-        sub.addWidget(lab)
-        self.fight_btn = style_button(PushButton(), small=True)
-        self.fight_btn.setMinimumWidth(300)
-        self.fight_btn.setToolTip(
-            "编辑该账号第二个理智作战的候选关卡，界面与 MAA 一致：\n"
-            "每个候选一行下拉关卡，可「＋ 添加 / ✕ 删除 / ↑↓ 调整顺序」。")
-        self.fight_btn.clicked.connect(self._on_fight_plan)
-        self._refresh_fight_plan_text()
-        sub.addWidget(self.fight_btn)
-        tip = BodyLabel("点开按 MAA 方式修改；留空 = 跟随 MAA")
-        tip.setStyleSheet("color: %s; font-size: 12px;" % theme.TEXT_3)
-        sub.addWidget(tip)
-        sub.addStretch(1)
-        self.vbox.addLayout(sub)
-        self.refresh_uid()
-
-    def _refresh_fight_plan_text(self):
-        """按钮摘要：账号已设置 → 显示其候选；否则显示 MAA 当前映射。"""
-        saved = self.acc.get("second_fight_plan")
-        plan = [str(s).strip() for s in saved] if isinstance(saved, list) else []
-        mapped = []
-        if not plan:
-            mapped = maa_second_fight_plan(self.cfg,
-                                           self.acc.get("server"))[0]
-        text = format_stage_plan(plan or mapped) or "跟随 MAA 原设置"
-        self.fight_btn.setText("候选：%s ▾" % text)
-
-    def refresh_uid(self):
-        uid = slot_uid(self.cfg, self.acc.get("slot", ""))
-        if uid:
-            self.uid_pill.set_state("ok", "已捕获 UID %s" % uid)
-        else:
-            self.uid_pill.set_state("warn", "未捕获")
-
-    def _on_toggle(self, checked):
-        self.acc["enabled"] = bool(checked)
-        appconfig.save(self.cfg)
-
-    def _on_fight_plan(self):
-        if show_stage_plan_dialog(self.cfg, self.acc, parent=self):
-            self._refresh_fight_plan_text()
-
-    def _on_base_toggle(self, checked):
-        bs = self.acc.get("base_schedule")
-        if not isinstance(bs, dict):
-            bs = appconfig.default_base_schedule(
-                batches=appconfig.schedule_batches(self.cfg))
-            self.acc["base_schedule"] = bs
-        bs["enabled"] = bool(checked)
-        appconfig.save(self.cfg)
-
-    def _on_base_config(self):
-        from pages.base_schedule_dialog import show_base_schedule_dialog
-        show_base_schedule_dialog(self.cfg, self.acc, parent=self)
-
-    def _on_capture(self):
-        dlg = CaptureDialog(self.cfg, self.acc, page=self.page, parent=self)
-        dlg.exec()
-        self.refresh_uid()
-
-    def _on_delete(self):
-        box = MessageBox(
-            "删除账号", "确定从运行列表中删除「%s」吗？\n\n"
-            "仅从列表移除，登录数据槽位文件保留在磁盘。" % self.acc.get("label", ""),
-            self.window())
-        box.yesButton.setText("删除")
-        box.cancelButton.setText("取消")
-        if not box.exec():
-            return
-        self.cfg["accounts"].remove(self.acc)
-        appconfig.save(self.cfg)
-        if self.page is not None:
-            self.page.refresh()
 
 
 class AccountDetailDialog(QDialog):
@@ -500,6 +394,7 @@ class AccountDetailDialog(QDialog):
         self.acc = acc
         self.page = page
         self.move_delta = 0   # 关闭窗口后由列表执行的上移/下移（-1/+1）
+        self.deleted = False  # 关闭窗口后由列表刷新（删除改变了账号列表）
         self.setWindowTitle("账号详情 - %s" % (acc.get("label") or ""))
         self.setModal(True)
         self.resize(560, 480)
@@ -576,7 +471,7 @@ class AccountDetailDialog(QDialog):
         root.addLayout(order_row)
 
         self.hint = BodyLabel(
-            "「是否启用 / 精确基建」开关在账号卡片上直接操作；"
+            "「启用 / 精确基建 / 导出」开关在账号卡片上直接操作；"
             "运行顺序 = 账号列表顺序，列表里按住卡片（或账号名）拖到目标位置即可调整。")
         self.hint.setWordWrap(True)
         self.hint.setStyleSheet("color: %s; font-size: 12px;" % theme.TEXT_3)
@@ -630,8 +525,9 @@ class AccountDetailDialog(QDialog):
             return
         self.cfg["accounts"].remove(self.acc)
         appconfig.save(self.cfg)
-        if self.page is not None:
-            self.page.refresh()
+        self.deleted = True
+        # 只记录删除并关窗，page.refresh() 由卡片在 exec() 返回后执行：
+        # 弹窗未关就重建列表会把自己（卡片的子级）排进延迟删除队列
         self.accept()
 
 
@@ -718,6 +614,17 @@ class AccountCard(Card):
         self.base_sw.checkedChanged.connect(self._on_base_toggle)
         row.addWidget(self.base_sw, 0, Qt.AlignmentFlag.AlignVCenter)
 
+        self.export_sw = set_switch_checked_gray(SwitchButton())
+        self.export_sw.setOnText("导出")
+        self.export_sw.setOffText("导出")
+        self.export_sw.setText("导出")
+        self.export_sw.setToolTip(
+            "是否把该账号加入「仪表盘 → 导出干员」的导出范围：\n"
+            "导出会逐号切号并跑一遍 MAA 干员识别（约 3 分钟/号），与挂机互斥。")
+        self.export_sw.setChecked(bool(acc.get("export_enabled", False)))
+        self.export_sw.checkedChanged.connect(self._on_export_toggle)
+        row.addWidget(self.export_sw, 0, Qt.AlignmentFlag.AlignVCenter)
+
         self.sw = set_switch_checked_gray(SwitchButton())
         self.sw.setOnText("启用")
         self.sw.setOffText("启用")
@@ -772,8 +679,9 @@ class AccountCard(Card):
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
             pos = event.position().toPoint()
-            # 两个开关自己的区域绝不触发详情/拖动（即使事件冒泡回卡片）
+            # 三个开关自己的区域绝不触发详情/拖动（即使事件冒泡回卡片）
             if not (self.base_sw.geometry().contains(pos)
+                    or self.export_sw.geometry().contains(pos)
                     or self.sw.geometry().contains(pos)):
                 self._press_pos = pos
                 self._maybe_click = True
@@ -810,6 +718,10 @@ class AccountCard(Card):
         self.acc["enabled"] = bool(checked)
         appconfig.save(self.cfg)
 
+    def _on_export_toggle(self, checked):
+        self.acc["export_enabled"] = bool(checked)
+        appconfig.save(self.cfg)
+
     def _on_base_toggle(self, checked):
         bs = self.acc.get("base_schedule")
         if not isinstance(bs, dict):
@@ -825,6 +737,8 @@ class AccountCard(Card):
         dlg.exec()
         if dlg.move_delta and self.page is not None:
             self.page.move_relative(self.index, dlg.move_delta)
+        if dlg.deleted and self.page is not None:
+            self.page.refresh()
 
     def _start_rename(self):
         """点击账号名字：原地换成输入框，回车/失焦保存，Esc 取消。"""
