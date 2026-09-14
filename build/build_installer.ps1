@@ -148,9 +148,9 @@ New-Item -ItemType Directory -Path $staging -Force | Out-Null
 
 Write-Step "收集项目文件（排除 .git/.venv/config.json/账号数据/运行残留）..."
 robocopy $RepoRoot $staging /E /NFL /NDL /NJH /NJS /NP `
-    /XD .git .venv __pycache__ accounts debug plans dist tools .claude `
+    /XD .git .venv __pycache__ accounts debug plans dist tools .claude exports `
     /XF config.json config.json.bak master_log.txt master.lock maa_done.signal `
-        switch_output.tmp _shot.png _shot.py *.pyc | Out-Null
+        switch_output.tmp _shot.png _shot.py *.pyc AGENTS.md .gitignore | Out-Null
 if ($LASTEXITCODE -ge 8) { throw "robocopy 失败（exit=$LASTEXITCODE）" }
 
 # ---------- 内置 Python 运行环境（含 GUI 依赖，安装时无需联网） ----------
