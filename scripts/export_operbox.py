@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 # ============================================================
 # 逐账号 MAA 干员识别导出（OperBox）
-# 对 config.json 中每个「启用 且 export_enabled」的账号：
+# 对 config.json 中每个启用的账号：
 # 槽位切号 → 游戏更新等待 → 登录校验 →
 # 用该服务器对应 MAA 的 MaaCore 跑「干员识别」任务，识别结果存成 JSON。
 # 输出：D:\1\exports\<slot>.json（每号一份）+ exports\summary.json（汇总，
@@ -12,8 +12,8 @@
 # MAA.exe 正在运行（手动打开或控制台更新中）时同样拒绝，绝不抢杀。
 #
 # 用法（任一 Python 均可，仅用标准库）：
-#   python export_operbox.py                     # 导出全部启用且打开导出开关的账号
-#   python export_operbox.py --only official_1   # 只导指定槽位（无视导出开关）
+#   python export_operbox.py                     # 导出全部启用的账号
+#   python export_operbox.py --only official_1   # 只导指定槽位（无视启用开关）
 #   python export_operbox.py --account official_1 --no-switch   # 跳过切号，识别当前登录账号
 # 退出码：0 全部成功；1 有账号失败
 # ============================================================
@@ -435,18 +435,15 @@ def main():
 
     accounts = [a for a in cfg["accounts"] if a.get("enabled", True)]
     if args.only:
-        # 显式指定槽位 = 用户明确意图，无视 enabled/export_enabled 开关
+        # 显式指定槽位 = 用户明确意图，无视 enabled 开关
         accounts = [a for a in cfg["accounts"] if a.get("slot") == args.only]
         if not accounts:
             log("ERROR: config 中没有槽位 {}".format(args.only))
             return 1
-    else:
-        # 常规导出只跑「启用 且 打开导出开关」的账号（开关在控制台账号卡上）
-        accounts = [a for a in accounts if a.get("export_enabled", False)]
-        if not accounts:
-            log("ERROR: 没有开启「导出」的账号（在控制台账号管理页打开账号的导出开关，"
-                "或用 --only 指定槽位）")
-            return 1
+    elif not accounts:
+        log("ERROR: 没有启用的账号（在控制台账号管理页启用账号，"
+            "或用 --only 指定槽位）")
+        return 1
     log("=== 干员资料导出开始：{} 个账号 → {} ===".format(len(accounts), out_dir))
 
     if not start_mumu(cfg):

@@ -123,15 +123,15 @@ DEFAULTS = {
         # 账号数组（顺序即运行顺序）。slot = scripts\accounts\<slot> 登录数据目录
         # 旧版 {official1: bool, ...} 对象形式由 _migrate_accounts() 自动迁移
         {"id": "official1", "label": "官服 1", "server": "official",
-         "enabled": True, "export_enabled": False, "slot": "official_1",
+         "enabled": True, "slot": "official_1",
          "username": "", "password": "",
          "base_schedule": default_base_schedule()},
         {"id": "official2", "label": "官服 2", "server": "official",
-         "enabled": True, "export_enabled": False, "slot": "official_2",
+         "enabled": True, "slot": "official_2",
          "username": "", "password": "",
          "base_schedule": default_base_schedule()},
         {"id": "bilibili", "label": "B 服", "server": "bilibili",
-         "enabled": True, "export_enabled": False, "slot": "bilibili_1",
+         "enabled": True, "slot": "bilibili_1",
          "username": "", "password": "",
          "base_schedule": default_base_schedule()},
     ],
@@ -218,9 +218,9 @@ def _migrate_accounts(cfg):
                     plan = []
                 a["second_fight_plan"] = plan
             a.setdefault("second_fight_use_optional", True)
-            # 干员资料导出：每个账号单独开关，「仪表盘 → 导出干员」只导打开了
-            # 开关且启用的账号（默认关，避免无意中把所有号都跑一遍识别）
-            a.setdefault("export_enabled", False)
+            # 干员资料导出已改为账号详情里的「导出干员资料」按钮（逐号即时导出），
+            # 旧版账号级 export_enabled 开关字段就此移除
+            a.pop("export_enabled", None)
             # 精确基建（base_schedule）。菲亚梅塔心情恢复是其中「按批次」的一项：
             # base_schedule.batches[<批次>].fiammetta = {"enable", "target"}
             # 旧版曾写在账号级 a["fiammetta"] 或精确基建全局 bs["fiammetta"]，

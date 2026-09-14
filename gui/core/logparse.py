@@ -168,6 +168,19 @@ def current_stage(text, now=None):
     return _current_stage_from_lines(_matched_lines(text), now)
 
 
+def _collect_mode_active(lines):
+    """本轮是否为基建收菜运行：最后一次 Mode: InfrastCollect 标记在最后一次
+    SUMMARY 之后（或尚无 SUMMARY）即算进行中；收菜结束的恢复日志不含
+    「Mode:」字样，不会误判。"""
+    last_collect = last_summary = -1
+    for i, (_, msg) in enumerate(lines):
+        if "Mode:" in msg and "InfrastCollect" in msg:
+            last_collect = i
+        elif msg.strip() == "SUMMARY":
+            last_summary = i
+    return last_collect > last_summary
+
+
 def _current_stage_from_lines(lines, now=None):
     if not lines:
         return None
@@ -212,6 +225,8 @@ def _current_stage_from_lines(lines, now=None):
             elapsed_min = max(0.0, round((t1 - t0).total_seconds() / 60.0, 1))
         except ValueError:
             pass
+    if _collect_mode_active(lines):
+        stage = "收菜 · " + stage
     return {"account": banner.group(2), "stage": stage, "elapsed_min": elapsed_min}
 
 

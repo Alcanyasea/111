@@ -66,6 +66,9 @@ _LIGHT = {
     "WAIT": "#6d6860", "WAIT_TINT": "#f2f0ec",
     "ERR": "#262421", "ERR_TINT": "#ece9e5",
     "PILL_FAIL_FG": "#ffffff",             # 失败徽章前景（底色用 ERR）
+    # token 失效提醒专用红（仪表盘账号卡片标红；整套装色刻意去饱和，
+    # 这是唯一的彩色，专用于「必须人工处理」的提醒）
+    "ALERT": "#c0392b", "PILL_ALERT_FG": "#ffffff",
     # ghost 按钮
     "BTN_BG": "rgba(255, 255, 255, 0.55)",
     "BTN_BG_HOVER": "rgba(255, 255, 255, 0.78)",
@@ -110,6 +113,7 @@ _DARK = {
     "WAIT": "#a9aeb6", "WAIT_TINT": "#2f3237",
     "ERR": "#ffffff", "ERR_TINT": "#3a3d42",
     "PILL_FAIL_FG": "#1e2023",
+    "ALERT": "#e2635a", "PILL_ALERT_FG": "#2b1512",
     "BTN_BG": "rgba(255, 255, 255, 0.08)",
     "BTN_BG_HOVER": "rgba(255, 255, 255, 0.13)",
     "BTN_BG_PRESSED": "rgba(255, 255, 255, 0.05)",

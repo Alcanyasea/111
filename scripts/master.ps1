@@ -1,7 +1,10 @@
 ﻿# MAA Auto Farm v4 - Dual MAA + 槽位切号（非点击）
 # -NoShutdown: GUI 手动运行传入，跳过「成功后关机」；计划任务不传，行为不变
 # -SkipMAA: 测试切号流程用——跳过 MAA、结束时保留模拟器运行供检查
-param([switch]$NoShutdown, [switch]$SkipMAA)
+# -InfrastCollect: 基建收菜模式——逐个已启用账号只收制造站/贸易站产物（全部房间
+#   skip：不换干员、不用无人机），停用理智/招募/信用/领奖任务，不碰班次计划；
+#   gui.new.json 全程备份、结束恢复
+param([switch]$NoShutdown, [switch]$SkipMAA, [switch]$InfrastCollect)
 $ErrorActionPreference = "Continue"
 $ProgressPreference = "SilentlyContinue"
 
@@ -56,6 +59,7 @@ $venvPython = "D:\1\gui\.venv\Scripts\python.exe"
 $baseSchedulePy = "D:\1\plugins\base_schedule\base_schedule.py"
 $fightStagePy = "D:\1\plugins\fight_stage\fight_stage.py"
 $fiammettaPy = "D:\1\plugins\fiammetta\fiammetta.py"
+$infrastCollectPy = "D:\1\plugins\infrast_collect\infrast_collect.py"
 
 # ---- 读取 GUI 配置（D:\1\config.json），字段缺失时回退上面的硬编码默认 ----
 # config.json 由「MAA 挂机控制台」GUI 生成；文件不存在时流程与旧版完全一致。
@@ -256,6 +260,31 @@ function Invoke-Plugin($pyPath, $tag, $name, $argList, $missNote) {
         return $false
     }
     return $true
+}
+
+# ---- 基建收菜（-InfrastCollect）的 MAA 配置备份/恢复 ----
+# 收菜要临时改 gui.new.json（轮换模式 + 只勾制造/贸易 + 停其他任务），
+# 全程靠备份文件恢复原配置；上次收菜被中断时备份会残留，任何一次运行
+# 启动时先恢复，避免正常挂机沿用「只收菜」的限制配置。
+function Restore-InfrastBackup {
+    foreach ($d in @($maaOfficialDir, $maaBilibiliDir)) {
+        $bak = Join-Path $d "config\gui.new.json.quickbak"
+        $main = Join-Path $d "config\gui.new.json"
+        if (Test-Path $bak) {
+            Copy-Item $bak $main -Force
+            Remove-Item $bak -Force
+            Log ("  [InfrastCollect] 已恢复备份：" + $d)
+        }
+    }
+}
+function Backup-InfrastConfig {
+    foreach ($d in @($maaOfficialDir, $maaBilibiliDir)) {
+        $main = Join-Path $d "config\gui.new.json"
+        if (Test-Path $main) {
+            Copy-Item $main (Join-Path $d "config\gui.new.json.quickbak") -Force
+        }
+    }
+    Log "  [InfrastCollect] 已备份两套 MAA 配置（收菜结束后恢复）"
 }
 
 function Run-Switch($s) {
@@ -478,6 +507,14 @@ if ((Get-Date).Hour -ge 12) {
     }
 }
 
+# 上次基建收菜中断残留的配置备份：任何一次运行启动时先恢复
+Restore-InfrastBackup
+
+if ($InfrastCollect) {
+    Backup-InfrastConfig
+    Log "=== Mode: InfrastCollect（基建收菜：全部房间 skip，只收产物不换班） ==="
+}
+
 if (-not (Start-MuMu)) { Log "FATAL: MuMu failed to start"; Remove-Item $lockFile -Force -ErrorAction SilentlyContinue; exit 1 }
 
 $results = @()
@@ -559,31 +596,36 @@ $total = $accountList.Count
             $ok = $true
         } else {
             $accId = if ($null -ne $acc.id -and [string]$acc.id) { [string]$acc.id } else { "" }
-            # 三个插件走同一套调用模板（Invoke-Plugin）；$accId 缺失时全部跳过
+            # 插件走同一套调用模板（Invoke-Plugin）；$accId 缺失时全部跳过
             if ($accId) {
                 $pluginArgs = @('apply', '--config', $configPath, '--account', $accId, '--server', $accServer)
-                # ---- 第二理智作战关卡：启动 MAA 前按账号写入第二个 FightTask 的关卡 ----
-                $accHasFightPlan = $false
-                $planProp = $acc.PSObject.Properties['second_fight_plan']
-                if ($null -ne $planProp -and $null -ne $planProp.Value) {
-                    $planList = @($planProp.Value)
-                    if ($planList.Count -gt 0) {
+                if ($InfrastCollect) {
+                    # ---- 基建收菜：只写「全 skip 不换班」配置，不碰班次计划/理智/菲亚梅塔 ----
+                    [void](Invoke-Plugin $infrastCollectPy "基建收菜" "基建收菜插件" $pluginArgs "按 MAA 原配置运行（可能换班跑全设施）")
+                } else {
+                    # ---- 第二理智作战关卡：启动 MAA 前按账号写入第二个 FightTask 的关卡 ----
+                    $accHasFightPlan = $false
+                    $planProp = $acc.PSObject.Properties['second_fight_plan']
+                    if ($null -ne $planProp -and $null -ne $planProp.Value) {
+                        $planList = @($planProp.Value)
+                        if ($planList.Count -gt 0) {
+                            $accHasFightPlan = $true
+                        }
+                    }
+                    if (-not $accHasFightPlan -and $null -ne $acc.second_fight_stage -and
+                        [string]$acc.second_fight_stage) {
                         $accHasFightPlan = $true
                     }
+                    if ($accHasFightPlan) {
+                        [void](Invoke-Plugin $fightStagePy "理智关卡" "理智关卡插件" $pluginArgs "第二理智关卡未写入")
+                    }
+                    # ---- 精确基建派驻插件：启动 MAA 前按账号写入自定义计划（未启用则恢复 Rotation）----
+                    [void](Invoke-Plugin $baseSchedulePy "基建插件" "基建插件" ($pluginArgs + @('--batch', $bsBatch)) "继续按 MAA 原配置运行")
+                    # ---- 菲亚梅塔心情恢复：换班前先恢复目标干员心情 ----
+                    # 自定义模式（精确基建）由上面生成的计划 JSON 的 Fiammetta 字段生效；
+                    # 这里写的是常规模式的基建任务参数，两者互斥、都是换班前恢复。
+                    [void](Invoke-Plugin $fiammettaPy "菲亚梅塔" "菲亚梅塔插件" $pluginArgs "菲亚梅塔设置未写入")
                 }
-                if (-not $accHasFightPlan -and $null -ne $acc.second_fight_stage -and
-                    [string]$acc.second_fight_stage) {
-                    $accHasFightPlan = $true
-                }
-                if ($accHasFightPlan) {
-                    [void](Invoke-Plugin $fightStagePy "理智关卡" "理智关卡插件" $pluginArgs "第二理智关卡未写入")
-                }
-                # ---- 精确基建派驻插件：启动 MAA 前按账号写入自定义计划（未启用则恢复 Rotation）----
-                [void](Invoke-Plugin $baseSchedulePy "基建插件" "基建插件" ($pluginArgs + @('--batch', $bsBatch)) "继续按 MAA 原配置运行")
-                # ---- 菲亚梅塔心情恢复：换班前先恢复目标干员心情 ----
-                # 自定义模式（精确基建）由上面生成的计划 JSON 的 Fiammetta 字段生效；
-                # 这里写的是常规模式的基建任务参数，两者互斥、都是换班前恢复。
-                [void](Invoke-Plugin $fiammettaPy "菲亚梅塔" "菲亚梅塔插件" $pluginArgs "菲亚梅塔设置未写入")
             }
             $maaExe = if ($accServer -eq "bilibili") { $maaBilibili } else { $maaOfficial }
             $maaDir = if ($accServer -eq "bilibili") { $maaBilibiliDir } else { $maaOfficialDir }
@@ -596,6 +638,11 @@ $total = $accountList.Count
     }
 
 # Close emulator (config: behavior.close_emulator=false 时跳过；-SkipMAA 测试模式保留模拟器供检查)
+if ($InfrastCollect) {
+    # 收菜结束：恢复收菜前的 MAA 配置（MAA 已被 Run-MAA 结束时杀掉，恢复不会被回写覆盖）
+    Restore-InfrastBackup
+    Log "=== [InfrastCollect] MAA 配置已恢复原状 ==="
+}
 if ($SkipMAA) {
     Log " "
     Log "=== [TEST] -SkipMAA: 模拟器保持运行，便于检查最终登录状态 ==="

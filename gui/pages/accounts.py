@@ -28,7 +28,8 @@ from qfluentwidgets import (BodyLabel, ComboBox, InfoBar, InfoBarPosition,
 
 import config as appconfig
 import theme
-from core import runner
+from core import runner, token_check
+from core.poller import FuncWorker
 from core.util import CREATE_NO_WINDOW, decode_console
 from pages.stage_plan_dialog import show_stage_plan_dialog
 from widgets import (Card, IconBadge, Pill, _label_transparent,
@@ -188,6 +189,7 @@ class CaptureDialog(QDialog):
         self.acc = acc          # None=新增；dict=重新捕获（预填）
         self.page = page        # AccountsPage，成功后刷新列表
         self.worker = None
+        self._token_worker = None
         self._slot = ""
         self._closing = False
         self.setWindowTitle("捕获账号" if acc is None else "重新捕获账号")
@@ -334,9 +336,39 @@ class CaptureDialog(QDialog):
             InfoBar.success("捕获成功", "登录数据已保存到槽位",
                             parent=self.window(), position=InfoBarPosition.TOP_RIGHT,
                             duration=5000)
+            # 官服：立即向官方接口验证新 token（通过即解除仪表盘标红）
+            if self.server_combo.currentIndex() == 0:
+                self._verify_token()
         else:
             self._append_log(">>> 捕获失败（退出码 %d）。可修改后重试；登录态已自动恢复。" % code)
             self._show_error("捕获失败，详见下方日志。可修改后点「开始捕获」重试。")
+
+    def _verify_token(self):
+        """捕获成功后立即探测新 token（<1 秒），结果直接显示在提示行。"""
+        cfg, slot = self.cfg, self._slot
+        self.hint_label.setText("正在验证新 token...")
+        self.hint_label.setStyleSheet("color: %s; font-size: 12px;" % theme.TEXT_3)
+        self._token_worker = FuncWorker(
+            lambda: token_check.check_slot(cfg, slot), parent=self)
+        self._token_worker.done.connect(self._on_token_verified)
+        self._token_worker.start()
+
+    def _on_token_verified(self, res):
+        self._token_worker = None
+        if self._closing:
+            return
+        st = res[1] if (isinstance(res, tuple) and res[0] == "ok") else None
+        if st is None:
+            self.hint_label.setText(
+                "槽位里没有可校验的 SDK 凭据（USER_CACHE），挂机前会再做屏幕级检查")
+            self.hint_label.setStyleSheet("color: %s; font-size: 12px;" % theme.TEXT_3)
+        elif st.get("status") == "ok":
+            self.hint_label.setText("✓ 新 token 验证通过，账号已可正常挂机")
+            self.hint_label.setStyleSheet("color: %s; font-size: 12px;" % theme.OK)
+        else:
+            self.hint_label.setText(
+                "⚠ token 验证未通过（%s），仪表盘会保持标红" % (st.get("detail") or "未知原因"))
+            self.hint_label.setStyleSheet("color: %s; font-size: 12px;" % theme.ERR)
 
     def _apply_result(self):
         """成功：写入 cfg（新增或更新账号项）并保存。"""
@@ -378,6 +410,11 @@ class CaptureDialog(QDialog):
                     self.worker.setParent(None)
                     _detached_threads.append(self.worker)
             self.worker = None
+        # token 验证线程：探测一般 <1 秒，仍在跑就断开父级随进程收尾
+        if self._token_worker is not None and self._token_worker.isRunning():
+            self._token_worker.setParent(None)
+            _detached_threads.append(self._token_worker)
+        self._token_worker = None
         self.reject()
 
     def closeEvent(self, event):
@@ -395,6 +432,7 @@ class AccountDetailDialog(QDialog):
         self.page = page
         self.move_delta = 0   # 关闭窗口后由列表执行的上移/下移（-1/+1）
         self.deleted = False  # 关闭窗口后由列表刷新（删除改变了账号列表）
+        self.export_wanted = False   # 关闭窗口后请求导出该账号（主窗口接手）
         self.setWindowTitle("账号详情 - %s" % (acc.get("label") or ""))
         self.setModal(True)
         self.resize(560, 480)
@@ -445,9 +483,14 @@ class AccountDetailDialog(QDialog):
             "配置该账号精确基建派驻（布局/批次/干员/无人机/菲亚梅塔恢复）")
         self.fight_btn = style_button(PushButton("第二理智候选关卡"))
         self.fight_btn.setToolTip("按 MAA 候选关卡界面修改该账号刷图候选")
+        self.export_btn = style_button(PushButton("导出干员资料"))
+        self.export_btn.setToolTip(
+            "立即为该账号运行 MAA 干员识别（约 3 分钟）：切号 → 更新等待 → "
+            "登录校验 → 识别，结果写入 exports\\。\n与挂机、MAA 更新互斥。")
         self.delete_btn = style_button(PushButton("删除该账号"), "danger")
         for i, b in enumerate((self.capture_btn, self.bs_btn,
-                               self.fight_btn, self.delete_btn)):
+                               self.fight_btn, self.export_btn,
+                               self.delete_btn)):
             b.setMinimumHeight(38)
             grid.addWidget(b, i // 2, i % 2)
         grid.setColumnStretch(0, 1)
@@ -471,7 +514,8 @@ class AccountDetailDialog(QDialog):
         root.addLayout(order_row)
 
         self.hint = BodyLabel(
-            "「启用 / 精确基建 / 导出」开关在账号卡片上直接操作；"
+            "「启用 / 精确基建」开关在账号卡片上直接操作；"
+            "导出干员资料点上方按钮，立即导这一个号（与挂机互斥）。"
             "运行顺序 = 账号列表顺序，列表里按住卡片（或账号名）拖到目标位置即可调整。")
         self.hint.setWordWrap(True)
         self.hint.setStyleSheet("color: %s; font-size: 12px;" % theme.TEXT_3)
@@ -484,6 +528,10 @@ class AccountDetailDialog(QDialog):
         self.capture_btn.clicked.connect(self._on_capture)
         self.bs_btn.clicked.connect(self._on_base_config)
         self.fight_btn.clicked.connect(self._on_fight_plan)
+        self.export_btn.clicked.connect(self._on_export)
+        # 已有导出在跑：按钮直接置灰（其余互斥情形点击时由主窗口提示）
+        if self.page is not None and self.page.export_busy():
+            self.export_btn.setEnabled(False)
         self.up_btn.clicked.connect(lambda: self._on_move(-1))
         self.down_btn.clicked.connect(lambda: self._on_move(1))
         self._refresh_uid()
@@ -491,6 +539,12 @@ class AccountDetailDialog(QDialog):
     def _on_move(self, delta):
         """只记录意图并关窗：列表（卡片的父级）负责真正移动，避免重建时窗口还挂着。"""
         self.move_delta = delta
+        self.accept()
+
+    def _on_export(self):
+        """只记录意图并关窗：导出确认与互斥检查由主窗口接手——
+        模态详情弹窗里再叠确认框/日志窗会双层数，且导出日志窗以主窗口为父。"""
+        self.export_wanted = True
         self.accept()
 
     def _refresh_uid(self):
@@ -614,17 +668,6 @@ class AccountCard(Card):
         self.base_sw.checkedChanged.connect(self._on_base_toggle)
         row.addWidget(self.base_sw, 0, Qt.AlignmentFlag.AlignVCenter)
 
-        self.export_sw = set_switch_checked_gray(SwitchButton())
-        self.export_sw.setOnText("导出")
-        self.export_sw.setOffText("导出")
-        self.export_sw.setText("导出")
-        self.export_sw.setToolTip(
-            "是否把该账号加入「仪表盘 → 导出干员」的导出范围：\n"
-            "导出会逐号切号并跑一遍 MAA 干员识别（约 3 分钟/号），与挂机互斥。")
-        self.export_sw.setChecked(bool(acc.get("export_enabled", False)))
-        self.export_sw.checkedChanged.connect(self._on_export_toggle)
-        row.addWidget(self.export_sw, 0, Qt.AlignmentFlag.AlignVCenter)
-
         self.sw = set_switch_checked_gray(SwitchButton())
         self.sw.setOnText("启用")
         self.sw.setOffText("启用")
@@ -679,9 +722,8 @@ class AccountCard(Card):
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
             pos = event.position().toPoint()
-            # 三个开关自己的区域绝不触发详情/拖动（即使事件冒泡回卡片）
+            # 两个开关自己的区域绝不触发详情/拖动（即使事件冒泡回卡片）
             if not (self.base_sw.geometry().contains(pos)
-                    or self.export_sw.geometry().contains(pos)
                     or self.sw.geometry().contains(pos)):
                 self._press_pos = pos
                 self._maybe_click = True
@@ -718,10 +760,6 @@ class AccountCard(Card):
         self.acc["enabled"] = bool(checked)
         appconfig.save(self.cfg)
 
-    def _on_export_toggle(self, checked):
-        self.acc["export_enabled"] = bool(checked)
-        appconfig.save(self.cfg)
-
     def _on_base_toggle(self, checked):
         bs = self.acc.get("base_schedule")
         if not isinstance(bs, dict):
@@ -739,6 +777,8 @@ class AccountCard(Card):
             self.page.move_relative(self.index, dlg.move_delta)
         if dlg.deleted and self.page is not None:
             self.page.refresh()
+        if dlg.export_wanted and self.page is not None:
+            self.page.export_requested.emit(self.acc)
 
     def _start_rename(self):
         """点击账号名字：原地换成输入框，回车/失焦保存，Esc 取消。"""
@@ -795,9 +835,15 @@ class AccountCard(Card):
 
 
 class AccountsPage(ScrollArea):
+    """账号管理页。export_requested = 详情弹窗里点了「导出干员资料」，
+    由主窗口做互斥检查与确认后启动导出。"""
+
+    export_requested = Signal(object)
+
     def __init__(self, cfg):
         super().__init__()
         self.cfg = cfg
+        self._export_busy = False   # 导出运行中：详情弹窗里的导出按钮置灰
         self.cards = []          # 与 cfg["accounts"] 同序的卡片
         self.card_h = CARD_MIN_H
         self._slot_anis = {}     # 卡片 → 位移/落位动画
@@ -857,6 +903,13 @@ class AccountsPage(ScrollArea):
         dlg = CaptureDialog(self.cfg, None, page=self, parent=self)
         dlg.exec()
         self.refresh()
+
+    def set_export_busy(self, busy):
+        """导出运行状态由主窗口同步：期间新开的详情弹窗导出按钮置灰。"""
+        self._export_busy = bool(busy)
+
+    def export_busy(self):
+        return self._export_busy
 
     def refresh(self):
         # 清空并重建账号卡片（固定每行 2 个，位置由 slot_rect 计算）

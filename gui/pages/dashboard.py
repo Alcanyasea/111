@@ -1,10 +1,11 @@
 # -*- coding: utf-8 -*-
 """仪表盘：3 账号卡片 + 上次运行汇总条 + 班次计划 + 状态与更新合并卡片（1×2）。"""
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QThread, QTimer, Signal
+from PySide6.QtGui import QColor, QPainter, QPen
 from PySide6.QtWidgets import (QDialog, QFrame, QGridLayout, QHBoxLayout,
                                QLabel, QPlainTextEdit, QVBoxLayout, QWidget)
 
@@ -15,7 +16,7 @@ from qfluentwidgets import (BodyLabel, InfoBar, InfoBarPosition, LineEdit,
 import config as appconfig
 import theme
 from core import (adb, export_runner, logparse, maa_update, poller, runner,
-                  scheduler)
+                  scheduler, token_check)
 from pages.export_dialog import ExportDialog
 from widgets import (Card, IconBadge, Pill, big_number, dark_log_qss, inset_row,
                      kv_row, set_switch_checked_gray, style_button,
@@ -35,6 +36,7 @@ def account_specs(cfg):
         specs.append({
             "key": a.get("id") or label,
             "name": label,
+            "slot": a.get("slot") or "",
             "log_names": {label, legacy} if legacy else {label},
             "meta": ("MAA B服 · Bilibili 客户端" if server == "bilibili"
                      else "MAA 官服 · 槽位切号"),
@@ -81,11 +83,13 @@ def kv_pair(key_text, value_text="—"):
 
 
 class AccountCard(Card):
-    """单个账号状态卡片。"""
+    """单个账号状态卡片。token 失效时整卡红描边 + 红徽章提醒，恢复后自动还原。"""
 
     def __init__(self, acc):
         super().__init__()
         self.acc = acc
+        self._token = None      # token_check 状态 dict（无状态文件时为 None）
+        self._alert = False     # token 失效红描边开关
         head = QHBoxLayout()
         head.setSpacing(10)
         head.addWidget(IconBadge(acc["char"]))
@@ -114,9 +118,31 @@ class AccountCard(Card):
             % (theme.TEXT, num, theme.TEXT_2)
         )
 
+    def set_token_status(self, st):
+        """DashboardPage 每个刷新周期把槽位 token 状态塞进来（只存，UI 在 refresh 里刷）。"""
+        self._token = st
+
+    def _set_alert(self, on):
+        if on != self._alert:
+            self._alert = on
+            self.update()   # 触发 paintEvent 重画描边
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        if not self._alert:
+            return
+        # token 失效：卡片红描边盖过发丝轮廓，一眼看出哪个号要重新捕获
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p.setPen(QPen(QColor(theme.ALERT), 2))
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawRoundedRect(self.rect().adjusted(1, 1, -2, -2),
+                          theme.RADIUS_CARD, theme.RADIUS_CARD)
+
     def refresh(self, run, stage, enabled):
         """run: logparse.last_run() 结果；stage: current_stage() 结果（仅运行时非空）。"""
         if not enabled:
+            self._set_alert(False)
             self.pill.set_state("wait", "已禁用")
             self.kv1_key.setText("今日耗时")
             self.kv1_val.setText("—")
@@ -137,6 +163,22 @@ class AccountCard(Card):
         if stage is not None:
             # 别的号在跑：等待中
             self.pill.set_state("wait", "等待中")
+
+        # token 失效（官方接口已探明）：整卡转标红提醒态，覆盖常规运行展示。
+        # 正在跑的号不覆盖（上方阶段分支已 return；login_check 会快速失败并写回状态）
+        st = self._token
+        if st and st.get("status") == "expired":
+            self._set_alert(True)
+            checked = str(st.get("checked_at") or "")
+            self.pill.set_state("alert", "Token 已失效")
+            self.pill.setToolTip("官方接口检查于 %s：%s" % (checked, st.get("detail") or ""))
+            self.kv1_key.setText("上次自检")
+            self.kv1_val.setText(fmt_ts(checked) if checked else "—")
+            self.kv2_key.setText("Token 状态")
+            self.kv2_val.setText('<span style="color:%s">已失效 · 请重新捕获</span>' % theme.ALERT)
+            self.kv2_val.setToolTip(str(st.get("detail") or ""))
+            return
+        self._set_alert(False)
 
         # 展示最近一次已完成的运行结果
         # 优先按 id（key）匹配；日志 SUMMARY 只有账号名，id 匹配不上再按名兜底
@@ -681,6 +723,15 @@ class DashboardPage(ScrollArea):
         self._acc_cols = 2
         self.tick = 0
         self.adb_ok = None
+        # token 自检（官服账号）：启动 3 秒后补检（GUI 错过 4 点时兜底）+
+        # 每天 4:00 定时全检；挂机运行中跳过——login_check 启动 MAA 前会对
+        # 槽位做同源探测并写同一份状态文件，界面只负责读文件标红/恢复
+        self._token_worker = None
+        self._daily_check_timer = QTimer(self)
+        self._daily_check_timer.setSingleShot(True)
+        self._daily_check_timer.timeout.connect(self._on_daily_token_check)
+        self._arm_daily_token_check()
+        QTimer.singleShot(3000, lambda: self._start_token_check(force=False, announce="problems"))
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.refresh)
         self.timer.start(5000)
@@ -689,6 +740,71 @@ class DashboardPage(ScrollArea):
     def set_adb_state(self, ok):
         """后台线程回报的 ADB 在线状态。"""
         self.adb_ok = ok
+
+    # ---------- token 自检 ----------
+
+    def _arm_daily_token_check(self):
+        """瞄准下一个 4:00 的单发定时器，触发后重新武装（每天循环）。"""
+        now = datetime.now()
+        target = now.replace(hour=4, minute=0, second=0, microsecond=0)
+        if target <= now:
+            target += timedelta(days=1)
+        self._daily_check_timer.start(int((target - now).total_seconds() * 1000) + 500)
+
+    def _on_daily_token_check(self):
+        self._start_token_check(force=True, announce="always")
+        self._arm_daily_token_check()
+
+    def _start_token_check(self, force, announce, only_slots=None):
+        if self._token_worker is not None and self._token_worker.isRunning():
+            return
+        if runner.is_running() and announce != "none":
+            return   # 挂机中：login_check 逐号探测并写同一份状态，无需重复跑
+        cfg = self.cfg
+        self._token_worker = poller.FuncWorker(
+            lambda: token_check.check_all(cfg, force=force, only_slots=only_slots),
+            parent=self)
+        self._token_worker.done.connect(
+            lambda res, a=announce: self._on_token_check_done(res, a))
+        self._token_worker.start()
+
+    def _on_token_check_done(self, res, announce):
+        self._token_worker = None
+        if not (isinstance(res, tuple) and res[0] == "ok"):
+            return   # 自检线程异常：状态文件保持原样，下个周期再试
+        summary = res[1]
+        self.refresh()   # 不等下个 5 秒 tick，立即刷新卡片标红/恢复
+        expired = summary.get("expired_labels") or []
+        if expired:
+            InfoBar.warning(
+                "token 自检：%d 个账号 token 已失效" % len(expired),
+                "、".join(expired) + " —— 请在「账号管理」重新捕获登录数据",
+                parent=self.window(), position=InfoBarPosition.TOP_RIGHT,
+                duration=10000)
+        elif announce == "always" and summary.get("checked"):
+            InfoBar.success("token 自检：全部有效", "共检查 %d 个账号" % summary["checked"],
+                            parent=self.window(), position=InfoBarPosition.TOP_RIGHT,
+                            duration=5000)
+
+    def token_check_running(self):
+        """token 自检是否在跑（主窗口关闭前检查）。"""
+        w = self._token_worker
+        return w is not None and w.isRunning()
+
+    def wait_token_check(self, timeout_ms):
+        """等自检线程收尾（HTTP 探测一般 <1 秒，超时按网络故障上限给）。"""
+        w = self._token_worker
+        if w is not None and w.isRunning():
+            w.wait(timeout_ms)
+
+    def detach_token_worker(self):
+        """主窗口关闭时自检线程仍在跑：断开父级随进程收尾，避免线程析构 abort。"""
+        w = self._token_worker
+        self._token_worker = None
+        if w is not None and w.isRunning():
+            w.setParent(None)
+            return w
+        return None
 
     def update_running(self):
         """MAA 一键更新是否正在后台执行（主窗口关闭前检查）。"""
@@ -762,19 +878,13 @@ class DashboardPage(ScrollArea):
         w = self._export_worker
         return w is not None and w.isRunning()
 
-    def export_accounts(self):
-        """本次导出范围：启用且打开「导出」开关的账号。"""
-        return [a for a in self.cfg.get("accounts", [])
-                if a.get("enabled", True) and a.get("export_enabled", False)]
-
-    def start_export(self):
-        """启动导出（调用方已确认互斥与账号列表非空）。"""
+    def start_export(self, acc):
+        """启动单账号导出（调用方已确认互斥与槽位有效）。"""
         script = Path(self.cfg["paths"]["script_dir"]) / "export_operbox.py"
         out_dir = Path(self.cfg["paths"]["script_dir"]).parent / "exports"
-        self._export_dialog = ExportDialog(self.export_accounts(),
-                                           parent=self.window())
-        self._export_worker = export_runner.ExportWorker(script, out_dir,
-                                                         parent=self)
+        self._export_dialog = ExportDialog([acc], parent=self.window())
+        self._export_worker = export_runner.ExportWorker(
+            script, out_dir, only=acc.get("slot"), parent=self)
         self._export_worker.line.connect(self._export_dialog.append)
         self._export_worker.done.connect(self._on_export_done)
         self._export_worker.start()
@@ -842,7 +952,9 @@ class DashboardPage(ScrollArea):
         stage = snap["stage"] if runner.is_running() else None
         enabled_map = {a.get("id") or a.get("label"): bool(a.get("enabled", True))
                        for a in self.cfg.get("accounts", [])}
+        token_map = token_check.read_all(self.cfg)   # mtime 缓存，状态文件没变不重读
         for card in self.acc_cards:
+            card.set_token_status(token_map.get(card.acc.get("slot")))
             card.refresh(run, stage, enabled_map.get(card.acc["key"], True))
         self.last_strip.refresh(run)
         self.status_card.refresh(self.cfg, self.adb_ok)

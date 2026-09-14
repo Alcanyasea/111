@@ -36,6 +36,8 @@ class Pill(QLabel):
             "run": (theme.RUN, theme.RUN_TINT),
             "fail": (theme.PILL_FAIL_FG, theme.ERR),
             "wait": (theme.WAIT, theme.WAIT_TINT),
+            # token 失效提醒：唯一的彩色徽章（用户要求「标红」提醒）
+            "alert": (theme.PILL_ALERT_FG, theme.ALERT),
         }
 
     def set_state(self, kind, text):

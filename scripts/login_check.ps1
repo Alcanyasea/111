@@ -5,7 +5,7 @@
 #         成功后校验 uid 与槽位一致并刷新槽位数据（token 续期）
 #   B服/无凭据/验证码：失败退出，master.ps1 将该号标记失败（防 MAA 对着登录界面空跑）
 # 用法：login_check.ps1 -Server official -Slot official_1 [-ScreenTimeoutSec 120] [-LoginTimeoutSec 180]
-# 退出码：0 已登录（或自动登录成功）；1 失败
+# 退出码：0 已登录/已到标题画面（或自动登录成功）；1 失败
 # 槽位自刷新：确认已登录后把设备上的最新登录数据拉回槽位（游戏处理完首次启动弹窗
 # 会写入 KEY_GLOBAL_VOICE_LANG / KEY_VOICE_LANG_PREF_DONTCG 等标记），否则下次切号
 # 推送旧槽位数据时，配音选择/首次启动弹窗会每次都重新弹出，卡住 MAA。
@@ -15,6 +15,12 @@
 # v3 优化：更新/公告标记与匹配函数收敛到 game_state_lib.ps1（一次行分组匹配全部
 # 标记）；公告页判定同一轮内复用；更新等待只在标记变化时记日志、轮询 6→10 秒；
 # 自动登录提交改用本轮 OCR 结果，删掉重复的二次截图识别。
+# v4 变更：检测到标题画面（开始唤醒按钮 + 已登录账号）不再点击，直接放行交给 MAA——
+# 点开始唤醒、进主界面、关后续弹窗全部由 MAA 的「开始唤醒」任务完成；见过标题后的
+# 稳定帧判定随之移除。阶段 2 自动登录成功回到标题画面时同样不点击、直接判成功。
+# v5 变更：启动 MAA 前先做 token 预检——官服槽位缓存的通行证 token 直接向官方
+# 接口校验（不点开始唤醒即可判明登录态），失效则写 token_status.json（控制台
+# 仪表盘标红提醒）并快速失败；探测失败不阻塞，按屏幕检测继续。
 # ============================================================
 param(
     [string]$Server = "official",
@@ -201,21 +207,76 @@ function Update-SlotData([bool]$ExpectVoiceKeys) {
 
 LogLine ("=== Login check: {0} (slot: {1}) ===" -f $serverName, $(if ($Slot) { $Slot } else { "(无槽位)" }))
 
+# ---- token 预检（仅官服）：不点开始唤醒，直接拿槽位缓存的通行证 token 向
+# 官方接口校验（与游戏点「开始唤醒」时同一判定）：
+#   HTTP 200 / status=0 → 有效，按屏幕检测继续；
+#   HTTP 401 / status=3「登录已过期」→ 失效：写 token_status.json（控制台
+#   仪表盘据此标红提醒）并快速失败——此时点开「开始唤醒」必然落在登录界面，
+#   MAA 无法登录，与其空跑超时不如立刻标失败等重新捕获。
+#   探测失败（网络/接口改版）不阻塞：保留原状态（error 不覆盖 expired，
+#   网络抖动不能洗掉标红），按屏幕检测继续（游戏直接落在登录界面时阶段 2 仍兜底）。
+# B 服走 B 站 SDK，槽位 SDK 配置无 USER_CACHE，自然跳过。
+if ($Server -eq "official" -and $slotDir) {
+    $sdkPrefs = Join-Path $slotDir "shared_prefs\HypergryphSdkPreferences.xml"
+    $tokenStatusPath = Join-Path $slotDir "token_status.json"
+    $tok = $null
+    if (Test-Path $sdkPrefs) {
+        try {
+            $sdkRaw = [System.IO.File]::ReadAllText($sdkPrefs, [System.Text.Encoding]::UTF8)
+            $mUserCache = [regex]::Match($sdkRaw, 'name="USER_CACHE"[^>]*>([^<]*)<')
+            if ($mUserCache.Success) {
+                $ucEntries = [System.Net.WebUtility]::HtmlDecode($mUserCache.Groups[1].Value) | ConvertFrom-Json
+                # 取 lastLoginTime 最新的一条：每次成功登录/跑完回刷槽位后即该槽位账号
+                foreach ($e in @($ucEntries)) {
+                    if ($e.token -and ($null -eq $tok -or [string]$e.lastLoginTime -gt [string]$tok.lastLoginTime)) { $tok = $e }
+                }
+            }
+        } catch {}
+    }
+    if ($tok) {
+        $tStat = "error"; $tDetail = ""
+        try {
+            [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+            $resp = Invoke-RestMethod -Uri ("https://as.hypergryph.com/user/info/v1/basic?token=" + [uri]::EscapeDataString([string]$tok.token)) -TimeoutSec 10 -UseBasicParsing
+            if ("$($resp.status)" -eq "0") { $tStat = "ok"; $tDetail = "token 有效" }
+            else { $tStat = "expired"; $tDetail = [string]$resp.msg }
+        } catch {
+            $code = 0
+            try { $code = [int]$_.Exception.Response.StatusCode } catch {}
+            if ($code -eq 401) { $tStat = "expired"; $tDetail = "登录已过期，请重新登录" }
+            else { $tStat = "error"; $tDetail = "探测失败（HTTP $code）" }
+        }
+        $keepExpired = $false
+        if ($tStat -eq "error" -and (Test-Path $tokenStatusPath)) {
+            try { $keepExpired = ((Get-Content $tokenStatusPath -Raw | ConvertFrom-Json).status -eq "expired") } catch {}
+        }
+        if (-not $keepExpired) {
+            $rec = @{ status = $tStat; checked_at = (Get-Date -Format "yyyy-MM-dd HH:mm:ss"); detail = $tDetail } | ConvertTo-Json
+            [System.IO.File]::WriteAllText($tokenStatusPath, $rec, (New-Object System.Text.UTF8Encoding($false)))
+        }
+        if ($tStat -eq "expired") {
+            LogLine ("ERROR: 官服 token 已失效（{0}），不启动 MAA —— 请在控制台「账号管理」重新捕获该账号" -f $tDetail)
+            exit 1
+        }
+        if ($tStat -eq "ok") { LogLine ("[token] 槽位 token 有效（上次登录 {0}），继续登录检查" -f $tok.lastLoginTime) }
+        else { LogLine ("WARN: token 预检失败（{0}），按屏幕检测继续" -f $tDetail) }
+    }
+}
+
 # ---- 阶段 1：轮询屏幕，区分「已登录」与「登录界面」----
-# 判定顺序：验证码（失败）→ 登录标记（进入阶段 2）→ 启动公告弹窗（优先点右上角 X 关闭）→
-# 主界面特征词（已登录放行）→ 首次启动弹窗（配音选择/确认/同意）→
-# 开始唤醒（点击后继续）→ 见过标题后连续 3 张稳定非登录画面（已登录放行）→
+# 判定顺序：验证码（失败）→ 登录标记（进入阶段 2）→ 游戏更新（只等待不点击）→
+# 启动公告弹窗（优先点右上角 X 关闭）→ 主界面特征词（已登录放行）→
+# 首次启动弹窗（配音选择/确认/同意）→ 开始唤醒（不点击，直接放行）→
 # 盲点兜底（中央、右上角公告关闭位交替）。
 # 每轮只做最多一个动作，动作后下一轮必重新截图检测，不会连续盲点。
 # 「已登录」两条路径：主界面特征词（不依赖标题，B服 无标题直接进主界面）；
-# 标题画面「开始唤醒」登录/未登录都会出现，必须点掉后才能用稳定画面判断
-# （首次启动弹窗也是纯文字画面，不能误判）。
+# 标题画面（开始唤醒按钮 + 已登录账号）出现即放行——槽位推送的登录数据有效时
+# 标题即登录态，点击开始唤醒、进主界面、关后续弹窗都由 MAA 的「开始唤醒」任务
+# 完成，脚本不再代点（v4；token 失效时游戏点开才会出登录界面，此路检测不到）。
 $reachedLogin = $false
 $loginHit = $null
-$sawTitle = $false
 $voiceKept = $false
 $dialogHandled = $false
-$stableCount = 0
 $posCount = 0
 $lastActionAt = (Get-Date)
 $lastAnnounceTapAt = (Get-Date).AddSeconds(-60)
@@ -256,7 +317,6 @@ while ((Get-Date) -lt $deadline) {
     $upNow = $null
     if (-not $annNow) { $upNow = Find-AnyMarker $words $GameUpdateMarkers }
     if ($upNow) {
-        $stableCount = 0
         $posCount = 0
         $lastActionAt = Get-Date
         # 只在命中的标记变化时记日志：更新下载常持续几十分钟，每轮都记会刷屏
@@ -277,7 +337,6 @@ while ((Get-Date) -lt $deadline) {
     # $annNow 与上面更新检测共用同一轮判定结果，不再重复扫描
     $ann = $annNow
     if ($ann) {
-        $stableCount = 0
         if (((Get-Date) - $lastAnnounceTapAt).TotalSeconds -ge 8) {
             Invoke-Tap $announceCloseX $announceCloseY
             $lastAnnounceTapAt = Get-Date
@@ -307,7 +366,6 @@ while ((Get-Date) -lt $deadline) {
         $dialogHandled = $true
         LogLine "[dialog] 勾选「维持原有配置」"
         $lastActionAt = Get-Date
-        $stableCount = 0
         Start-Sleep 3
         continue
     }
@@ -317,7 +375,6 @@ while ((Get-Date) -lt $deadline) {
         $dialogHandled = $true
         LogLine "[dialog] 点击「确认」"
         $lastActionAt = Get-Date
-        $stableCount = 0
         Start-Sleep 3
         continue
     }
@@ -327,31 +384,18 @@ while ((Get-Date) -lt $deadline) {
         $dialogHandled = $true
         LogLine "[dialog] 点击「同意并继续」"
         $lastActionAt = Get-Date
-        $stableCount = 0
         Start-Sleep 3
         continue
     }
+    # 标题画面（开始唤醒按钮 + 已登录账号）：不点击，直接放行交给 MAA。
+    # 点开始唤醒、进主界面、关后续弹窗都由 MAA 的「开始唤醒」任务完成；
+    # 原先点完还要等 3 张稳定帧，每号白等 10~25 秒。
     $wake = Find-OcrText $words "开始唤醒"
     if ($wake) {
-        Invoke-Tap $wake.X $wake.Y
-        LogLine ("[screen] 标题画面，点击开始唤醒 ({0},{1})" -f $wake.X, $wake.Y)
-        $sawTitle = $true
-        $lastActionAt = Get-Date
-        $stableCount = 0
-        Start-Sleep 4
-        continue
+        LogLine "[screen] 标题画面（开始唤醒可见），视为已登录，直接放行交给 MAA"
+        Update-SlotData $dialogHandled | Out-Null
+        exit 0
     }
-    if ((@($words).Count -gt 0) -and $sawTitle) {
-        $stableCount++
-        if ($stableCount -ge 3) {
-            LogLine "[screen] 已过标题且画面稳定无登录界面标记，视为已登录"
-            Update-SlotData $dialogHandled | Out-Null
-            exit 0
-        }
-        Start-Sleep 3
-        continue
-    }
-    $stableCount = 0
     # 无可识别动作时的盲点兜底。节奏分档：有文字画面（剧情对白/未知页面/公告弹窗
     # 改版）20 秒一次，无文字画面（加载/过渡）45 秒一次。首次点中央（推进标题画面/
     # 剧情对白，历史行为不变），之后中央、右上角 X 交替：公告弹窗页签文字若改版
@@ -475,8 +519,7 @@ while ((Get-Date) -lt $deadline5) {
     if (-not $lm2) {
         $wake = Find-OcrText $w "开始唤醒"
         if ($wake) {
-            Invoke-Tap $wake.X $wake.Y
-            LogLine "[login] 已回标题画面，登录成功"
+            LogLine "[login] 已回标题画面（开始唤醒可见），登录成功"
             $loggedIn = $true
             break
         }

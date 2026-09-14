@@ -41,6 +41,11 @@ _win = None
 _detached_threads = []
 
 
+def _export_threads_alive():
+    """是否有已脱离旧窗口、仍在跑的导出线程（主题换窗时 closeEvent 转出的）。"""
+    return any(w.isRunning() for w in _detached_threads)
+
+
 def swap_window():
     """用当前配置重建主窗口（主题切换用）：先建新窗再关旧窗，桌面不留空。
 
@@ -84,7 +89,6 @@ class HeaderBar(QWidget):
         super().__init__(parent)
         self.setObjectName("headerBar")
         self.setStyleSheet("QWidget#headerBar { background: transparent; }")
-        self._exporting = False   # 导出运行中：update_state 刷新也不重新启用按钮
         lay = QHBoxLayout(self)
         lay.setContentsMargins(2, 6, 2, 4)
         lay.setSpacing(12)
@@ -101,33 +105,30 @@ class HeaderBar(QWidget):
             % (theme.FONT_FAMILY, theme.font_stack(12.5), theme.TEXT_2))
         lay.addWidget(self.detail, 0, Qt.AlignmentFlag.AlignVCenter)
         lay.addStretch(1)
-        self.export_btn = style_button(PushButton("导出干员"))
-        self.export_btn.setToolTip(
-            "逐账号运行 MAA 干员识别，把 roster 导出到 exports\\。\n"
-            "只导「账号管理」里打开「导出」开关的账号；与挂机互斥。")
         self.stop_btn = style_button(PushButton("停止"))
         self.stop_btn.setToolTip(
             "停止当前挂机（结束 master.ps1 与 MAA 进程），\n"
             "并取消已排定的自动关机。空闲时不可用。")
+        self.collect_btn = style_button(PushButton("基建收菜"))
+        self.collect_btn.setToolTip(
+            "对所有已启用账号只收基建：制造站产物 + 贸易站订单。\n"
+            "全部房间 skip：不更换干员、不换班，不动班次计划。\n"
+            "不跑理智/招募等任务，结束后自动恢复 MAA 配置。\n"
+            "与挂机互斥，运行中不可用。")
         self.run_btn = style_primary_button(PrimaryPushButton("立即运行"))
         self.run_btn.setToolTip(
             "手动运行一次完整挂机流程（启动模拟器 → 切号 → 跑 MAA → 关模拟器）。\n"
             "手动运行即使成功也不会自动关机。")
-        lay.addWidget(self.export_btn)
         lay.addWidget(self.stop_btn)
+        lay.addWidget(self.collect_btn)
         lay.addWidget(self.run_btn)
 
     def update_state(self, running, detail):
         self.chip.set_state("run" if running else "ok", "运行中" if running else "空闲")
         self.detail.setText(detail)
         self.stop_btn.setEnabled(running)
+        self.collect_btn.setEnabled(not running)
         self.run_btn.setEnabled(not running)
-        self.export_btn.setEnabled(not running and not self._exporting)
-
-    def set_export_busy(self, busy):
-        """导出运行中：锁住导出按钮（结束后由 _on_export_done 解锁）。"""
-        self._exporting = busy
-        self.export_btn.setEnabled(not busy)
 
 
 class MainWindow(FluentWindow):
@@ -193,8 +194,9 @@ class MainWindow(FluentWindow):
         self.hBoxLayout.removeItem(self.widgetLayout)
         self.titleBar.raise_()
         self.header.run_btn.clicked.connect(self.on_run)
+        self.header.collect_btn.clicked.connect(self.on_collect)
         self.header.stop_btn.clicked.connect(self.on_stop)
-        self.header.export_btn.clicked.connect(self.on_export)
+        self.accounts_p.export_requested.connect(self.on_export_account)
         self.dash.export_done.connect(self._on_export_done)
         # 关闭 qfluentwidgets 自带的「向上弹出」切换动画，改用 iOS 式
         # 推入/推出过渡（_on_page_changed 里按切换方向滑入滑出）
@@ -384,12 +386,18 @@ class MainWindow(FluentWindow):
         detached = self.dash.detach_export_worker()
         if detached is not None:
             _detached_threads.append(detached)
+        # token 自检线程（HTTP 探测）先等收尾；极端网络卡死时转后台，
+        # 结果仍会写入槽位状态文件，下次打开控制台照常显示
+        self.dash.wait_token_check(12000)
+        token_w = self.dash.detach_token_worker()
+        if token_w is not None:
+            _detached_threads.append(token_w)
         event.accept()
 
     def on_run(self):
         if runner.is_running():
             return
-        if self.dash.export_running():
+        if self.dash.export_running() or _export_threads_alive():
             InfoBar.warning("干员导出进行中", "导出正在占用模拟器，请等导出结束后再运行挂机",
                             parent=self, position=InfoBarPosition.TOP_RIGHT,
                             duration=5000)
@@ -400,7 +408,48 @@ class MainWindow(FluentWindow):
                         parent=self, position=InfoBarPosition.TOP_RIGHT, duration=4000)
         self.refresh_status()
 
-    def on_export(self):
+    def on_collect(self):
+        """基建收菜：逐个已启用账号只收制造站/贸易站，不碰班次计划。"""
+        if runner.is_running():
+            return
+        if self.dash.update_running():
+            InfoBar.warning("MAA 更新进行中", "请等更新结束后再收菜",
+                            parent=self, position=InfoBarPosition.TOP_RIGHT,
+                            duration=4000)
+            return
+        if self.dash.export_running() or _export_threads_alive():
+            InfoBar.warning("干员导出进行中", "导出正在占用模拟器，请等导出结束后再收菜",
+                            parent=self, position=InfoBarPosition.TOP_RIGHT,
+                            duration=5000)
+            return
+        enabled = [a for a in self.cfg.get("accounts", []) if a.get("enabled", True)]
+        if not enabled:
+            InfoBar.warning("没有可收菜的账号", "所有账号均已停用；请在「账号管理」启用至少一个",
+                            parent=self, position=InfoBarPosition.TOP_RIGHT,
+                            duration=5000)
+            return
+        names = "、".join(str(a.get("label") or a.get("id")) for a in enabled)
+        box = MessageBox(
+            "基建收菜",
+            "将依次对 %d 个已启用账号（%s）只收取基建产物：\n\n"
+            "· 切号 → 登录检查 → MAA 只进制造站/贸易站收产物与订单\n"
+            "· 不换班：所有房间 skip，完全不更换干员，也不动班次计划\n"
+            "· 不跑理智/招募/信用等任务\n"
+            "· 结束后自动恢复 MAA 配置，模拟器照常关闭\n\n"
+            "确定开始吗？" % (len(enabled), names),
+            self)
+        box.yesButton.setText("开始收菜")
+        box.cancelButton.setText("取消")
+        if not box.exec():
+            return
+        runner.clear_stale_lock()
+        runner.start_collect(self.cfg)
+        InfoBar.success("已启动基建收菜", "日志页可查看实时进度",
+                        parent=self, position=InfoBarPosition.TOP_RIGHT, duration=4000)
+        self.refresh_status()
+
+    def on_export_account(self, acc):
+        """账号详情里点了「导出干员资料」：互斥检查 + 确认后只导这一个号。"""
         if runner.is_running():
             InfoBar.warning("挂机运行中", "请先停止挂机再导出干员资料",
                             parent=self, position=InfoBarPosition.TOP_RIGHT,
@@ -411,33 +460,32 @@ class MainWindow(FluentWindow):
                             parent=self, position=InfoBarPosition.TOP_RIGHT,
                             duration=4000)
             return
-        if self.dash.export_running():
+        if self.dash.export_running() or _export_threads_alive():
             InfoBar.info("导出进行中", "干员导出正在后台执行，请稍候",
                          parent=self, position=InfoBarPosition.TOP_RIGHT,
                          duration=4000)
             return
-        accs = self.dash.export_accounts()
-        if not accs:
-            InfoBar.warning("没有可导出的账号",
-                            "在「账号管理」页打开账号的「导出」开关后重试",
+        name = acc.get("label") or acc.get("slot") or "?"
+        if not acc.get("slot"):
+            InfoBar.warning("无法导出「%s」" % name,
+                            "该账号没有登录数据槽位，请先重新捕获登录数据",
                             parent=self, position=InfoBarPosition.TOP_RIGHT,
                             duration=5000)
             return
-        names = "、".join(a.get("label") or a.get("slot") or "?" for a in accs)
         box = MessageBox(
             "导出干员资料",
-            "将为以下 %d 个账号逐号运行 MAA 干员识别（约 3 分钟/号）：\n\n%s\n\n"
-            "期间会占用模拟器，不能同时运行挂机；结果写入 exports\\。\n确定开始吗？"
-            % (len(accs), names), self)
+            "将为「%s」运行 MAA 干员识别（约 3 分钟）：\n\n"
+            "切号 → 更新等待 → 登录校验 → 识别，结果写入 exports\\。\n"
+            "期间会占用模拟器，不能同时运行挂机。\n确定开始吗？" % name, self)
         box.yesButton.setText("开始导出")
         box.cancelButton.setText("取消")
         if not box.exec():
             return
-        self.header.set_export_busy(True)
-        self.dash.start_export()
+        self.accounts_p.set_export_busy(True)
+        self.dash.start_export(acc)
 
     def _on_export_done(self, ok, summary):
-        self.header.set_export_busy(False)
+        self.accounts_p.set_export_busy(False)
         if ok:
             InfoBar.success("干员资料导出完成", summary,
                             parent=self, position=InfoBarPosition.TOP_RIGHT,

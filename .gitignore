@@ -46,3 +46,6 @@ build/dist/
 
 # Local tool cache
 .codely-cli/
+
+# Generated collect plan (infrast_collect 插件每次 apply 重新生成)
+plugins/infrast_collect/collect_plan.json

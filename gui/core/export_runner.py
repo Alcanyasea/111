@@ -21,14 +21,17 @@ class ExportWorker(QThread):
     line = Signal(str)
     done = Signal(bool, str)
 
-    def __init__(self, script_path, out_dir, parent=None):
+    def __init__(self, script_path, out_dir, only=None, parent=None):
         super().__init__(parent)
         self.script_path = str(script_path)
         self.out_dir = str(out_dir)
+        self.only = str(only) if only else None   # 槽位名：只导这一个账号
         self.proc = None
 
     def run(self):
         cmd = [sys.executable, self.script_path, "--out-dir", self.out_dir]
+        if self.only:
+            cmd += ["--only", self.only]
         env = dict(os.environ, PYTHONIOENCODING="utf-8")
         try:
             self.proc = subprocess.Popen(

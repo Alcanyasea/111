@@ -86,18 +86,14 @@ def clear_stale_lock():
     return pid
 
 
-def start(cfg):
-    """启动 master.ps1（GUI 触发，带 -NoShutdown），返回 Popen 对象。
-
-    早期语法错误等 stderr 重定向到 debug\\master_gui_launch.log，
-    否则无处可去、排障只能靠日志文件。
-    """
+def _launch_master(cfg, extra_args):
+    """启动 master.ps1 的 GUI 侧公共路径：extra_args 为运行模式参数。"""
     global _proc_ref
     master = Path(cfg["paths"]["script_dir"]) / "master.ps1"
     args = [
         "powershell", "-NoProfile", "-ExecutionPolicy", "Bypass",
-        "-File", str(master), "-NoShutdown",
-    ]
+        "-File", str(master),
+    ] + list(extra_args)
     debug_dir = SCRIPT_DIR / "debug"
     try:
         debug_dir.mkdir(parents=True, exist_ok=True)
@@ -112,6 +108,24 @@ def start(cfg):
     )
     _proc_ref = (p, out_f)
     return p
+
+
+def start(cfg):
+    """启动 master.ps1（GUI 触发，带 -NoShutdown），返回 Popen 对象。
+
+    早期语法错误等 stderr 重定向到 debug\\master_gui_launch.log，
+    否则无处可去、排障只能靠日志文件。
+    """
+    return _launch_master(cfg, ["-NoShutdown"])
+
+
+def start_collect(cfg):
+    """启动基建收菜：master.ps1 -InfrastCollect（手动按钮，同样不关机）。
+
+    与常规挂机共用 master.lock，天然互斥；逐个已启用账号只收制造站/
+    贸易站，master.ps1 负责备份并在结束恢复 MAA 配置。
+    """
+    return _launch_master(cfg, ["-InfrastCollect", "-NoShutdown"])
 
 
 def stop():
