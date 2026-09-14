@@ -21,6 +21,12 @@
 # v5 变更：启动 MAA 前先做 token 预检——官服槽位缓存的通行证 token 直接向官方
 # 接口校验（不点开始唤醒即可判明登录态），失效则写 token_status.json（控制台
 # 仪表盘标红提醒）并快速失败；探测失败不阻塞，按屏幕检测继续。
+# v6 变更：game_update_wait.ps1 并入本脚本（每号省去其 45 秒探测窗 + 一次进程
+# 启动）——更新标记等待原本就在阶段 1 里，补齐其独有能力：更新失败文字快速
+# 失败、系统包安装器前台检测（强制更新重装）、检测到更新后禁用盲点（防打断
+# 下载/安装）。轮询收紧：有文字 3→2 秒、无文字 6→4 秒、动作后 3→2 秒、
+# 主界面确认间隔 2→1 秒、OCR 失败重试 5→3 秒、盲点 20/45→15/30 秒、
+# 公告点击限频 8→6 秒。实测顺利路径每号 ~37 秒 → ~25 秒，另省更新检查 ~52 秒。
 # ============================================================
 param(
     [string]$Server = "official",
@@ -94,6 +100,19 @@ $inGameMarkers = @("公开招募", "干员寻访", "理智", "终端", "采购�
 # 页签标记与游戏更新标记在 game_state_lib.ps1（与 game_update_wait.ps1 共用）
 $announceCloseX = 1215
 $announceCloseY = 75
+# 更新失败/卡住文字：更新出现过之后检测到即快速失败（原 game_update_wait 的判定）
+$failMarkers = @(
+    "更新下载失败", "下载更新失败", "下载失败", "更新失败",
+    "更新资源损坏", "获取资源更新配置失败", "网络连接已断开",
+    "安装更新失败", "安装失败", "储存空间不足", "存储空间不足"
+)
+# 强制更新走系统包安装器时的前台包名特征（OCR 常识别不到安装进度）
+$installPkgPattern = 'packageinstaller|permissioncontroller'
+
+function Is-InstallerForeground {
+    $out = (& $adb -s $device shell "dumpsys window windows" 2>$null) -join "`n"
+    return ($out -match $installPkgPattern)
+}
 
 function Invoke-Tap($x, $y) {
     & $adb -s $device shell "input tap $x $y" 2>$null | Out-Null
@@ -264,10 +283,10 @@ if ($Server -eq "official" -and $slotDir) {
 }
 
 # ---- 阶段 1：轮询屏幕，区分「已登录」与「登录界面」----
-# 判定顺序：验证码（失败）→ 登录标记（进入阶段 2）→ 游戏更新（只等待不点击）→
-# 启动公告弹窗（优先点右上角 X 关闭）→ 主界面特征词（已登录放行）→
-# 首次启动弹窗（配音选择/确认/同意）→ 开始唤醒（不点击，直接放行）→
-# 盲点兜底（中央、右上角公告关闭位交替）。
+# 判定顺序：验证码（失败）→ 登录标记（进入阶段 2）→ 游戏更新/安装器（只等待，
+# 失败文字快速失败）→ 启动公告弹窗（优先点右上角 X 关闭）→ 主界面特征词（已登录
+# 放行）→ 首次启动弹窗（配音选择/确认/同意）→ 开始唤醒（不点击，直接放行）→
+# 盲点兜底（中央、右上角公告关闭位交替；检测到过更新后禁用）。
 # 每轮只做最多一个动作，动作后下一轮必重新截图检测，不会连续盲点。
 # 「已登录」两条路径：主界面特征词（不依赖标题，B服 无标题直接进主界面）；
 # 标题画面（开始唤醒按钮 + 已登录账号）出现即放行——槽位推送的登录数据有效时
@@ -284,11 +303,12 @@ $blindPokeCount = 0
 $lastPngHash = ""
 $lastWords = $null
 $lastUpdateMarker = ""
+$updateSeen = $false
 $deadline = (Get-Date).AddSeconds($ScreenTimeoutSec)
 # 游戏更新等待的最长封顶：超过后即使仍在更新也不断延长（防止无限卡死）
 $hardDeadline = (Get-Date).AddHours(2)
 while ((Get-Date) -lt $deadline) {
-    if (-not (Ocr-Screenshot $adb $device $png)) { Start-Sleep 5; continue }
+    if (-not (Ocr-Screenshot $adb $device $png)) { Start-Sleep 3; continue }
     # 画面与上一轮完全相同（静态加载/弹窗/表单）→ 复用上一轮 OCR 结果，
     # 跳过最耗时的重复识别；画面一变立即重新识别。
     $pngHash = (Get-FileHash $png -Algorithm MD5 -ErrorAction SilentlyContinue).Hash
@@ -312,15 +332,27 @@ while ((Get-Date) -lt $deadline) {
     }
     if ($lm) { $reachedLogin = $true; $loginHit = $lm; break }
     # 游戏更新中：只等待不点击（下载/安装期间盲点可能打断更新）；
-    # 公告页的“更新公告”正文用公告分支处理，不在此误判
+    # 公告页的“更新公告”正文用公告分支处理，不在此误判。
+    # 系统包安装器（强制更新重装客户端）OCR 识别不到，用前台包名补判；
+    # 只在更新已出现过或画面无文字时查（每轮 dumpsys 有 adb 开销）
     $annNow = Find-AnyMarker $words $AnnounceMarkers
     $upNow = $null
     if (-not $annNow) { $upNow = Find-AnyMarker $words $GameUpdateMarkers }
-    if ($upNow) {
+    $installing = $false
+    if (-not $annNow -and -not $upNow -and ($updateSeen -or (@($words).Count -eq 0))) {
+        $installing = Is-InstallerForeground
+    }
+    if ($upNow -or $installing) {
+        $updateSeen = $true
         $posCount = 0
         $lastActionAt = Get-Date
         # 只在命中的标记变化时记日志：更新下载常持续几十分钟，每轮都记会刷屏
-        if ($upNow.Name -ne $lastUpdateMarker) {
+        if ($installing) {
+            if ($lastUpdateMarker -ne "(安装器)") {
+                LogLine "[update] 检测到系统包安装器，正在安装/重新安装客户端，等待完成（不点击）"
+                $lastUpdateMarker = "(安装器)"
+            }
+        } elseif ($upNow.Name -ne $lastUpdateMarker) {
             LogLine ("[update] 检测到游戏更新界面（{0}），等待更新完成（不点击）" -f $upNow.Name)
             $lastUpdateMarker = $upNow.Name
         }
@@ -332,17 +364,26 @@ while ((Get-Date) -lt $deadline) {
         Start-Sleep 10
         continue
     }
+    # 更新出现过之后：失败提示立即报错（原 game_update_wait 的快速失败判定；
+    # 探测阶段不判——游戏刚启动的「网络连接已断开」可能是瞬时抖动，可恢复）
+    if ($updateSeen -and -not $annNow) {
+        $fail = Find-AnyMarker $words $failMarkers
+        if ($fail) {
+            LogLine ("ERROR: 游戏更新失败（{0}），请检查网络/存储后重试" -f $fail.Name)
+            exit 1
+        }
+    }
     # 启动公告弹窗：优先处理（盖住主界面时特征词不可见，且要求优先关弹窗再看主界面）。
-    # 点右上角 X 关闭；限频 8 秒防连点；不刷新 $lastActionAt，若 X 点不掉仍保留盲点兜底
+    # 点右上角 X 关闭；限频 6 秒防连点；不刷新 $lastActionAt，若 X 点不掉仍保留盲点兜底
     # $annNow 与上面更新检测共用同一轮判定结果，不再重复扫描
     $ann = $annNow
     if ($ann) {
-        if (((Get-Date) - $lastAnnounceTapAt).TotalSeconds -ge 8) {
+        if (((Get-Date) - $lastAnnounceTapAt).TotalSeconds -ge 6) {
             Invoke-Tap $announceCloseX $announceCloseY
             $lastAnnounceTapAt = Get-Date
             LogLine ("[dialog] 公告弹窗（{0}），点击右上角关闭" -f $ann.Name)
         }
-        Start-Sleep 3
+        Start-Sleep 2
         continue
     }
     # 主界面特征词（B服 无标题直接进主界面；官服正常路径也能提前放行）
@@ -354,7 +395,7 @@ while ((Get-Date) -lt $deadline) {
             Update-SlotData $dialogHandled | Out-Null
             exit 0
         }
-        Start-Sleep 2
+        Start-Sleep 1
         continue
     }
     $posCount = 0
@@ -366,7 +407,7 @@ while ((Get-Date) -lt $deadline) {
         $dialogHandled = $true
         LogLine "[dialog] 勾选「维持原有配置」"
         $lastActionAt = Get-Date
-        Start-Sleep 3
+        Start-Sleep 2
         continue
     }
     $confirm = Find-OcrText $words "确认"
@@ -375,7 +416,7 @@ while ((Get-Date) -lt $deadline) {
         $dialogHandled = $true
         LogLine "[dialog] 点击「确认」"
         $lastActionAt = Get-Date
-        Start-Sleep 3
+        Start-Sleep 2
         continue
     }
     $agree = Find-OcrText $words "同意并继续"
@@ -384,7 +425,7 @@ while ((Get-Date) -lt $deadline) {
         $dialogHandled = $true
         LogLine "[dialog] 点击「同意并继续」"
         $lastActionAt = Get-Date
-        Start-Sleep 3
+        Start-Sleep 2
         continue
     }
     # 标题画面（开始唤醒按钮 + 已登录账号）：不点击，直接放行交给 MAA。
@@ -397,11 +438,12 @@ while ((Get-Date) -lt $deadline) {
         exit 0
     }
     # 无可识别动作时的盲点兜底。节奏分档：有文字画面（剧情对白/未知页面/公告弹窗
-    # 改版）20 秒一次，无文字画面（加载/过渡）45 秒一次。首次点中央（推进标题画面/
+    # 改版）15 秒一次，无文字画面（加载/过渡）30 秒一次。首次点中央（推进标题画面/
     # 剧情对白，历史行为不变），之后中央、右上角 X 交替：公告弹窗页签文字若改版
-    # 识别不到，X 盲点仍能关掉常见弹窗（X 位置实测固定）
-    $pokeAfterSec = if ((@($words).Count -gt 0)) { 20 } else { 45 }
-    if (((Get-Date) - $lastActionAt).TotalSeconds -gt $pokeAfterSec) {
+    # 识别不到，X 盲点仍能关掉常见弹窗（X 位置实测固定）。
+    # 检测到过游戏更新后禁用盲点：下载/安装期间乱点可能打断更新，只等标记变化
+    $pokeAfterSec = if ((@($words).Count -gt 0)) { 15 } else { 30 }
+    if (-not $updateSeen -and ((Get-Date) - $lastActionAt).TotalSeconds -gt $pokeAfterSec) {
         if ($blindPokeCount -gt 0 -and ($blindPokeCount % 2 -eq 0)) {
             Invoke-Tap $announceCloseX $announceCloseY
             LogLine "[screen] 无可识别动作，盲点右上角公告关闭位兜底"
@@ -412,9 +454,9 @@ while ((Get-Date) -lt $deadline) {
         $blindPokeCount++
         $lastActionAt = Get-Date
     }
-    # 轮询节奏自适应：无动作且画面有文字 → 3 秒（弹窗/对白可能变化，保持较快响应）；
-    # 画面完全没有文字（加载/过渡）→ 6 秒（游戏本身需要时间，频繁识别没有收益）
-    if ((@($words).Count -gt 0)) { Start-Sleep 3 } else { Start-Sleep 6 }
+    # 轮询节奏自适应：无动作且画面有文字 → 2 秒（弹窗/对白可能变化，保持较快响应）；
+    # 画面完全没有文字（加载/过渡）→ 4 秒（游戏本身需要时间，频繁识别没有收益）
+    if ((@($words).Count -gt 0)) { Start-Sleep 2 } else { Start-Sleep 4 }
 }
 if (-not $reachedLogin) {
     LogLine ("ERROR: {0} 秒内无法确认登录状态" -f $ScreenTimeoutSec)

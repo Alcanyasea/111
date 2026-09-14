@@ -52,9 +52,10 @@ $scriptDir = "D:\1\scripts"
 # MAA 无进展判超时（秒）：该账号这段时间内没有任何战斗/任务推进才放弃；
 # 正常打关（一直有进战斗/结算心跳）不再受单号总时长限制。
 $maaStallTimeoutSec = 180
-# 游戏更新检测：默认开启；切号后若游戏在更新，先等更新完成再登录校验
-$waitGameUpdate = $true
-$updateTimeoutSec = 5400   # 默认最长等待 90 分钟
+# 游戏更新检测：v1.3.2 起并入 login_check.ps1（同一套更新标记等待 + 失败快判 +
+# 安装器检测），不再单独跑 game_update_wait.ps1（每号省 ~50 秒探测窗）。
+# behavior.wait_game_update / timeouts.game_update_min 保留读取但不再单独使用，
+# 更新等待上限由 login_check 的 hardDeadline（2 小时）兜底。
 $venvPython = "D:\1\gui\.venv\Scripts\python.exe"
 $baseSchedulePy = "D:\1\plugins\base_schedule\base_schedule.py"
 $fightStagePy = "D:\1\plugins\fight_stage\fight_stage.py"
@@ -89,12 +90,8 @@ if ($config) {
         # 键名沿用 maa_min（GUI「运行设置」同键），语义为“无进展判超时分钟数”
         $maaStallTimeoutSec = [int]$config.timeouts.maa_min * 60
     }
-    if ($null -ne $config.timeouts -and $null -ne $config.timeouts.game_update_min) {
-        $updateTimeoutSec = [int]$config.timeouts.game_update_min * 60
-    }
-    if ($null -ne $config.behavior -and $null -ne $config.behavior.wait_game_update) {
-        $waitGameUpdate = [bool]$config.behavior.wait_game_update
-    }
+    # game_update_min / wait_game_update 曾用于独立的 game_update_wait.ps1，
+    # 该脚本已并入 login_check.ps1（见文件头注释），这里不再读取
     $closeEmulator = $true
     if ($null -ne $config.behavior -and $null -ne $config.behavior.close_emulator) {
         $closeEmulator = [bool]$config.behavior.close_emulator
@@ -570,19 +567,9 @@ $total = $accountList.Count
             continue
         }
 
-        # ---- 游戏更新检测：若游戏在更新（资源下载/校验/安装/重装），
-        # 先等更新完成再开始登录校验，避免对着更新界面误操作 ----
-        if ($waitGameUpdate) {
-            $updOk = ((Run-Switch ("game_update_wait.ps1 -Server {0} -TimeoutSec {1}" -f $accServer, $updateTimeoutSec)) -eq 0)
-            if (-not $updOk) {
-                Log ("  [ERROR] 游戏更新未完成（超过 " + [int]($updateTimeoutSec / 60) + " 分钟），跳过该账号，请手动确认游戏可正常进入后重试")
-                $results += [PSCustomObject]@{ Account=$accLabel; OK=$false; Duration="0 min" }
-                continue
-            }
-        }
-
         # ---- 登录校验：屏幕级确认游戏已登录；未登录自动输账号密码（官服）并刷新槽位 ----
-        # 文件级 uid 校验通过不代表游戏真在登录态（token 失效时会回到登录界面）
+        # 文件级 uid 校验通过不代表游戏真在登录态（token 失效时会回到登录界面）。
+        # 游戏更新等待（含失败快判/安装器检测）自 v1.3.2 起由 login_check 内部处理
         $loginOk = ((Run-Switch ("login_check.ps1 -Server {0} -Slot {1}" -f $accServer, $accSlot)) -eq 0)
         if (-not $loginOk) {
             Log "  [ERROR] Login check failed - 请在控制台重新捕获该账号"
