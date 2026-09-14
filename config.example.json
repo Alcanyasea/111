@@ -60,13 +60,21 @@
             {
                 "time": "04:00",
                 "enabled": true,
-                "shutdown": true
+                "shutdown": true,
+                "accounts": []
             },
             {
                 "time": "16:00",
                 "enabled": true,
-                "shutdown": false
+                "shutdown": false,
+                "accounts": []
             }
         ]
+    },
+    "notify": {
+        "enabled": false,
+        "provider": "serverchan",
+        "key": "",
+        "on_success": false
     }
 }

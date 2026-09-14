@@ -9,8 +9,8 @@ from PySide6.QtGui import QColor, QPainter, QPen
 from PySide6.QtWidgets import (QDialog, QFrame, QGridLayout, QHBoxLayout,
                                QLabel, QPlainTextEdit, QVBoxLayout, QWidget)
 
-from qfluentwidgets import (BodyLabel, InfoBar, InfoBarPosition, LineEdit,
-                            MessageBox, PrimaryPushButton, PushButton,
+from qfluentwidgets import (BodyLabel, CheckBox, InfoBar, InfoBarPosition,
+                            LineEdit, MessageBox, PrimaryPushButton, PushButton,
                             ScrollArea, SwitchButton)
 
 import config as appconfig
@@ -18,8 +18,8 @@ import theme
 from core import (adb, export_runner, logparse, maa_update, poller, runner,
                   scheduler, token_check)
 from pages.export_dialog import ExportDialog
-from widgets import (Card, IconBadge, Pill, big_number, dark_log_qss, inset_row,
-                     kv_row, set_switch_checked_gray, style_button,
+from widgets import (Card, IconBadge, Pill, BusyStrip, big_number, dark_log_qss,
+                     inset_row, kv_row, set_switch_checked_gray, style_button,
                      style_primary_button, style_scroll_area)
 
 LEGACY_LOG_NAMES = {"official1": "Official 1", "official2": "Official 2",
@@ -110,6 +110,9 @@ class AccountCard(Card):
         self.vbox.addSpacing(4)
         row2, self.kv2_key, self.kv2_val = kv_pair("最近运行")
         self.vbox.addWidget(row2)
+        # 运行中光带：该账号正在跑时亮起（refresh 里控制启停）
+        self.busy = BusyStrip()
+        self.vbox.addWidget(self.busy)
 
     def _set_kv1_big(self, num):
         self.kv1_val.setText(
@@ -143,6 +146,7 @@ class AccountCard(Card):
         """run: logparse.last_run() 结果；stage: current_stage() 结果（仅运行时非空）。"""
         if not enabled:
             self._set_alert(False)
+            self.busy.stop()
             self.pill.set_state("wait", "已禁用")
             self.kv1_key.setText("今日耗时")
             self.kv1_val.setText("—")
@@ -153,12 +157,14 @@ class AccountCard(Card):
         if stage is not None and stage["account"] in self.acc["log_names"]:
             # 正在跑这个号
             self.pill.set_state("run", "运行中")
+            self.busy.start()
             self.kv1_key.setText("当前进度")
             self.kv1_val.setText(stage["stage"])
             self.kv2_key.setText("已用时间")
             elapsed = stage.get("elapsed_min")
             self.kv2_val.setText("%s 分钟" % elapsed if elapsed is not None else "—")
             return
+        self.busy.stop()
 
         if stage is not None:
             # 别的号在跑：等待中
@@ -222,10 +228,11 @@ class ScheduleCard(Card):
         self._edits = {}
         self._apply_worker = None   # 计划任务同步的后台线程（改完行立即生效）
 
-        # 列标题：与下方每行控件同宽对齐（44 班次 / 68 时间 / 75 启用 / 75 关机 / 56 操作）
+        # 列标题：与下方每行控件同宽对齐（44 班次 / 68 时间 / 75 启用 / 75 关机 / 110 账号 / 56 操作）
         head = QHBoxLayout()
         head.setSpacing(6)
-        for text, w in (("班次", 44), ("时间", 68), ("启用", 75), ("关机", 75), ("操作", 56)):
+        for text, w in (("班次", 44), ("时间", 68), ("启用", 75), ("关机", 75),
+                        ("账号", 110), ("操作", 56)):
             hlab = _label(text, size="12px", color=theme.TEXT_3)
             hlab.setFixedWidth(w)
             head.addWidget(hlab)
@@ -257,7 +264,7 @@ class ScheduleCard(Card):
             "新时间立即写入计划任务。")
         self.add_btn.clicked.connect(self._on_add)
         bar.addWidget(self.add_btn)
-        hint = _label("格式 HH:MM（00:00 即 24点）；增删改立即生效",
+        hint = _label("格式 HH:MM（00:00 即 24点）；「账号」选每班跑哪些号；增删改立即生效",
                       size="12px", color=theme.TEXT_3)
         bar.addWidget(hint)
         bar.addStretch(1)
@@ -317,6 +324,12 @@ class ScheduleCard(Card):
             "开启：该时间点运行成功后 60 秒自动关机（无需确认）。\n"
             "关闭：跑完保持开机。失败时一律不关机，只弹窗提示。\n"
             "手动点「立即运行」不受此开关影响，永不关机。")
+        acc_btn = style_button(PushButton(self._acc_btn_text(entry)), small=True)
+        acc_btn.setFixedWidth(110)
+        acc_btn.setToolTip(
+            "勾选该班次要运行的账号（如 4:00 全跑、16:00 只跑个别号）。\n"
+            "「全部账号」= 跟随账号管理页列表，以后新增的号也会跑。")
+        acc_btn.clicked.connect(lambda _=False, e=entry: self._on_accounts(e))
         del_btn = style_button(PushButton("删除"), "danger", small=True)
         del_btn.setFixedWidth(56)
         del_btn.setToolTip(
@@ -328,6 +341,7 @@ class ScheduleCard(Card):
         row.addWidget(edit)
         row.addWidget(sw)
         row.addWidget(shutdown_sw)
+        row.addWidget(acc_btn)
         row.addWidget(del_btn)
         row.addStretch(1)
         self.rows_layout.addWidget(row_widget)
@@ -419,6 +433,77 @@ class ScheduleCard(Card):
         appconfig.save(self.cfg)
         self.refresh_from_cfg()
 
+    def _acc_btn_text(self, entry):
+        """班次行「账号」按钮文案：未筛选 = 全部账号；勾选了部分 = N 个账号。"""
+        ids = {str(x) for x in (entry.get("accounts") or [])}
+        accs = self.cfg.get("accounts") or []
+        if not ids:
+            return "全部账号"
+        n = sum(1 for a in accs if str(a.get("id")) in ids)
+        if n == 0 or n >= len(accs):
+            return "全部账号"
+        return "%d 个账号" % n
+
+    def _on_accounts(self, entry):
+        """选择该班次要跑的账号：全选（或不勾）都归一为「全部账号」（accounts=[]），
+        动态跟随账号列表；只勾部分则该班次只跑这几个号。
+
+        只改 config.json 的 schedule.times，不增删触发时间，无需同步计划任务。
+        """
+        accs = [a for a in (self.cfg.get("accounts") or []) if isinstance(a, dict)]
+        if not accs:
+            InfoBar.warning("暂无账号", "请先在「账号管理」页添加账号",
+                            parent=self.window(), position=InfoBarPosition.TOP_RIGHT,
+                            duration=4000)
+            return
+        selected = {str(x) for x in (entry.get("accounts") or [])}
+        dlg = QDialog(self.window())
+        dlg.setWindowTitle("班次账号 - %s（%s）" % (
+            appconfig.batch_name(entry["time"]), entry["time"]))
+        dlg.setModal(True)
+        dlg.setStyleSheet("QDialog { background: %s; }" % theme.BG)
+        v = QVBoxLayout(dlg)
+        v.setContentsMargins(20, 18, 20, 16)
+        v.setSpacing(10)
+        hint = BodyLabel(
+            "勾选该班次要运行的账号：全部勾选（或不勾）=「全部账号」，以后新增的号\n"
+            "也会跟着跑；只勾部分则该班次只跑这几个号，其余号在该班次不运行。")
+        hint.setWordWrap(True)
+        hint.setStyleSheet("color: %s; font-size: 12px;" % theme.TEXT_3)
+        v.addWidget(hint)
+        boxes = []
+        for a in accs:
+            cb = CheckBox(a.get("label") or a.get("id") or "?")
+            cb.setChecked(not selected or str(a.get("id")) in selected)
+            v.addWidget(cb)
+            boxes.append(cb)
+        btns = QHBoxLayout()
+        btns.setSpacing(10)
+        cancel_btn = style_button(PushButton("取消"))
+        ok_btn = style_primary_button(PrimaryPushButton("确定"))
+        btns.addStretch(1)
+        btns.addWidget(cancel_btn)
+        btns.addWidget(ok_btn)
+        v.addLayout(btns)
+        ok_btn.clicked.connect(dlg.accept)
+        cancel_btn.clicked.connect(dlg.reject)
+        if not dlg.exec():
+            return
+        checked = [str(a.get("id")) for a, cb in zip(accs, boxes) if cb.isChecked()]
+        if len(checked) == len(accs):
+            checked = []   # 全选 → 存空列表：保持「全部账号」语义，跟随以后的新号
+        entry["accounts"] = checked
+        appconfig.save(self.cfg)
+        self.refresh_from_cfg()
+        if checked:
+            by_id = {str(a.get("id")): (a.get("label") or a.get("id") or "?")
+                     for a in accs}
+            tip = "该班次只跑：%s" % "、".join(by_id.get(i, i) for i in checked)
+        else:
+            tip = "该班次按「全部账号」运行"
+        InfoBar.info("已更新班次账号", tip, parent=self.window(),
+                     position=InfoBarPosition.TOP_RIGHT, duration=4000)
+
     def _on_delete(self, entry):
         times = self._entries()
         if entry in times:
@@ -451,7 +536,7 @@ class ScheduleCard(Card):
 
 class LastRunStrip(Card):
     """上次运行汇总：并入账号卡片区（账号各卡片展示各自结果，
-    这里只保留全局的总耗时 / 模拟器关闭情况，标题右侧为运行时间）。"""
+    这里保留全局的总耗时 / 模拟器关闭情况，以及逐号结果圆点 + 通过率）。"""
 
     def __init__(self):
         super().__init__("上次运行", "")
@@ -462,7 +547,53 @@ class LastRunStrip(Card):
         self.emu_pill = Pill("—")
         bar.addWidget(self.emu_pill, 0, Qt.AlignmentFlag.AlignBottom)
         bar.addStretch(1)
+        # 逐号结果圆点 + 通过率（右侧对齐，无记录时隐藏）
+        self.dots_host = QWidget()
+        self.dots_layout = QHBoxLayout(self.dots_host)
+        self.dots_layout.setContentsMargins(0, 0, 0, 0)
+        self.dots_layout.setSpacing(6)
+        bar.addWidget(self.dots_host, 0, Qt.AlignmentFlag.AlignBottom)
+        self.passed_val = _label("", size="12px", color=theme.TEXT_2)
+        bar.addWidget(self.passed_val, 0, Qt.AlignmentFlag.AlignBottom)
+        self.dots_host.hide()
+        self.passed_val.hide()
         self.vbox.addLayout(bar)
+
+    def _refresh_dots(self, run):
+        """重建逐号结果圆点（每次刷新重建，账号数量级小，开销可忽略）。"""
+        while self.dots_layout.count():
+            item = self.dots_layout.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.deleteLater()
+        accounts = (run or {}).get("accounts") or []
+        for a in accounts:
+            ok = a.get("ok")
+            skipped = a.get("skipped")
+            dot = QLabel("●")
+            color = theme.TEXT_3 if skipped else (theme.OK if ok else theme.ERR)
+            dot.setStyleSheet("color: %s; font-size: 11px; background: transparent;"
+                              % color)
+            tip = "%s · %s" % (a.get("name"), "跳过" if skipped
+                               else ("成功" if ok else "失败"))
+            if a.get("dur") is not None:
+                tip += " · %g 分钟" % a["dur"]
+            dot.setToolTip(tip)
+            self.dots_layout.addWidget(dot)
+        if accounts:
+            passed = sum(1 for a in accounts if a.get("ok"))
+            failed = len(accounts) - passed
+            if failed:
+                self.passed_val.setText(
+                    '<span style="color:%s">%d/%d 成功 · %d 失败</span>'
+                    % (theme.ERR, passed, len(accounts), failed))
+            else:
+                self.passed_val.setText("%d/%d 成功" % (passed, len(accounts)))
+            self.dots_host.show()
+            self.passed_val.show()
+        else:
+            self.dots_host.hide()
+            self.passed_val.hide()
 
     def refresh(self, run):
         if self.hint_label is not None:
@@ -477,6 +608,7 @@ class LastRunStrip(Card):
             self.emu_pill.set_state("wait", "模拟器未关闭")
         else:
             self.emu_pill.set_state("wait", "—")
+        self._refresh_dots(run)
 
 
 class StatusCard(Card):
@@ -589,7 +721,9 @@ class StatusCard(Card):
                 parts.append('<span style="color:%s">%s ✗ RunDirectly 已关闭</span>'
                              % (theme.ERR, label))
             else:
-                parts.append('<span style="color:%s">%s 配置缺失</span>' % (theme.WARN, label))
+                # 配置缺失/解析失败：中性灰提示（不误报为错误，tooltip 有详情）
+                parts.append('<span style="color:%s">%s 配置缺失</span>'
+                             % (theme.TEXT_2, label))
         self.rd_val.setText(" · ".join(parts))
         self.rd_val.setToolTip("\n".join(tips))
 

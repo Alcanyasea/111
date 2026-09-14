@@ -433,6 +433,7 @@ class AccountDetailDialog(QDialog):
         self.move_delta = 0   # 关闭窗口后由列表执行的上移/下移（-1/+1）
         self.deleted = False  # 关闭窗口后由列表刷新（删除改变了账号列表）
         self.export_wanted = False   # 关闭窗口后请求导出该账号（主窗口接手）
+        self.switch_wanted = False   # 关闭窗口后请求切换到该账号（主窗口接手）
         self.setWindowTitle("账号详情 - %s" % (acc.get("label") or ""))
         self.setModal(True)
         self.resize(560, 480)
@@ -487,10 +488,14 @@ class AccountDetailDialog(QDialog):
         self.export_btn.setToolTip(
             "立即为该账号运行 MAA 干员识别（约 3 分钟）：切号 → 更新等待 → "
             "登录校验 → 识别，结果写入 exports\\。\n与挂机、MAA 更新互斥。")
+        self.switch_btn = style_button(PushButton("切换到此账号"))
+        self.switch_btn.setToolTip(
+            "只切到该账号并完成登录校验，不跑日常任务：\n"
+            "结束后模拟器保持运行，可直接手动游戏。\n与挂机、收菜、导出互斥。")
         self.delete_btn = style_button(PushButton("删除该账号"), "danger")
         for i, b in enumerate((self.capture_btn, self.bs_btn,
                                self.fight_btn, self.export_btn,
-                               self.delete_btn)):
+                               self.switch_btn, self.delete_btn)):
             b.setMinimumHeight(38)
             grid.addWidget(b, i // 2, i % 2)
         grid.setColumnStretch(0, 1)
@@ -529,6 +534,7 @@ class AccountDetailDialog(QDialog):
         self.bs_btn.clicked.connect(self._on_base_config)
         self.fight_btn.clicked.connect(self._on_fight_plan)
         self.export_btn.clicked.connect(self._on_export)
+        self.switch_btn.clicked.connect(self._on_switch)
         # 已有导出在跑：按钮直接置灰（其余互斥情形点击时由主窗口提示）
         if self.page is not None and self.page.export_busy():
             self.export_btn.setEnabled(False)
@@ -545,6 +551,11 @@ class AccountDetailDialog(QDialog):
         """只记录意图并关窗：导出确认与互斥检查由主窗口接手——
         模态详情弹窗里再叠确认框/日志窗会双层数，且导出日志窗以主窗口为父。"""
         self.export_wanted = True
+        self.accept()
+
+    def _on_switch(self):
+        """只记录意图并关窗：互斥检查与确认由主窗口接手（同导出的考虑）。"""
+        self.switch_wanted = True
         self.accept()
 
     def _refresh_uid(self):
@@ -779,6 +790,8 @@ class AccountCard(Card):
             self.page.refresh()
         if dlg.export_wanted and self.page is not None:
             self.page.export_requested.emit(self.acc)
+        if dlg.switch_wanted and self.page is not None:
+            self.page.switch_requested.emit(self.acc)
 
     def _start_rename(self):
         """点击账号名字：原地换成输入框，回车/失焦保存，Esc 取消。"""
@@ -836,9 +849,10 @@ class AccountCard(Card):
 
 class AccountsPage(ScrollArea):
     """账号管理页。export_requested = 详情弹窗里点了「导出干员资料」，
-    由主窗口做互斥检查与确认后启动导出。"""
+    switch_requested = 点了「切换到此账号」；都由主窗口做互斥检查与确认后启动。"""
 
     export_requested = Signal(object)
+    switch_requested = Signal(object)
 
     def __init__(self, cfg):
         super().__init__()

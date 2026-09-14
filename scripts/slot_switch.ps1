@@ -8,6 +8,8 @@
 # 登录缓存，失败只告警不中断；每个文件重试一次，重试前重新读取设备 uid/上下文
 # （模拟器刚启动时 SELinux 上下文可能未带齐分类后缀），并先建好 /data/local/tmp
 # 暂存目录（模拟器重启会清空该目录）。
+# uid 校验为轮询式（每 3 秒，一致即通过、不一致早失败、超 WaitSec 判失败）：
+# 推入的数据即刻可读，正常路径 ~3 秒过校验，不再固定等 WaitSec。
 # 用法：slot_switch.ps1 -Server official -Slot official_2 [-WaitSec 25] [-NoVerify]
 #   -Server: official | bilibili
 #   -Slot:   槽位目录名；目录不存在时仅做客户端切换（不推数据）
@@ -57,8 +59,10 @@ if ($Slot) { $slotDir = Join-Path $accountsDir $Slot }
 Write-Output ("$(Timestamp) [Switch] -> {0} (slot: {1})" -f $serverName, $(if ($Slot) { $Slot } else { "(无槽位,仅切换客户端)" }))
 
 # ---- adb root（MuMu 自带；失败则后面推送会失败并报错）----
+# root 两次：首次可能触发 adbd 重启，第二次确认已处于 root（重复调用无副作用）
 & $adb -s $device root 2>$null | Out-Null
 Start-Sleep 2
+& $adb -s $device root 2>$null | Out-Null
 & $adb -s $device connect $device 2>$null | Out-Null
 Start-Sleep 1
 
@@ -128,34 +132,53 @@ if ($slotDir -and (Test-Path $slotDir)) {
 # ---- 启动目标客户端 ----
 Write-Output ("$(Timestamp) [Switch] Launching $serverName app...")
 & $adb -s $device shell "monkey -p $pkg -c android.intent.category.LAUNCHER 1" 2>$null | Out-Null
-Start-Sleep $WaitSec
 
 # ---- 校验：设备上 playerprefs 的 uid 与槽位 uid.txt 一致 ----
+# 轮询式校验（每 3 秒拉回一次比对）：推入的数据文件即刻可读，uid 一致
+# （绝大多数路径）首个轮询就通过，不再固定等 WaitSec——每号省 15~20 秒；
+# 读到 uid 但与期望不一致立即失败；到 WaitSec 仍读不到 uid 才判超时失败
+# （语义与旧版固定等待后校验完全一致）。画面级的登录确认由 login_check 负责。
+$verifyRan = $false
 if (-not $NoVerify -and $slotOk -and $slotDir -and (Test-Path $slotDir)) {
     $uidFile = Join-Path $slotDir "uid.txt"
     $ppName = (Get-ChildItem (Join-Path $slotDir "shared_prefs") -Filter "*.v2.playerprefs.xml" -ErrorAction SilentlyContinue | Select-Object -First 1).Name
     if ($uidFile -and (Test-Path $uidFile) -and $ppName) {
+        $verifyRan = $true
         $expectUid = (Get-Content $uidFile -Raw -ErrorAction SilentlyContinue).Trim()
         # 拉回本地解析，避免 adb shell 引号转义问题
         $tmpPp = Join-Path $env:TEMP "ark_verify_pp.xml"
+        $swVerify = [System.Diagnostics.Stopwatch]::StartNew()
         $devUid = ""
-        & $adb -s $device pull ("/data/data/{0}/shared_prefs/{1}" -f $pkg, $ppName) $tmpPp 2>$null | Out-Null
-        if (Test-Path $tmpPp) {
-            try {
-                $ppContent = [System.IO.File]::ReadAllText($tmpPp, [System.Text.Encoding]::UTF8)
-                $m = [regex]::Match($ppContent, 'name="u8sdk_cached_uid">([0-9]+)')
-                if ($m.Success) { $devUid = $m.Groups[1].Value }
-            } catch {}
+        while ($swVerify.Elapsed.TotalSeconds -lt $WaitSec) {
+            $devUid = ""
+            # 先清残留（异常中断可能留下上一账号的临时文件，误读会错判）
             Remove-Item $tmpPp -Force -ErrorAction SilentlyContinue
+            & $adb -s $device pull ("/data/data/{0}/shared_prefs/{1}" -f $pkg, $ppName) $tmpPp 2>$null | Out-Null
+            if (Test-Path $tmpPp) {
+                try {
+                    $ppContent = [System.IO.File]::ReadAllText($tmpPp, [System.Text.Encoding]::UTF8)
+                    $m = [regex]::Match($ppContent, 'name="u8sdk_cached_uid">([0-9]+)')
+                    if ($m.Success) { $devUid = $m.Groups[1].Value }
+                } catch {}
+                Remove-Item $tmpPp -Force -ErrorAction SilentlyContinue
+            }
+            # 一致 → 通过；读到 uid 但不一致 → 推送异常/数据被覆盖，早失败不空等
+            if ($devUid) { break }
+            Start-Sleep 3
         }
         if ($devUid -and $devUid -eq $expectUid) {
-            Write-Output ("$(Timestamp) [Switch] Verify OK: uid=$devUid")
+            Write-Output ("$(Timestamp) [Switch] Verify OK: uid=$devUid ({0:N0}s)" -f $swVerify.Elapsed.TotalSeconds)
         } else {
             Write-Output ("$(Timestamp) [Switch] VERIFY FAIL: expected uid=$expectUid, device uid=[$devUid]")
             Write-Output ("$(Timestamp) [Switch] 游戏可能停留在登录界面（token 失效或推送异常）")
             $slotOk = $false
         }
     }
+}
+if (-not $verifyRan) {
+    # 无校验路径（无槽位 / -NoVerify / 槽位缺 uid 文件）：保留固定等待，
+    # 给客户端拉起留出时间（有校验路径的就绪由 login_check 轮询确认）
+    Start-Sleep $WaitSec
 }
 
 if ($slotOk) {

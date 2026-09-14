@@ -11,7 +11,7 @@ from qfluentwidgets import (BodyLabel, ComboBox, InfoBar, InfoBarPosition,
 
 import config as appconfig
 import theme
-from core import cleanup, maa_setup, poller, runner
+from core import cleanup, maa_setup, notify, poller, runner
 from widgets import (Card, set_switch_checked_gray, style_button,
                      style_primary_button, style_scroll_area)
 
@@ -37,6 +37,7 @@ class SettingsPage(ScrollArea):
         self._on_theme_change = on_theme_change
         self._apply_worker = None    # 计划任务同步后台线程（保存后）
         self._setup_worker = None    # MAA 服务器配置后台线程（可能复制整套目录）
+        self._notify_worker = None   # 测试推送后台线程（HTTP 最长十几秒）
         self.view = QWidget()
         self.setWidget(self.view)
         self.setWidgetResizable(True)
@@ -97,17 +98,22 @@ class SettingsPage(ScrollArea):
                        "分钟（默认 3）：期间没有战斗/任务推进才放弃该号")
         self.launch_spin = SpinBox()
         self.launch_spin.setRange(10, 600)
-        self._card_row(self.conn_card, "启动等待", self.launch_spin, "秒（模拟器启动上限）")
+        self._card_row(self.conn_card, "启动等待", self.launch_spin,
+                       "秒（模拟器启动等待上限，开机就绪即继续，通常等不满）")
         self.update_spin = SpinBox()
         self.update_spin.setRange(5, 360)
         self._card_row(self.conn_card, "更新等待上限", self.update_spin,
-                       "分钟（游戏更新下载/安装最长等待，默认 90）")
+                       "分钟（干员导出前等待游戏更新的上限；挂机的更新等待内置于登录检查，上限 2 小时）")
         self.behavior_card = Card("行为开关")
         self.close_emu_sw = set_switch_checked_gray(SwitchButton())
         self._card_row(self.behavior_card, "完成后关模拟器", self.close_emu_sw)
-        self.wait_update_sw = set_switch_checked_gray(SwitchButton())
-        self._card_row(self.behavior_card, "游戏更新检测", self.wait_update_sw,
-                       "检测到游戏更新时先等更新完成，再开始登录检测")
+        update_hint = BodyLabel(
+            "游戏更新等待已内置于登录检查：检测到更新界面/安装器只等待不点击，"
+            "最长 2 小时；更新失败会立即判该号失败，不空跑")
+        update_hint.setStyleSheet("color: %s; font-size: 12px;" % theme.TEXT_3)
+        update_hint.setWordWrap(True)
+        self.behavior_card.vbox.addWidget(update_hint)
+        self.behavior_card.vbox.addSpacing(10)
         shutdown_hint = BodyLabel(
             "每个启动时间的「关机」开关在仪表盘「班次计划」中设置（60 秒倒计时）")
         shutdown_hint.setStyleSheet("color: %s; font-size: 12px;" % theme.TEXT_3)
@@ -179,6 +185,48 @@ class SettingsPage(ScrollArea):
         self._card_row(self.upd_card, "更新超时", self.upd_timeout,
                        "分钟（单套 MAA 下载+安装的等待上限）")
         root.addWidget(self.upd_card)
+
+        # ---- 通知推送 ----
+        self.notify_card = Card("通知推送")
+        notify_hint = BodyLabel(
+            "挂机/收菜结束后把结果推送到手机：失败必推，成功按下方开关。"
+            "无人值守（自动关机）场景下，失败不再只有本机弹窗。")
+        notify_hint.setWordWrap(True)
+        notify_hint.setStyleSheet("color: %s; font-size: 12px;" % theme.TEXT_3)
+        self.notify_card.vbox.addWidget(notify_hint)
+        self.notify_card.vbox.addSpacing(10)
+        self.notify_sw = set_switch_checked_gray(SwitchButton())
+        self._card_row(self.notify_card, "启用推送", self.notify_sw)
+        self.notify_provider = ComboBox()
+        self.notify_provider.addItems(
+            ["Server酱（sct.ftqq.com）", "PushPlus（pushplus.plus）", "企业微信机器人"])
+        self.notify_provider.setFixedWidth(260)
+        self._card_row(self.notify_card, "推送渠道", self.notify_provider)
+        self.notify_key = LineEdit()
+        self.notify_key.setClearButtonEnabled(False)
+        self.notify_key.setPlaceholderText("SendKey / token / webhook 地址或 key")
+        key_row = QHBoxLayout()
+        key_row.setSpacing(10)
+        key_row.addWidget(_row_label("推送密钥"))
+        key_row.addWidget(self.notify_key, 1)
+        self.notify_card.vbox.addLayout(key_row)
+        self.notify_card.vbox.addSpacing(10)
+        self.notify_success_sw = set_switch_checked_gray(SwitchButton())
+        self._card_row(self.notify_card, "成功也推送", self.notify_success_sw,
+                       "关闭时只有失败才推送")
+        test_row = QHBoxLayout()
+        test_row.setSpacing(10)
+        self.notify_test_btn = style_button(PushButton("发送测试"))
+        self.notify_test_btn.setToolTip(
+            "用上方当前填写的渠道与密钥发一条测试消息（不必先保存）。\n"
+            "Server酱填 SendKey；PushPlus 填 token；企业微信机器人填 webhook 地址或 key。")
+        self.notify_test_btn.clicked.connect(self.on_notify_test)
+        test_row.addWidget(_row_label("测试"))
+        test_row.addWidget(self.notify_test_btn)
+        test_row.addStretch(1)
+        self.notify_card.vbox.addLayout(test_row)
+        self.notify_card.vbox.addSpacing(10)
+        root.addWidget(self.notify_card)
 
         # ---- 数据清理 ----
         self.clean_card = Card("数据清理")
@@ -253,7 +301,6 @@ class SettingsPage(ScrollArea):
         self.launch_spin.setValue(int(source["timeouts"].get("launch_wait_sec", 120)))
         self.update_spin.setValue(int(source["timeouts"].get("game_update_min", 90)))
         self.close_emu_sw.setChecked(bool(source["behavior"].get("close_emulator", True)))
-        self.wait_update_sw.setChecked(bool(source["behavior"].get("wait_game_update", True)))
         c = source.get("cleanup") or {}
         self.clean_auto_sw.setChecked(bool(c.get("auto", True)))
         self.clean_interval.setValue(int(c.get("interval_days", 7)))
@@ -263,6 +310,13 @@ class SettingsPage(ScrollArea):
         self.vpn_edit.setText(str(u.get("vpn_exe", "")))
         self.port_spin.setValue(int(u.get("proxy_port", 7897)))
         self.upd_timeout.setValue(int(u.get("timeout_min", 15)))
+        n = source.get("notify") or {}
+        self.notify_sw.setChecked(bool(n.get("enabled", False)))
+        self.notify_provider.setCurrentIndex(
+            notify.PROVIDERS.index(n["provider"])
+            if n.get("provider") in notify.PROVIDERS else 0)
+        self.notify_key.setText(str(n.get("key") or ""))
+        self.notify_success_sw.setChecked(bool(n.get("on_success", False)))
 
     def _refresh_clean_hint(self):
         self.clean_hint.setText(cleanup.last_run_text(self.cfg))
@@ -289,7 +343,6 @@ class SettingsPage(ScrollArea):
         self.cfg["timeouts"]["launch_wait_sec"] = self.launch_spin.value()
         self.cfg["timeouts"]["game_update_min"] = self.update_spin.value()
         self.cfg["behavior"]["close_emulator"] = self.close_emu_sw.isChecked()
-        self.cfg["behavior"]["wait_game_update"] = self.wait_update_sw.isChecked()
         c = self.cfg.setdefault("cleanup", {})
         c["auto"] = self.clean_auto_sw.isChecked()
         c["interval_days"] = self.clean_interval.value()
@@ -298,6 +351,11 @@ class SettingsPage(ScrollArea):
         u["vpn_exe"] = self.vpn_edit.text().strip()
         u["proxy_port"] = self.port_spin.value()
         u["timeout_min"] = self.upd_timeout.value()
+        n = self.cfg.setdefault("notify", {})
+        n["enabled"] = self.notify_sw.isChecked()
+        n["provider"] = notify.PROVIDERS[self.notify_provider.currentIndex()]
+        n["key"] = self.notify_key.text().strip()
+        n["on_success"] = self.notify_success_sw.isChecked()
 
         try:
             appconfig.save(self.cfg)
@@ -333,6 +391,52 @@ class SettingsPage(ScrollArea):
             InfoBar.warning("配置已保存，但计划任务未更新", msg,
                             parent=self.window(), position=InfoBarPosition.TOP_RIGHT,
                             duration=6000)
+
+    def on_notify_test(self):
+        """发送测试推送：用界面当前值（不先保存），HTTP 放后台线程。"""
+        if self._notify_worker is not None and self._notify_worker.isRunning():
+            InfoBar.info("测试推送进行中", "请等上一次测试结束",
+                         parent=self.window(), position=InfoBarPosition.TOP_RIGHT,
+                         duration=3000)
+            return
+        if not self.notify_sw.isChecked():
+            InfoBar.warning("推送未启用", "先打开「启用推送」开关再测试",
+                            parent=self.window(), position=InfoBarPosition.TOP_RIGHT,
+                            duration=4000)
+            return
+        key = self.notify_key.text().strip()
+        if not key:
+            InfoBar.warning("缺少推送密钥", "请先填写所选渠道的密钥",
+                            parent=self.window(), position=InfoBarPosition.TOP_RIGHT,
+                            duration=4000)
+            return
+        provider = notify.PROVIDERS[self.notify_provider.currentIndex()]
+        name = self.notify_provider.currentText().split("（")[0]
+        self.notify_test_btn.setEnabled(False)
+        self._notify_worker = poller.FuncWorker(
+            lambda: notify.send_test(provider, key), self)
+        self._notify_worker.done.connect(
+            lambda res, n=name: self._on_notify_test_done(res, n))
+        self._notify_worker.start()
+
+    def _on_notify_test_done(self, res, name):
+        self.notify_test_btn.setEnabled(True)
+        self._notify_worker = None
+        state, payload = res if isinstance(res, tuple) else ("error", "未知错误")
+        if state != "ok":
+            InfoBar.error("测试推送失败", str(payload),
+                          parent=self.window(), position=InfoBarPosition.TOP_RIGHT,
+                          duration=8000)
+            return
+        ok, summary = payload
+        if ok:
+            InfoBar.success("测试推送已发送", "请检查手机是否收到（%s）" % name,
+                            parent=self.window(), position=InfoBarPosition.TOP_RIGHT,
+                            duration=5000)
+        else:
+            InfoBar.warning("测试推送失败", summary or "请检查渠道与密钥",
+                            parent=self.window(), position=InfoBarPosition.TOP_RIGHT,
+                            duration=8000)
 
     def on_clean(self):
         if runner.is_running():

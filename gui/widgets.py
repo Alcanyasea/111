@@ -6,7 +6,7 @@ macOS 风格约定（配色不变，只管形状与排版）：
 - 按钮 8px 圆角、ghost 描边式；破坏性操作用黑字细描边，不用彩色
 - 徽章 Pill 全圆角、中等字重
 """
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QColor, QLinearGradient, QPainter, QPen
 from PySide6.QtWidgets import (QGraphicsDropShadowEffect, QHBoxLayout, QLabel,
                                QVBoxLayout, QWidget, QSizePolicy)
@@ -327,3 +327,54 @@ def set_switch_checked_gray(switch, text=None):
         switch.setOffText(text)
         switch.setText(text)
     return switch
+
+
+class BusyStrip(QWidget):
+    """不确定进度光带（3px）：运行中的页头/账号卡片底部用，让「正在跑」可见。
+
+    主题色在 paintEvent 里实时读取（主题切换重建窗口后天然生效）；
+    start/stop 控制定时器，隐藏时不占用布局空间。
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFixedHeight(3)
+        self._pos = 0.0
+        self._timer = QTimer(self)
+        self._timer.timeout.connect(self._tick)
+        self.hide()
+
+    def _tick(self):
+        self._pos = (self._pos + 0.012) % 1.0   # 30fps 下约 2.8 秒扫一趟
+        self.update()
+
+    def start(self):
+        if not self._timer.isActive():
+            self._timer.start(33)
+        self.show()
+
+    def stop(self):
+        self._timer.stop()
+        self.hide()
+
+    def paintEvent(self, event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        w = self.width()
+        p.setPen(Qt.PenStyle.NoPen)
+        hair = theme.HAIRLINE
+        p.setBrush(QColor(hair[0], hair[1], hair[2], 36))
+        p.drawRoundedRect(0, 0, w, 3, 1.5, 1.5)
+        bar_w = max(28, int(w * 0.2))
+        travel = w + 2 * bar_w
+        x = -bar_w + self._pos * travel
+        grad = QLinearGradient(x, 0, x + bar_w, 0)
+        c0 = QColor(theme.ACCENT)
+        c0.setAlpha(30)
+        c1 = QColor(theme.ACCENT)
+        c1.setAlpha(210)
+        grad.setColorAt(0.0, c0)
+        grad.setColorAt(0.5, c1)
+        grad.setColorAt(1.0, c0)
+        p.setBrush(grad)
+        p.drawRoundedRect(int(x), 0, bar_w, 3, 1.5, 1.5)

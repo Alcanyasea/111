@@ -27,6 +27,9 @@
 # 下载/安装）。轮询收紧：有文字 3→2 秒、无文字 6→4 秒、动作后 3→2 秒、
 # 主界面确认间隔 2→1 秒、OCR 失败重试 5→3 秒、盲点 20/45→15/30 秒、
 # 公告点击限频 8→6 秒。实测顺利路径每号 ~37 秒 → ~25 秒，另省更新检查 ~52 秒。
+# v7 变更：配合 slot_switch 轮询式 uid 校验（更快交棒），游戏仍在加载的阶段
+# 禁用盲点兜底（见到任意文字或 60 秒后才允许，避免对加载画面空点）；token
+# 预检对瞬时网络抖动自动重试一次（401 失效不重试）；纯加载画面轮询 4→3 秒。
 # ============================================================
 param(
     [string]$Server = "official",
@@ -256,7 +259,20 @@ if ($Server -eq "official" -and $slotDir) {
         $tStat = "error"; $tDetail = ""
         try {
             [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-            $resp = Invoke-RestMethod -Uri ("https://as.hypergryph.com/user/info/v1/basic?token=" + [uri]::EscapeDataString([string]$tok.token)) -TimeoutSec 10 -UseBasicParsing
+            $uri = "https://as.hypergryph.com/user/info/v1/basic?token=" + [uri]::EscapeDataString([string]$tok.token)
+            $resp = $null
+            foreach ($probe in 1..2) {
+                try {
+                    $resp = Invoke-RestMethod -Uri $uri -TimeoutSec 10 -UseBasicParsing
+                    break
+                } catch {
+                    $code = 0
+                    try { $code = [int]$_.Exception.Response.StatusCode } catch {}
+                    # 401 = 明确失效，不重试；瞬时网络抖动只补一次
+                    if ($code -eq 401 -or $probe -eq 2) { throw }
+                    Start-Sleep 2
+                }
+            }
             if ("$($resp.status)" -eq "0") { $tStat = "ok"; $tDetail = "token 有效" }
             else { $tStat = "expired"; $tDetail = [string]$resp.msg }
         } catch {
@@ -304,6 +320,8 @@ $lastPngHash = ""
 $lastWords = $null
 $lastUpdateMarker = ""
 $updateSeen = $false
+$sawText = $false
+$stageStart = (Get-Date)
 $deadline = (Get-Date).AddSeconds($ScreenTimeoutSec)
 # 游戏更新等待的最长封顶：超过后即使仍在更新也不断延长（防止无限卡死）
 $hardDeadline = (Get-Date).AddHours(2)
@@ -319,6 +337,7 @@ while ((Get-Date) -lt $deadline) {
         $lastPngHash = $pngHash
         $lastWords = $words
     }
+    if (@($words).Count -gt 0) { $sawText = $true }
     $cap = Find-AnyMarker $words $captchaMarkers
     if ($cap) {
         LogLine ("ERROR: 检测到验证码界面（{0}），无人值守无法处理" -f $cap.Name)
@@ -441,9 +460,12 @@ while ((Get-Date) -lt $deadline) {
     # 改版）15 秒一次，无文字画面（加载/过渡）30 秒一次。首次点中央（推进标题画面/
     # 剧情对白，历史行为不变），之后中央、右上角 X 交替：公告弹窗页签文字若改版
     # 识别不到，X 盲点仍能关掉常见弹窗（X 位置实测固定）。
-    # 检测到过游戏更新后禁用盲点：下载/安装期间乱点可能打断更新，只等标记变化
+    # 检测到过游戏更新后禁用盲点：下载/安装期间乱点可能打断更新，只等标记变化。
+    # 游戏冷启动加载阶段（还没见过任何文字）也禁盲点：此时点了也是空点，还可能在
+    # 加载完的瞬间落在标题画面上多戳一下（slot_switch 校验提前交棒后加载窗更长）
+    $pokeAllowed = $sawText -or (((Get-Date) - $stageStart).TotalSeconds -gt 60)
     $pokeAfterSec = if ((@($words).Count -gt 0)) { 15 } else { 30 }
-    if (-not $updateSeen -and ((Get-Date) - $lastActionAt).TotalSeconds -gt $pokeAfterSec) {
+    if (-not $updateSeen -and $pokeAllowed -and ((Get-Date) - $lastActionAt).TotalSeconds -gt $pokeAfterSec) {
         if ($blindPokeCount -gt 0 -and ($blindPokeCount % 2 -eq 0)) {
             Invoke-Tap $announceCloseX $announceCloseY
             LogLine "[screen] 无可识别动作，盲点右上角公告关闭位兜底"
@@ -455,8 +477,8 @@ while ((Get-Date) -lt $deadline) {
         $lastActionAt = Get-Date
     }
     # 轮询节奏自适应：无动作且画面有文字 → 2 秒（弹窗/对白可能变化，保持较快响应）；
-    # 画面完全没有文字（加载/过渡）→ 4 秒（游戏本身需要时间，频繁识别没有收益）
-    if ((@($words).Count -gt 0)) { Start-Sleep 2 } else { Start-Sleep 4 }
+    # 画面完全没有文字（加载/过渡）→ 3 秒（游戏本身需要时间，频繁识别没有收益）
+    if ((@($words).Count -gt 0)) { Start-Sleep 2 } else { Start-Sleep 3 }
 }
 if (-not $reachedLogin) {
     LogLine ("ERROR: {0} 秒内无法确认登录状态" -f $ScreenTimeoutSec)

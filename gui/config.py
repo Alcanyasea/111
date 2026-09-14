@@ -137,15 +137,18 @@ DEFAULTS = {
     ],
     "behavior": {
         "close_emulator": True,   # 完成后关模拟器
-        "wait_game_update": True, # 检测到游戏更新时先等更新完成，再开始登录检测
+        # 旧开关：更新等待自 v1.3.2 起内置于 login_check（始终开启），仅保留
+        # 键位兼容旧配置文件，界面已不再展示与写入
+        "wait_game_update": True,
         # 旧版早晚班关机开关（新格式迁移进 schedule.times 后不再使用，仅兼容回退）
         "morning_shutdown": True,
         "evening_shutdown": False,
     },
     "schedule": {
         "times": [
-            {"time": "04:00", "enabled": True, "shutdown": True},
-            {"time": "16:00", "enabled": True, "shutdown": False},
+            # accounts = 该班次要跑的账号 id 列表；空/缺失 = 全部（含以后新增的号）
+            {"time": "04:00", "enabled": True, "shutdown": True, "accounts": []},
+            {"time": "16:00", "enabled": True, "shutdown": False, "accounts": []},
         ],
     },
     "maa_update": {
@@ -158,6 +161,12 @@ DEFAULTS = {
         "auto": True,          # 自动清理开关（控制台运行期间定期清理）
         "interval_days": 7,    # 自动清理间隔（天）
         "last_run": "",        # 上次清理时间 "YYYY-MM-DD HH:MM"，空 = 从未清理
+    },
+    "notify": {
+        "enabled": False,      # 挂机结束后推送到手机（失败必推，成功按 on_success）
+        "provider": "serverchan",  # serverchan / pushplus / wecom
+        "key": "",             # SendKey / PushPlus token / 企业微信 webhook key
+        "on_success": False,   # 全部成功时也推送一条摘要
     },
     "appearance": {
         "theme": "light",      # 界面主题：light 明亮（暖雾灰）/ dark 暗夜（暮色灰）
@@ -276,18 +285,22 @@ def _migrate_schedule(cfg):
         sched.pop("evening", None)
         return
 
-    # 新格式：规范化 times 列表
+    # 新格式：规范化 times 列表（accounts = 班次账号 id 列表，空/缺失 = 全部）
     times = []
     for it in sched.get("times") if isinstance(sched.get("times"), list) else []:
         if not isinstance(it, dict):
             continue
         t = str(it.get("time", "")).strip()
         if re.fullmatch(r"([01]\d|2[0-3]):[0-5]\d", t):
-            times.append({
+            entry = {
                 "time": t,
                 "enabled": bool(it.get("enabled", True)),
                 "shutdown": bool(it.get("shutdown", False)),
-            })
+            }
+            accs = it.get("accounts")
+            if isinstance(accs, list):
+                entry["accounts"] = [str(x) for x in accs if str(x).strip()]
+            times.append(entry)
     if not times:
         times = deepcopy(DEFAULTS["schedule"]["times"])
     sched["times"] = times

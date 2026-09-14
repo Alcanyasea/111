@@ -11,8 +11,8 @@ from PySide6.QtCore import QTimer
 from PySide6.QtGui import QTextCursor
 from PySide6.QtWidgets import QHBoxLayout, QVBoxLayout, QWidget
 
-from qfluentwidgets import (BodyLabel, InfoBar, InfoBarPosition, MessageBox,
-                            PushButton, SwitchButton, TextEdit)
+from qfluentwidgets import (BodyLabel, InfoBar, InfoBarPosition, LineEdit,
+                            MessageBox, PushButton, SwitchButton, TextEdit)
 
 import theme
 from core import logparse, runner
@@ -46,7 +46,14 @@ class LogsPage(QWidget):
         bar.addWidget(refresh_btn)
         bar.addWidget(open_btn)
         bar.addWidget(clear_btn)
+        # 关键字过滤：只显示命中的行（整体重载 + 增量追加两条路径都过滤）
+        self.filter_edit = LineEdit()
+        self.filter_edit.setPlaceholderText("过滤关键字（留空显示全部）")
+        self.filter_edit.setClearButtonEnabled(True)
+        self.filter_edit.setFixedWidth(220)
+        self.filter_edit.textChanged.connect(self.refresh)
         bar.addStretch(1)
+        bar.addWidget(self.filter_edit)
         autoscroll_label = BodyLabel("自动滚动")
         autoscroll_label.setStyleSheet("color: %s; font-size: 12.5px;" % theme.TEXT_2)
         self.autoscroll = set_switch_checked_gray(SwitchButton())
@@ -97,9 +104,16 @@ class LogsPage(QWidget):
             return False
         return (st.st_size, st.st_mtime) != (self._last_size, self._last_mtime)
 
+    def _filtered(self, text):
+        """按关键字（不区分大小写）过滤行；关键字为空时原样返回。"""
+        kw = self.filter_edit.text().strip().lower()
+        if not kw:
+            return text
+        return "\n".join(l for l in text.splitlines() if kw in l.lower())
+
     def refresh(self):
-        """整体重载（初始化 / 点刷新 / 日志被截断）。"""
-        text = self._read_all()
+        """整体重载（初始化 / 点刷新 / 日志被截断 / 过滤关键字变化）。"""
+        text = self._filtered(self._read_all())
         path = self._log_path()
         try:
             st = path.stat()
@@ -144,11 +158,17 @@ class LogsPage(QWidget):
         self._pending = buf[cut + 1:]
         lines = buf[:cut].decode("utf-8", errors="ignore").splitlines()
         cursor_at_end = self.view.textCursor().atEnd()
+        kw = self.filter_edit.text().strip().lower()
+        appended = False
         for line in lines:
+            if kw and kw not in line.lower():
+                continue
             self.view.append(logparse.line_html(line))
-        self._trim_blocks()
-        if self.autoscroll.isChecked() or cursor_at_end:
-            self.view.moveCursor(QTextCursor.MoveOperation.End)
+            appended = True
+        if appended:
+            self._trim_blocks()
+            if self.autoscroll.isChecked() or cursor_at_end:
+                self.view.moveCursor(QTextCursor.MoveOperation.End)
 
     def _trim_blocks(self):
         """只保留最近 MAX_LINES 行（删掉文档开头的多余块）。"""

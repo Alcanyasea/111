@@ -21,18 +21,19 @@ from qfluentwidgets import (FluentIcon, FluentWindow, InfoBar, InfoBarIcon,
                             PrimaryPushButton, PushButton, Theme, setTheme,
                             setThemeColor)
 
-from widgets import style_button, style_primary_button
+from widgets import BusyStrip, style_button, style_primary_button
 
 import config as appconfig
 import theme
 from core import cleanup, logparse, poller, runner, scheduler
 from pages.accounts import AccountsPage
 from pages.dashboard import DashboardPage
+from pages.history import HistoryPage
 from pages.logs import LogsPage
 from pages.settings import SettingsPage
 from widgets import Pill
 
-PAGE_TITLES = ["仪表盘", "账号管理", "运行设置", "日志"]
+PAGE_TITLES = ["仪表盘", "账号管理", "运行设置", "运行历史", "日志"]
 
 # 当前主窗口引用（主题切换时会整窗重建，运行设置页通过 swap_window 换窗）
 _win = None
@@ -89,8 +90,12 @@ class HeaderBar(QWidget):
         super().__init__(parent)
         self.setObjectName("headerBar")
         self.setStyleSheet("QWidget#headerBar { background: transparent; }")
-        lay = QHBoxLayout(self)
-        lay.setContentsMargins(2, 6, 2, 4)
+        # 外层纵向布局：上行是标题/按钮行，底边压一条运行光带（空闲时隐藏）
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(2, 6, 2, 0)
+        outer.setSpacing(5)
+        lay = QHBoxLayout()
+        lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(12)
         self.title = QLabel("仪表盘")
         self.title.setStyleSheet(
@@ -122,6 +127,10 @@ class HeaderBar(QWidget):
         lay.addWidget(self.stop_btn)
         lay.addWidget(self.collect_btn)
         lay.addWidget(self.run_btn)
+        outer.addLayout(lay)
+        # 运行中的动态光带：通栏贴在页头底边，空闲时隐藏不占空间
+        self.busy = BusyStrip(self)
+        outer.addWidget(self.busy)
 
     def update_state(self, running, detail):
         self.chip.set_state("run" if running else "ok", "运行中" if running else "空闲")
@@ -129,6 +138,10 @@ class HeaderBar(QWidget):
         self.stop_btn.setEnabled(running)
         self.collect_btn.setEnabled(not running)
         self.run_btn.setEnabled(not running)
+        if running:
+            self.busy.start()
+        else:
+            self.busy.stop()
 
 
 class MainWindow(FluentWindow):
@@ -166,14 +179,17 @@ class MainWindow(FluentWindow):
         self.accounts_p = AccountsPage(self.cfg)
         self.settings_p = SettingsPage(self.cfg,
                                        on_theme_change=self._on_theme_change)
+        self.history_p = HistoryPage(self.cfg)
         self.logs_p = LogsPage(self.cfg)
         self.dash.setObjectName("dashboard")
         self.accounts_p.setObjectName("accounts")
         self.settings_p.setObjectName("settings")
+        self.history_p.setObjectName("history")
         self.logs_p.setObjectName("logs")
         self.addSubInterface(self.dash, FluentIcon.HOME, "仪表盘")
         self.addSubInterface(self.accounts_p, FluentIcon.PEOPLE, "账号管理")
         self.addSubInterface(self.settings_p, FluentIcon.SETTING, "运行设置")
+        self.addSubInterface(self.history_p, FluentIcon.HISTORY, "运行历史")
         self.addSubInterface(self.logs_p, FluentIcon.DOCUMENT, "日志")
 
         # 在内容区顶部插入大标题页头（透明背景，与内容区留白分隔）。
@@ -197,6 +213,7 @@ class MainWindow(FluentWindow):
         self.header.collect_btn.clicked.connect(self.on_collect)
         self.header.stop_btn.clicked.connect(self.on_stop)
         self.accounts_p.export_requested.connect(self.on_export_account)
+        self.accounts_p.switch_requested.connect(self.on_switch_account)
         self.dash.export_done.connect(self._on_export_done)
         # 关闭 qfluentwidgets 自带的「向上弹出」切换动画，改用 iOS 式
         # 推入/推出过渡（_on_page_changed 里按切换方向滑入滑出）
@@ -351,6 +368,9 @@ class MainWindow(FluentWindow):
                 detail = "当前：%s · %s" % (stage["account"], stage["stage"])
                 if stage.get("elapsed_min") is not None:
                     detail += " · 已 %s 分钟" % stage["elapsed_min"]
+                idx, total = stage.get("index"), stage.get("total")
+                if idx and total and total > 1:
+                    detail += " · 第 %d/%d 个" % (idx, total)
             else:
                 detail = "启动中，日志页查看实时进度"
         else:
@@ -483,6 +503,51 @@ class MainWindow(FluentWindow):
             return
         self.accounts_p.set_export_busy(True)
         self.dash.start_export(acc)
+
+    def on_switch_account(self, acc):
+        """账号详情里点了「切换到此账号」：互斥检查 + 确认后只切号不跑日常。
+
+        master.ps1 -SwitchTo <slot>：切号 + 登录校验完成即停，模拟器保持运行，
+        不跑 MAA、不关机。与挂机/MAA 更新/干员导出互斥（都占用模拟器）。
+        """
+        if runner.is_running():
+            InfoBar.warning("挂机运行中", "请先停止当前流程再切换账号",
+                            parent=self, position=InfoBarPosition.TOP_RIGHT,
+                            duration=4000)
+            return
+        if self.dash.update_running():
+            InfoBar.warning("MAA 更新进行中", "请等更新结束后再切换账号",
+                            parent=self, position=InfoBarPosition.TOP_RIGHT,
+                            duration=4000)
+            return
+        if self.dash.export_running() or _export_threads_alive():
+            InfoBar.warning("干员导出进行中", "导出正在占用模拟器，请等导出结束后再切换",
+                            parent=self, position=InfoBarPosition.TOP_RIGHT,
+                            duration=5000)
+            return
+        name = acc.get("label") or acc.get("slot") or "?"
+        slot = acc.get("slot") or ""
+        if not slot:
+            InfoBar.warning("无法切换「%s」" % name,
+                            "该账号没有登录数据槽位，请先捕获登录数据",
+                            parent=self, position=InfoBarPosition.TOP_RIGHT,
+                            duration=5000)
+            return
+        box = MessageBox(
+            "切换到此账号",
+            "将启动模拟器（如未运行）并切换到「%s」，完成登录校验后停下：\n\n"
+            "· 不跑日常任务，结束后模拟器保持运行，可直接手动游戏\n"
+            "· 期间占用模拟器，不能同时挂机/收菜/导出\n\n"
+            "确定开始吗？" % name, self)
+        box.yesButton.setText("开始切换")
+        box.cancelButton.setText("取消")
+        if not box.exec():
+            return
+        runner.clear_stale_lock()
+        runner.start_switch(self.cfg, slot)
+        InfoBar.success("已开始切换", "切到「%s」后模拟器保持运行；日志页可查看进度" % name,
+                        parent=self, position=InfoBarPosition.TOP_RIGHT, duration=4000)
+        self.refresh_status()
 
     def _on_export_done(self, ok, summary):
         self.accounts_p.set_export_busy(False)

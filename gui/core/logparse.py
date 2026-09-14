@@ -227,7 +227,15 @@ def _current_stage_from_lines(lines, now=None):
             pass
     if _collect_mode_active(lines):
         stage = "收菜 · " + stage
-    return {"account": banner.group(2), "stage": stage, "elapsed_min": elapsed_min}
+    return {
+        # banner 形如 [1/4] 源：group(1)=序号、group(2)=总数、group(3)=账号名
+        # （旧代码误取 group(2)，运行中页头显示成总数、账号卡片进不了运行态）
+        "account": banner.group(3),
+        "stage": stage,
+        "elapsed_min": elapsed_min,
+        "index": int(banner.group(1)),
+        "total": int(banner.group(2)),
+    }
 
 
 def classify(msg):

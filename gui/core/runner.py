@@ -128,6 +128,15 @@ def start_collect(cfg):
     return _launch_master(cfg, ["-InfrastCollect", "-NoShutdown"])
 
 
+def start_switch(cfg, slot):
+    """切换到指定账号后停下（不跑日常）：master.ps1 -SwitchTo <slot>。
+
+    切号 + 登录校验完成即停，模拟器保持运行供手动游戏；同样带
+    -NoShutdown（手动操作永不关机）。与常规挂机共用 master.lock 互斥。
+    """
+    return _launch_master(cfg, ["-SwitchTo", slot, "-NoShutdown"])
+
+
 def stop():
     """停止正在运行的挂机流程。
 
