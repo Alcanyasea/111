@@ -7,7 +7,10 @@ PySide6 + PyQt-Fluent-Widgets 实现的桌面 GUI，设计见 mockup.html。
 
 GUI 手动「立即运行」时传 -NoShutdown：手动运行即使全部成功也不自动关机。
 """
+import atexit
+import os
 import sys
+import time
 from datetime import datetime
 
 from PySide6.QtCore import (QEasingCurve, QPoint, QParallelAnimationGroup,
@@ -15,6 +18,7 @@ from PySide6.QtCore import (QEasingCurve, QPoint, QParallelAnimationGroup,
 from PySide6.QtGui import QColor, QFont, QIcon, QLinearGradient, QPainter, QPixmap
 from PySide6.QtWidgets import (QApplication, QGraphicsOpacityEffect,
                                QHBoxLayout, QLabel, QVBoxLayout, QWidget)
+from PySide6.QtNetwork import QLocalServer, QLocalSocket
 
 from qfluentwidgets import (FluentIcon, FluentWindow, InfoBar, InfoBarIcon,
                             InfoBarManager, InfoBarPosition, MessageBox,
@@ -25,7 +29,7 @@ from widgets import BusyStrip, style_button, style_primary_button
 
 import config as appconfig
 import theme
-from core import cleanup, logparse, poller, runner, scheduler
+from core import cleanup, logparse, poller, proc, runner, scheduler
 from pages.accounts import AccountsPage
 from pages.dashboard import DashboardPage
 from pages.history import HistoryPage
@@ -40,6 +44,84 @@ _win = None
 
 # 关窗时仍在运行的后台线程引用（防 GC），线程随进程退出而非随窗口析构
 _detached_threads = []
+
+# 单实例保护：控制台同时跑两份时，各自持有加载时的配置快照，任何一次保存
+# （切主题/自动清理记账/改班次……都会触发）都会把另一份实例刚保存的设置
+# （推送密钥、账号改动等）整份覆盖回旧值。
+# 机制：gui\console.lock 以 O_EXCL 原子创建 + PID 存活校验（与 master.ps1 的
+# master.lock 同思路，无竞态；崩溃残留的锁因持有进程已死会被自动清掉）；
+# 命名管道只负责「唤起已有实例的窗口」。--smoke 自检模式不受此限制。
+_SINGLE_KEY = "MAA-Console-SingleInstance"
+_LOCK_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "console.lock")
+_single_server = None
+
+
+def _read_lock_pid():
+    try:
+        with open(_LOCK_PATH, "r") as f:
+            return int(f.read().strip())
+    except (OSError, ValueError):
+        return 0
+
+
+def _raise_via_pipe():
+    """尽力唤起已有实例的窗口（旧版本实例没有管道监听，连不上就静默忽略）。"""
+    probe = QLocalSocket()
+    probe.connectToServer(_SINGLE_KEY)
+    if probe.waitForConnected(300):
+        probe.disconnectFromServer()  # 已有实例收到新连接会自己 raise
+
+
+def _acquire_single_instance():
+    """返回 True = 本进程成为唯一实例；False = 已有实例在跑（已尽力唤起其窗口）。"""
+    deadline = time.monotonic() + 6
+    while True:
+        try:
+            fd = os.open(_LOCK_PATH, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            os.write(fd, str(os.getpid()).encode("ascii"))
+            os.close(fd)
+            return True
+        except FileExistsError:
+            pid = _read_lock_pid()
+            name = (proc.process_name(pid) or "") if pid else ""
+            if pid and name.startswith("python"):
+                _raise_via_pipe()
+                return False
+            # 残留锁（持有进程已死 / PID 被无关进程复用 / 文件损坏）→ 清掉重抢
+            try:
+                os.remove(_LOCK_PATH)
+            except OSError:
+                pass
+            if time.monotonic() >= deadline:
+                return True  # 极端情况清不掉：放行，两份实例总好过控制台打不开
+            time.sleep(0.25)
+        except OSError:
+            return True  # 锁文件系统级错误：不因单实例保护挡住控制台本身
+
+
+def _release_single_instance():
+    """退出时删掉自己的锁；锁里不是本进程 PID（已被他人持有）则不动。"""
+    if _read_lock_pid() == os.getpid():
+        try:
+            os.remove(_LOCK_PATH)
+        except OSError:
+            pass
+
+
+def _on_second_instance():
+    """重复启动：管道有新连接 = 又有人启动了一次控制台，把主窗口带到前台。"""
+    if _single_server is None:
+        return
+    while _single_server.hasPendingConnections():
+        sock = _single_server.nextPendingConnection()
+        if sock is not None:
+            sock.disconnectFromServer()
+    if _win is not None:
+        _win.setWindowState((_win.windowState() & ~Qt.WindowState.WindowMinimized)
+                            | Qt.WindowState.WindowActive)
+        _win.showNormal()
+        _win.raise_()
+        _win.activateWindow()
 
 
 def _export_threads_alive():
@@ -630,10 +712,18 @@ def main():
         Qt.HighDpiScaleFactorRoundingPolicy.PassThrough)
     app = QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(True)
+    # 单实例：抢不到锁 = 已有控制台在跑（对方收到管道连接会自己把窗口带到前台），
+    # 本进程直接退出。--smoke 自检不参与单实例。
+    if "--smoke" not in sys.argv and not _acquire_single_instance():
+        return 0
+    atexit.register(_release_single_instance)
     # 主题（明亮/暗夜）在 MainWindow.__init__ 里按配置应用
     _patch_gray_info_bar()
     _patch_gray_message_box()
-    global _win
+    global _win, _single_server
+    _single_server = QLocalServer()
+    _single_server.listen(_SINGLE_KEY)
+    _single_server.newConnection.connect(_on_second_instance)
     _win = MainWindow()
     _win.show()
     if appconfig.LAST_LOAD_WARNING:

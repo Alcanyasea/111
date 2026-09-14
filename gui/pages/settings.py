@@ -218,7 +218,8 @@ class SettingsPage(ScrollArea):
         test_row.setSpacing(10)
         self.notify_test_btn = style_button(PushButton("发送测试"))
         self.notify_test_btn.setToolTip(
-            "用上方当前填写的渠道与密钥发一条测试消息（不必先保存）。\n"
+            "用上方当前填写的渠道与密钥发一条测试消息。\n"
+            "测试成功会自动保存这组通知设置（渠道/密钥/开关），不必再点「保存配置」。\n"
             "Server酱填 SendKey；PushPlus 填 token；企业微信机器人填 webhook 地址或 key。")
         self.notify_test_btn.clicked.connect(self.on_notify_test)
         test_row.addWidget(_row_label("测试"))
@@ -430,7 +431,23 @@ class SettingsPage(ScrollArea):
             return
         ok, summary = payload
         if ok:
-            InfoBar.success("测试推送已发送", "请检查手机是否收到（%s）" % name,
+            # 测试成功 = 这组渠道/密钥可用：顺手保存整组通知设置。以前测试不落盘，
+            # 只点测试不点「保存配置」的话重启后密钥/开关回到旧值，像配置丢失一样
+            n = self.cfg.setdefault("notify", {})
+            n["enabled"] = self.notify_sw.isChecked()
+            n["provider"] = notify.PROVIDERS[self.notify_provider.currentIndex()]
+            n["key"] = self.notify_key.text().strip()
+            n["on_success"] = self.notify_success_sw.isChecked()
+            saved_note = "· 通知设置已自动保存"
+            try:
+                appconfig.save(self.cfg)
+            except OSError as exc:
+                saved_note = ""
+                InfoBar.error("自动保存失败",
+                              "测试已通过，但写入 config.json 失败：%s（请手动点「保存配置」）" % exc,
+                              parent=self.window(), position=InfoBarPosition.TOP_RIGHT,
+                              duration=8000)
+            InfoBar.success("测试推送已发送", "请检查手机是否收到（%s）%s" % (name, saved_note),
                             parent=self.window(), position=InfoBarPosition.TOP_RIGHT,
                             duration=5000)
         else:

@@ -9,6 +9,8 @@
 # 每轮结束把结果写入 scripts\run_history\run_<时间戳>.json（保留 60 天），
 # GUI「运行历史」页读取；config.notify.enabled 时失败必推、成功可选推送到手机
 # （渠道/密钥在 config.notify，GUI「运行设置 → 通知推送」维护，经 plugins\notify 发送）
+# 失败重试：部分账号失败（有成功有失败）时，整轮跑完后对失败号再完整跑一遍；
+# 重试成功按成功计，重试后仍失败（或全部号都失败——系统性问题不重试）才推送失败通知
 # 2026-09 性能与成功率优化：模拟器启动接 config 启动等待并轮询开机完成（不再固定
 #   睡 15 秒）、45 秒连不上自动重拉实例；MAA 启动即崩溃（零任务进展）自动重试一次；
 #   完成信号轮询 10→4 秒；各阶段衔接 sleep 3→1 秒
@@ -60,6 +62,9 @@ $scriptDir = "D:\1\scripts"
 # MAA 无进展判超时（秒）：该账号这段时间内没有任何战斗/任务推进才放弃；
 # 正常打关（一直有进战斗/结算心跳）不再受单号总时长限制。
 $maaStallTimeoutSec = 180
+# 失败重试等待（秒）：部分账号失败时，全部号跑完后等待该秒数再对失败号重试一遍；
+# 全部号都失败视为系统性问题（模拟器/ADB/网络/游戏维护），不重试直接收尾。
+$retryFailedDelaySec = 60
 # 模拟器启动等待上限（秒）：config.timeouts.launch_wait_sec 可覆盖（GUI「运行设置→启动等待」）
 $mumuLaunchTimeoutSec = 120
 # 游戏更新检测：v1.3.2 起并入 login_check.ps1（同一套更新标记等待 + 失败快判 +
@@ -503,6 +508,7 @@ function Save-RunHistory($fatalReason) {
                 dur_min = $r.Minutes
                 skipped = [bool]($null -eq $r.Minutes)
                 reason  = [string]$r.Reason
+                retried = [bool]$r.Retried   # 该号经过失败重试（成功与否都标）
             }
         }
         $obj = [ordered]@{
@@ -701,137 +707,169 @@ if (-not (Start-MuMu)) {
 }
 
 # ============ 动态账号流程（config.accounts 数组）============
-# 每个账号：槽位切号（重启游戏+推入登录数据，非点击）→ MAA
-$total = $accountList.Count
-    $idx = 0
-    foreach ($acc in $accountList) {
-        $idx++
-        $accLabel = if ($null -ne $acc.label -and [string]$acc.label) { [string]$acc.label } else { "Account $idx" }
-        $accServer = if ($null -ne $acc.server -and [string]$acc.server) { [string]$acc.server } else { "official" }
-        $accEnabled = $true
-        if ($null -ne $acc.enabled) { $accEnabled = [bool]$acc.enabled }
-        $accSlot = if ($null -ne $acc.slot) { [string]$acc.slot } else { "" }
+# 每个账号：槽位切号（重启游戏+推入登录数据，非点击）→ MAA。
+# 完整管线抽成 Invoke-AccountRun：主循环与「失败重试」（循环后的 RETRY 段）共用，
+# 函数只返回结果对象，$results 的追加/替换由调用方负责。
+function Invoke-AccountRun($acc, $idx, $IsRetry) {
+    $accLabel = if ($null -ne $acc.label -and [string]$acc.label) { [string]$acc.label } else { "Account $idx" }
+    $accServer = if ($null -ne $acc.server -and [string]$acc.server) { [string]$acc.server } else { "official" }
+    $accEnabled = $true
+    if ($null -ne $acc.enabled) { $accEnabled = [bool]$acc.enabled }
+    $accSlot = if ($null -ne $acc.slot) { [string]$acc.slot } else { "" }
 
-        Log " "; Log "********** [$idx/$total] $accLabel **********"
-        $sw = [System.Diagnostics.Stopwatch]::StartNew()
+    # 横幅格式被 gui/core/logparse.py 的 BANNER_RE 解析（[序号/总数] 必须保持）
+    $retryMark = if ($IsRetry) { "（重试）" } else { "" }
+    Log " "; Log ("********** [{0}/{1}] {2}{3} **********" -f $idx, $total, $accLabel, $retryMark)
+    $sw = [System.Diagnostics.Stopwatch]::StartNew()
 
-        if (-not $accEnabled -and -not $SwitchTo) {
-            Log "  [SKIP] disabled in config.json"
-            $results += [PSCustomObject]@{ Account=$accLabel; OK=$true; Duration="skip"; Minutes=$null; Reason="" }
-            continue
-        }
+    if (-not $accEnabled -and -not $SwitchTo) {
+        Log "  [SKIP] disabled in config.json"
+        return [PSCustomObject]@{ Account=$accLabel; OK=$true; Duration="skip"; Minutes=$null; Reason=""; Retried=$false }
+    }
 
-        # ---- 切换账号：重启游戏 + 推入槽位数据（非点击）----
-        $switchOk = $true
-        $slotPath = if ($accSlot) { Join-Path $scriptDir ("accounts\" + $accSlot) } else { "" }
-        if ($accSlot -and (Test-Path $slotPath)) {
-            $switchOk = ((Run-Switch ("slot_switch.ps1 -Server {0} -Slot {1}" -f $accServer, $accSlot)) -eq 0)
-        } elseif ($accSlot -and -not (Test-Path $slotPath)) {
-            if ($accServer -eq "bilibili") {
-                # B 服只有一个号，槽位缺失不影响：照常运行（客户端由 MAA 拉起）
-                Log "  [WARN] slot '$accSlot' not found, switching client only"
-                $switchOk = $true
-            } else {
-                # 官服槽位缺失：拒绝运行该号（防跑错号），日志提示补捕获
-                Log "  [ERROR] slot '$accSlot' not found - refusing to run (防跑错号)"
-                Log "  [ERROR] 请在控制台「账号管理」页重新捕获该账号"
-                $switchOk = $false
-            }
-        } else {
-            if ($accServer -eq "bilibili") { $switchOk = ((Run-Switch "switch_to_B服.ps1") -eq 0) }
-            else {
-                Log "  [ERROR] account '$accLabel' has no slot - refusing to run (防跑错号)"
-                $switchOk = $false
-            }
-        }
-        if (-not $switchOk) {
-            Log "  [ERROR] Account switch failed"
-            $results += [PSCustomObject]@{ Account=$accLabel; OK=$false; Duration="0 min"; Minutes=0.0; Reason="切号失败" }
-            continue
-        }
-
-        # ---- 登录校验：屏幕级确认游戏已登录；未登录自动输账号密码（官服）并刷新槽位 ----
-        # 文件级 uid 校验通过不代表游戏真在登录态（token 失效时会回到登录界面）。
-        # 游戏更新等待（含失败快判/安装器检测）自 v1.3.2 起由 login_check 内部处理。
-        # B服 与官服登录差异大（无标题画面/token 预检不可用/登录界面不可自动登录），
-        # 拆为独立的 login_check_bilibili.ps1 单独校验（盲点只在更新进行中禁用，
-        # 修复 2026-09-14 更新后无文字画面 240 秒空转超时）。
+    # ---- 切换账号：重启游戏 + 推入槽位数据（非点击）----
+    $switchOk = $true
+    $slotPath = if ($accSlot) { Join-Path $scriptDir ("accounts\" + $accSlot) } else { "" }
+    if ($accSlot -and (Test-Path $slotPath)) {
+        $switchOk = ((Run-Switch ("slot_switch.ps1 -Server {0} -Slot {1}" -f $accServer, $accSlot)) -eq 0)
+    } elseif ($accSlot -and -not (Test-Path $slotPath)) {
         if ($accServer -eq "bilibili") {
-            $loginOk = ((Run-Switch ("login_check_bilibili.ps1 -Slot {0}" -f $accSlot)) -eq 0)
+            # B 服只有一个号，槽位缺失不影响：照常运行（客户端由 MAA 拉起）
+            Log "  [WARN] slot '$accSlot' not found, switching client only"
+            $switchOk = $true
         } else {
-            $loginOk = ((Run-Switch ("login_check.ps1 -Server {0} -Slot {1}" -f $accServer, $accSlot)) -eq 0)
+            # 官服槽位缺失：拒绝运行该号（防跑错号），日志提示补捕获
+            Log "  [ERROR] slot '$accSlot' not found - refusing to run (防跑错号)"
+            Log "  [ERROR] 请在控制台「账号管理」页重新捕获该账号"
+            $switchOk = $false
         }
-        if (-not $loginOk) {
-            Log "  [ERROR] Login check failed - 请在控制台重新捕获该账号"
-            $results += [PSCustomObject]@{ Account=$accLabel; OK=$false; Duration="0 min"; Minutes=0.0; Reason="登录校验失败" }
-            continue
+    } else {
+        if ($accServer -eq "bilibili") { $switchOk = ((Run-Switch "switch_to_B服.ps1") -eq 0) }
+        else {
+            Log "  [ERROR] account '$accLabel' has no slot - refusing to run (防跑错号)"
+            $switchOk = $false
         }
+    }
+    if (-not $switchOk) {
+        Log "  [ERROR] Account switch failed"
+        return [PSCustomObject]@{ Account=$accLabel; OK=$false; Duration="0 min"; Minutes=0.0; Reason="切号失败"; Retried=[bool]$IsRetry }
+    }
 
-        # ---- -SwitchTo 模式：切号 + 登录校验完成即停（不跑日常，模拟器保持运行）----
-        if ($SwitchTo) {
-            Refresh-SlotData $accServer $accSlot
-            $dur = [math]::Round($sw.Elapsed.TotalMinutes, 1)
-            $results += [PSCustomObject]@{ Account=$accLabel; OK=$true; Duration="$dur min"; Minutes=$dur; Reason="" }
-            Log ("  [OK] 已切换到「" + $accLabel + "」，模拟器保持运行（不跑日常）")
-            continue
-        }
+    # ---- 登录校验：屏幕级确认游戏已登录；未登录自动输账号密码（官服）并刷新槽位 ----
+    # 文件级 uid 校验通过不代表游戏真在登录态（token 失效时会回到登录界面）。
+    # 游戏更新等待（含失败快判/安装器检测）自 v1.3.2 起由 login_check 内部处理。
+    # B服 与官服登录差异大（无标题画面/token 预检不可用/登录界面不可自动登录），
+    # 拆为独立的 login_check_bilibili.ps1 单独校验（盲点只在更新进行中禁用，
+    # 修复 2026-09-14 更新后无文字画面 240 秒空转超时）。
+    if ($accServer -eq "bilibili") {
+        $loginOk = ((Run-Switch ("login_check_bilibili.ps1 -Slot {0}" -f $accSlot)) -eq 0)
+    } else {
+        $loginOk = ((Run-Switch ("login_check.ps1 -Server {0} -Slot {1}" -f $accServer, $accSlot)) -eq 0)
+    }
+    if (-not $loginOk) {
+        Log "  [ERROR] Login check failed - 请在控制台重新捕获该账号"
+        return [PSCustomObject]@{ Account=$accLabel; OK=$false; Duration="0 min"; Minutes=0.0; Reason="登录校验失败"; Retried=[bool]$IsRetry }
+    }
 
-        # ---- 跑 MAA（按服务器选对应客户端；-SkipMAA 测试模式跳过）----
-        $failReason = ""
-        if ($SkipMAA) {
-            Log "  [TEST] -SkipMAA: 跳过 MAA，仅验证切号"
-            $ok = $true
-        } else {
-            $accId = if ($null -ne $acc.id -and [string]$acc.id) { [string]$acc.id } else { "" }
-            # 插件走同一套调用模板（Invoke-Plugin）；$accId 缺失时全部跳过
-            if ($accId) {
-                $pluginArgs = @('apply', '--config', $configPath, '--account', $accId, '--server', $accServer)
-                if ($InfrastCollect) {
-                    # ---- 基建收菜：只写「全 skip 不换班」配置，不碰班次计划/理智/菲亚梅塔 ----
-                    [void](Invoke-Plugin $infrastCollectPy "基建收菜" "基建收菜插件" $pluginArgs "按 MAA 原配置运行（可能换班跑全设施）")
-                } else {
-                    # ---- 第二理智作战关卡：启动 MAA 前按账号写入第二个 FightTask 的关卡 ----
-                    $accHasFightPlan = $false
-                    $planProp = $acc.PSObject.Properties['second_fight_plan']
-                    if ($null -ne $planProp -and $null -ne $planProp.Value) {
-                        $planList = @($planProp.Value)
-                        if ($planList.Count -gt 0) {
-                            $accHasFightPlan = $true
-                        }
-                    }
-                    if (-not $accHasFightPlan -and $null -ne $acc.second_fight_stage -and
-                        [string]$acc.second_fight_stage) {
-                        $accHasFightPlan = $true
-                    }
-                    if ($accHasFightPlan) {
-                        [void](Invoke-Plugin $fightStagePy "理智关卡" "理智关卡插件" $pluginArgs "第二理智关卡未写入")
-                    }
-                    # ---- 精确基建派驻插件：启动 MAA 前按账号写入自定义计划（未启用则恢复 Rotation）----
-                    [void](Invoke-Plugin $baseSchedulePy "基建插件" "基建插件" ($pluginArgs + @('--batch', $bsBatch)) "继续按 MAA 原配置运行")
-                    # ---- 菲亚梅塔心情恢复：换班前先恢复目标干员心情 ----
-                    # 自定义模式（精确基建）由上面生成的计划 JSON 的 Fiammetta 字段生效；
-                    # 这里写的是常规模式的基建任务参数，两者互斥、都是换班前恢复。
-                    [void](Invoke-Plugin $fiammettaPy "菲亚梅塔" "菲亚梅塔插件" $pluginArgs "菲亚梅塔设置未写入")
-                }
-            }
-            $maaExe = if ($accServer -eq "bilibili") { $maaBilibili } else { $maaOfficial }
-            $maaDir = if ($accServer -eq "bilibili") { $maaBilibiliDir } else { $maaOfficialDir }
-            $ok = Run-MAA $maaExe $maaDir $accLabel
-            if (-not $ok) {
-                # 失败原因跟随心跳判定状态（运行历史/通知里能看到具体死法）
-                switch ($script:LastMaaStatus) {
-                    "stall"      { $failReason = "MAA 无进展超时" }
-                    "dead"       { $failReason = "MAA 中途退出" }
-                    "dead-early" { $failReason = "MAA 启动即崩溃（已自动重试一次）" }
-                    default      { $failReason = "MAA 运行失败" }
-                }
-            }
-        }
-        # 把设备上最新的登录数据（弹窗处理标记等）拉回槽位，避免下次切号弹窗重现
+    # ---- -SwitchTo 模式：切号 + 登录校验完成即停（不跑日常，模拟器保持运行）----
+    if ($SwitchTo) {
         Refresh-SlotData $accServer $accSlot
         $dur = [math]::Round($sw.Elapsed.TotalMinutes, 1)
-        $results += [PSCustomObject]@{ Account=$accLabel; OK=$ok; Duration="$dur min"; Minutes=$dur; Reason=$failReason }
+        Log ("  [OK] 已切换到「" + $accLabel + "」，模拟器保持运行（不跑日常）")
+        return [PSCustomObject]@{ Account=$accLabel; OK=$true; Duration="$dur min"; Minutes=$dur; Reason=""; Retried=$false }
     }
+
+    # ---- 跑 MAA（按服务器选对应客户端；-SkipMAA 测试模式跳过）----
+    $failReason = ""
+    if ($SkipMAA) {
+        Log "  [TEST] -SkipMAA: 跳过 MAA，仅验证切号"
+        $ok = $true
+    } else {
+        $accId = if ($null -ne $acc.id -and [string]$acc.id) { [string]$acc.id } else { "" }
+        # 插件走同一套调用模板（Invoke-Plugin）；$accId 缺失时全部跳过
+        if ($accId) {
+            $pluginArgs = @('apply', '--config', $configPath, '--account', $accId, '--server', $accServer)
+            if ($InfrastCollect) {
+                # ---- 基建收菜：只写「全 skip 不换班」配置，不碰班次计划/理智/菲亚梅塔 ----
+                [void](Invoke-Plugin $infrastCollectPy "基建收菜" "基建收菜插件" $pluginArgs "按 MAA 原配置运行（可能换班跑全设施）")
+            } else {
+                # ---- 第二理智作战关卡：启动 MAA 前按账号写入第二个 FightTask 的关卡 ----
+                $accHasFightPlan = $false
+                $planProp = $acc.PSObject.Properties['second_fight_plan']
+                if ($null -ne $planProp -and $null -ne $planProp.Value) {
+                    $planList = @($planProp.Value)
+                    if ($planList.Count -gt 0) {
+                        $accHasFightPlan = $true
+                    }
+                }
+                if (-not $accHasFightPlan -and $null -ne $acc.second_fight_stage -and
+                    [string]$acc.second_fight_stage) {
+                    $accHasFightPlan = $true
+                }
+                if ($accHasFightPlan) {
+                    [void](Invoke-Plugin $fightStagePy "理智关卡" "理智关卡插件" $pluginArgs "第二理智关卡未写入")
+                }
+                # ---- 精确基建派驻插件：启动 MAA 前按账号写入自定义计划（未启用则恢复 Rotation）----
+                [void](Invoke-Plugin $baseSchedulePy "基建插件" "基建插件" ($pluginArgs + @('--batch', $bsBatch)) "继续按 MAA 原配置运行")
+                # ---- 菲亚梅塔心情恢复：换班前先恢复目标干员心情 ----
+                # 自定义模式（精确基建）由上面生成的计划 JSON 的 Fiammetta 字段生效；
+                # 这里写的是常规模式的基建任务参数，两者互斥、都是换班前恢复。
+                [void](Invoke-Plugin $fiammettaPy "菲亚梅塔" "菲亚梅塔插件" $pluginArgs "菲亚梅塔设置未写入")
+            }
+        }
+        $maaExe = if ($accServer -eq "bilibili") { $maaBilibili } else { $maaOfficial }
+        $maaDir = if ($accServer -eq "bilibili") { $maaBilibiliDir } else { $maaOfficialDir }
+        $ok = Run-MAA $maaExe $maaDir $accLabel
+        if (-not $ok) {
+            # 失败原因跟随心跳判定状态（运行历史/通知里能看到具体死法）
+            switch ($script:LastMaaStatus) {
+                "stall"      { $failReason = "MAA 无进展超时" }
+                "dead"       { $failReason = "MAA 中途退出" }
+                "dead-early" { $failReason = "MAA 启动即崩溃（已自动重试一次）" }
+                default      { $failReason = "MAA 运行失败" }
+            }
+        }
+    }
+    # 把设备上最新的登录数据（弹窗处理标记等）拉回槽位，避免下次切号弹窗重现
+    Refresh-SlotData $accServer $accSlot
+    $dur = [math]::Round($sw.Elapsed.TotalMinutes, 1)
+    return [PSCustomObject]@{ Account=$accLabel; OK=$ok; Duration="$dur min"; Minutes=$dur; Reason=$failReason; Retried=[bool]$IsRetry }
+}
+
+$total = $accountList.Count
+$idx = 0
+foreach ($acc in $accountList) {
+    $idx++
+    $results += (Invoke-AccountRun $acc $idx $false)
+}
+
+# ---- 失败重试：部分失败（有成功有失败）时，整轮跑完后对失败号按原顺序完整重试
+# 一遍（切号→登录校验→插件→MAA 与首跑同一管线）。全部失败视为系统性问题（模拟器/
+# ADB/网络/游戏维护），重试大概率也是同样结局，不浪费时间、直接收尾推送。
+# 重试仍失败的号才计入最终失败——弹窗/通知/关机都按重试后的结果判定；
+# 重试成功的号按成功计（运行历史带 retried 标记，失败原因标「重试后仍失败」）。
+# 手动切号（-SwitchTo）人在电脑前，失败可手动再点，不走自动重试。
+if (-not $SwitchTo) {
+    $attempted = @($results | Where-Object { $null -ne $_.Minutes })
+    $failedFirst = @($attempted | Where-Object { -not $_.OK })
+    if ($attempted.Count -gt 0 -and $failedFirst.Count -gt 0 -and $failedFirst.Count -lt $attempted.Count) {
+        Log " "
+        Log ("=== [RETRY] {0}/{1} 个账号失败，等待 {2} 秒后重试失败号 ===" -f $failedFirst.Count, $attempted.Count, $retryFailedDelaySec)
+        Start-Sleep -Seconds $retryFailedDelaySec
+        for ($i = 0; $i -lt $accountList.Count; $i++) {
+            # $results 与 $accountList 按序一一对应（每个账号恰好追加一条）
+            if ($null -eq $results[$i] -or $results[$i].OK -or $null -eq $results[$i].Minutes) { continue }
+            $res = Invoke-AccountRun $accountList[$i] ($i + 1) $true
+            if (-not $res.OK -and [string]$res.Reason) {
+                $res = [PSCustomObject]@{ Account=$res.Account; OK=$false; Duration=$res.Duration
+                    Minutes=$res.Minutes; Reason=("重试后仍失败：" + $res.Reason); Retried=$true }
+            }
+            $results[$i] = $res
+        }
+        Log ("=== [RETRY] 结束：最终成功 {0}/{1} ===" -f
+            (@($results | Where-Object { $_.OK }).Count), $attempted.Count)
+    }
+}
 
 # Close emulator (config: behavior.close_emulator=false 时跳过；-SkipMAA 测试模式保留模拟器供检查)
 if ($InfrastCollect) {
@@ -892,7 +930,8 @@ if ($failed -eq 0) {
     $body = "有 $failed 个账号失败！`n`n"
     foreach ($r in $results) {
         $s = if ($r.OK) { "OK" } else { "FAIL" }
-        $body += ("  [{0}] {1} - {2}" -f $s, $r.Account, $r.Duration)
+        $mark = if ($r.OK -and $r.Retried) { "（重试成功）" } else { "" }
+        $body += ("  [{0}] {1} - {2}{3}" -f $s, $r.Account, $r.Duration, $mark)
         if (-not $r.OK -and $r.Reason) { $body += "（" + $r.Reason + "）" }
         $body += "`n"
     }
@@ -911,7 +950,8 @@ if (-not $SwitchTo) {
         $push = ""
         foreach ($r in $results) {
             $s = if ($r.OK) { "OK" } else { "FAIL" }
-            $line = ("[{0}] {1} - {2}" -f $s, $r.Account, $r.Duration)
+            $mark = if ($r.OK -and $r.Retried) { "（重试成功）" } else { "" }
+            $line = ("[{0}] {1} - {2}{3}" -f $s, $r.Account, $r.Duration, $mark)
             if (-not $r.OK -and $r.Reason) { $line += "（" + $r.Reason + "）" }
             $push += $line + "`n"
         }
