@@ -209,11 +209,14 @@ def maa_second_fight_plan(cfg, server=None):
     return [], True
 
 
-def _label(text, size="12px", color=None, weight="400"):
-    # color 缺省时调用时读取主题色（默认参数会在导入期固化）
+def _label(text, size="12px", color=None, weight="400", transparent=False):
+    """主题色文本标签。color 传调色板令牌名（如 "TEXT_2"），
+    配方随主题切换自动重读；None = TEXT_3。"""
+    token = color if isinstance(color, str) else "TEXT_3"
     lab = QLabel(text)
-    lab.setStyleSheet("font-size: %s; font-weight: %s; color: %s;"
-                      % (size, weight, color or theme.TEXT_3))
+    suffix = " background: transparent;" if transparent else ""
+    theme.bind(lab, lambda: "font-size: %s; font-weight: %s; color: %s;%s"
+               % (size, weight, getattr(theme, token), suffix))
     return lab
 
 
@@ -234,7 +237,7 @@ class StagePlanDialog(QDialog):
         self.setWindowTitle("候选关卡 - %s" % (acc.get("label") or ""))
         self.setModal(True)
         self.resize(740, 520)
-        self.setStyleSheet("QDialog { background: %s; }" % theme.BG)
+        theme.bind(self, lambda: "QDialog { background: %s; }" % theme.BG)
 
         root = QVBoxLayout(self)
         root.setContentsMargins(24, 20, 24, 20)
@@ -242,9 +245,8 @@ class StagePlanDialog(QDialog):
 
         # 顶部标题
         header = QFrame()
-        header.setStyleSheet(
-            "QFrame { background: %s; border: 1px solid %s;"
-            " border-radius: 12px; }" % (theme.CARD, theme.BORDER))
+        theme.bind(header, lambda: "QFrame { background: %s; border: 1px solid %s;"
+                   " border-radius: 12px; }" % (theme.CARD, theme.BORDER))
         hb = QHBoxLayout(header)
         hb.setContentsMargins(18, 14, 18, 14)
         hb.setSpacing(12)
@@ -259,10 +261,10 @@ class StagePlanDialog(QDialog):
         tb = QVBoxLayout()
         tb.setSpacing(2)
         tb.addWidget(_label("第二理智作战 · 候选关卡", "15px",
-                            theme.TEXT, "600"))
+                            "TEXT", "600"))
         tb.addWidget(_label("先选择关卡，添加后以固定标签显示，第一行最优先",
-                            "12px", theme.TEXT_2))
-        self.source_lab = _label("", "11px", theme.TEXT_3)
+                            "12px", "TEXT_2"))
+        self.source_lab = _label("", "11px", "TEXT_3", transparent=True)
         tb.addWidget(self.source_lab)
         hb.addLayout(tb)
         hb.addStretch(1)
@@ -272,24 +274,24 @@ class StagePlanDialog(QDialog):
 
         # 选择器：一个可滚动下拉 + 添加按钮
         picker = QFrame()
-        picker.setStyleSheet(
-            "QFrame { background: %s; border: 1px solid %s;"
-            " border-radius: 10px; }" % (theme.CARD, theme.BORDER))
+        theme.bind(picker, lambda: "QFrame { background: %s; border: 1px solid %s;"
+                   " border-radius: 10px; }" % (theme.CARD, theme.BORDER))
         pb = QHBoxLayout(picker)
         pb.setContentsMargins(14, 10, 14, 10)
         pb.setSpacing(10)
-        pb.addWidget(_label("添加关卡：", "13px", theme.TEXT_2, "600"))
+        pb.addWidget(_label("添加关卡：", "13px", "TEXT_2", "600"))
         self.picker = QComboBox()
         self.picker.setMinimumWidth(260)
         self.picker.setMaxVisibleItems(10)
-        self.picker.setStyleSheet(
-            "QComboBox { background: %s; color: %s; border: 1px solid %s;"
-            " border-radius: 6px; padding: 4px 10px; }"
-            "QComboBox QAbstractItemView { background: %s; color: %s;"
-            " border: 1px solid %s; selection-background-color: %s;"
-            " selection-color: white; }"
-            % (theme.CARD, theme.TEXT, theme.BORDER,
-               theme.CARD, theme.TEXT, theme.BORDER, theme.ACCENT))
+        theme.bind(
+            self.picker,
+            lambda: "QComboBox { background: %s; color: %s; border: 1px solid %s;"
+                    " border-radius: 6px; padding: 4px 10px; }"
+                    "QComboBox QAbstractItemView { background: %s; color: %s;"
+                    " border: 1px solid %s; selection-background-color: %s;"
+                    " selection-color: white; }"
+                    % (theme.CARD, theme.TEXT, theme.BORDER,
+                       theme.CARD, theme.TEXT, theme.BORDER, theme.ACCENT))
         self._populate_picker()
         self.picker.currentIndexChanged.connect(self._refresh_add_btn)
         pb.addWidget(self.picker, 1)
@@ -300,14 +302,13 @@ class StagePlanDialog(QDialog):
 
         # 已选标签区
         list_card = QFrame()
-        list_card.setStyleSheet(
-            "QFrame { background: %s; border: 1px solid %s;"
-            " border-radius: 12px; }" % (theme.CARD, theme.BORDER))
+        theme.bind(list_card, lambda: "QFrame { background: %s; border: 1px solid %s;"
+                   " border-radius: 12px; }" % (theme.CARD, theme.BORDER))
         lc = QVBoxLayout(list_card)
         lc.setContentsMargins(14, 12, 14, 12)
         lc.setSpacing(8)
         lc.addWidget(_label("已选候选（顺序即尝试顺序）", "13px",
-                            theme.TEXT_2, "600"))
+                            "TEXT_2", "600"))
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setAlignment(Qt.AlignmentFlag.AlignLeft
@@ -323,13 +324,12 @@ class StagePlanDialog(QDialog):
 
         # 底部
         bar = QFrame()
-        bar.setStyleSheet(
-            "QFrame { background: %s; border: 1px solid %s;"
-            " border-radius: 12px; }" % (theme.CARD, theme.BORDER))
+        theme.bind(bar, lambda: "QFrame { background: %s; border: 1px solid %s;"
+                   " border-radius: 12px; }" % (theme.CARD, theme.BORDER))
         bb = QHBoxLayout(bar)
         bb.setContentsMargins(14, 10, 14, 10)
         bb.setSpacing(10)
-        self.summary = _label("", "12px", theme.TEXT_2)
+        self.summary = _label("", "12px", "TEXT_2")
         bb.addWidget(self.summary)
         bb.addStretch(1)
         cancel_btn = style_button(PushButton("取消"))
@@ -406,17 +406,15 @@ class StagePlanDialog(QDialog):
         chip = QFrame()
         chip.setObjectName("stageTag")
         chip.setFixedHeight(40)
-        chip.setStyleSheet(
-            "QFrame { background: %s; border: 1px solid %s;"
-            " border-radius: 8px; }" % (theme.BG, theme.BORDER))
+        theme.bind(chip, lambda: "QFrame { background: %s; border: 1px solid %s;"
+                   " border-radius: 8px; }" % (theme.BG, theme.BORDER))
         lay = QHBoxLayout(chip)
         lay.setContentsMargins(10, 4, 6, 4)
         lay.setSpacing(6)
-        rank = _label("候选 %d" % (index + 1), "12px", theme.TEXT_2, "600")
+        rank = _label("候选 %d" % (index + 1), "12px", "TEXT_2", "600")
         rank.setFixedWidth(52)
         lay.addWidget(rank)
-        name = _label(_stage_label(stage), "13px", theme.TEXT, "600")
-        name.setStyleSheet(name.styleSheet() + "background: transparent;")
+        name = _label(_stage_label(stage), "13px", "TEXT", "600", transparent=True)
         lay.addWidget(name)
         lay.addStretch(1)
         for text, tip, fn in (("↑", "上移", lambda: self._move(index, -1)),
@@ -438,8 +436,7 @@ class StagePlanDialog(QDialog):
                 w.deleteLater()
         if not self.selected:
             empty = _label("还没有选择关卡，从上方下拉选择后点「添加候选关卡」",
-                           "12px", theme.TEXT_3)
-            empty.setStyleSheet(empty.styleSheet() + "background: transparent;")
+                           "12px", "TEXT_3", transparent=True)
             self.tags_layout.addWidget(empty)
             self.tags_layout.addStretch(1)
             return
@@ -484,9 +481,6 @@ class StagePlanDialog(QDialog):
         text = "数据源：%s（更新于 %s）" % (self._maa_dir.name or self._maa_dir, updated)
         self.source_lab.setText(text)
         self.source_lab.setToolTip("关卡列表读取：%s" % self._maa_dir)
-        self.source_lab.setStyleSheet(
-            self.source_lab.styleSheet()
-            + " background: transparent;")
 
     def _auto_refresh_stages(self):
         """MAA 的 StageActivityV2.json 更新后，自动把新活动关卡加进下拉。"""

@@ -55,7 +55,8 @@ class LogsPage(QWidget):
         bar.addStretch(1)
         bar.addWidget(self.filter_edit)
         autoscroll_label = BodyLabel("自动滚动")
-        autoscroll_label.setStyleSheet("color: %s; font-size: 12.5px;" % theme.TEXT_2)
+        theme.bind(autoscroll_label,
+                   lambda: "color: %s; font-size: 12.5px;" % theme.TEXT_2)
         self.autoscroll = set_switch_checked_gray(SwitchButton())
         self.autoscroll.setChecked(True)
         bar.addWidget(autoscroll_label)

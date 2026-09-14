@@ -19,7 +19,8 @@ import theme
 class Pill(QLabel):
     """全圆角状态徽章：ok / run / fail / wait 四种配色，可带圆点。
 
-    配色在每次 set_state 时从 theme 读取，主题切换（重建窗口）后自动生效。
+    配色配方 bind 到主题：set_state 换状态、切换主题时都会重套，
+    不再依赖「重建窗口后自动生效」。
     """
 
     def __init__(self, text="", parent=None):
@@ -27,6 +28,7 @@ class Pill(QLabel):
         self._kind = "wait"
         self.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        theme.bind(self, self._style_qss)
         self.set_state("wait", text)
 
     @staticmethod
@@ -40,18 +42,18 @@ class Pill(QLabel):
             "alert": (theme.PILL_ALERT_FG, theme.ALERT),
         }
 
-    def set_state(self, kind, text):
-        self._kind = kind
-        self._apply_style()
-        self.setText(text)
-
-    def _apply_style(self):
+    def _style_qss(self):
         fg, bg = self._styles().get(self._kind, self._styles()["wait"])
-        self.setStyleSheet(
+        return (
             "QLabel { background: %s; color: %s; border-radius: 99px;"
             " padding: 2.5px 10px; %s font-family: %s; }"
             % (bg, fg, theme.font_stack("11px", "600"), theme.FONT_FAMILY)
         )
+
+    def set_state(self, kind, text):
+        self._kind = kind
+        theme.refresh(self)   # 配色随新状态与新主题立即重套
+        self.setText(text)
 
 
 def dark_log_qss(selector="QPlainTextEdit"):
@@ -77,8 +79,8 @@ def kv_row(key_text, value_widget, value_min_width=0, refs=False):
     lay.setContentsMargins(0, 0, 0, 0)
     lay.setSpacing(8)
     key = BodyLabel(key_text)
-    key.setStyleSheet("color: %s; %s background: transparent;"
-                      % (theme.TEXT_2, theme.font_stack(12.5)))
+    theme.bind(key, lambda: "color: %s; %s background: transparent;"
+               % (theme.TEXT_2, theme.font_stack(12.5)))
     lay.addWidget(key)
     lay.addStretch(1)
     if isinstance(value_widget, str):
@@ -97,11 +99,11 @@ def big_number(num_text, unit_text):
     lay.setContentsMargins(0, 0, 0, 0)
     lay.setSpacing(4)
     num = QLabel(num_text)
-    num.setStyleSheet("font-family: %s; %s color: %s;"
-                      % (theme.FONT_FAMILY, theme.font_stack(22, "700"), theme.TEXT))
+    theme.bind(num, lambda: "font-family: %s; %s color: %s;"
+               % (theme.FONT_FAMILY, theme.font_stack(22, "700"), theme.TEXT))
     unit = QLabel(unit_text)
-    unit.setStyleSheet("font-family: %s; %s color: %s;"
-                       % (theme.FONT_FAMILY, theme.font_stack(12), theme.TEXT_2))
+    theme.bind(unit, lambda: "font-family: %s; %s color: %s;"
+               % (theme.FONT_FAMILY, theme.font_stack(12), theme.TEXT_2))
     unit.setAlignment(Qt.AlignmentFlag.AlignBottom)
     lay.addWidget(num)
     lay.addWidget(unit, 0, Qt.AlignmentFlag.AlignBottom)
@@ -138,15 +140,14 @@ class Card(CardWidget):
             head = QHBoxLayout()
             head.setSpacing(8)
             t = SubtitleLabel(title)
-            t.setStyleSheet("font-family: %s; %s color: %s; background: transparent;"
-                            % (theme.FONT_FAMILY, theme.font_stack(15, "600"), theme.TEXT))
-            _label_transparent(t)
+            theme.bind(t, lambda: "font-family: %s; %s color: %s; background: transparent;"
+                       % (theme.FONT_FAMILY, theme.font_stack(15, "600"), theme.TEXT))
             self.title_label = t
             head.addWidget(t)
             if hint:
                 h = BodyLabel(hint)
-                h.setStyleSheet("font-family: %s; %s color: %s;"
-                                % (theme.FONT_FAMILY, theme.font_stack(12), theme.TEXT_3))
+                theme.bind(h, lambda: "font-family: %s; %s color: %s;"
+                           % (theme.FONT_FAMILY, theme.font_stack(12), theme.TEXT_3))
                 self.hint_label = h
                 head.addWidget(h, 0, Qt.AlignmentFlag.AlignBottom)
                 head.addStretch(1)
@@ -186,23 +187,24 @@ class IconBadge(QLabel):
         super().__init__(char, parent)
         self.setFixedSize(38, 38)
         self.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.setStyleSheet(
-            "QLabel { background: qlineargradient(x1:0, y1:0, x2:0, y2:1,"
-            " stop:0 %s, stop:1 %s); color: #ffffff;"
-            " font-family: %s; %s border-radius: 12px; }"
-            % (theme.BADGE_TOP, theme.BADGE_BOTTOM,
-               theme.FONT_FAMILY, theme.font_stack(17, "700"))
-        )
+        theme.bind(
+            self,
+            lambda: "QLabel { background: qlineargradient(x1:0, y1:0, x2:0, y2:1,"
+                    " stop:0 %s, stop:1 %s); color: #ffffff;"
+                    " font-family: %s; %s border-radius: 12px; }"
+                    % (theme.BADGE_TOP, theme.BADGE_BOTTOM,
+                       theme.FONT_FAMILY, theme.font_stack(17, "700")))
 
 
 def style_scroll_area(scroll):
-    """滚动区统一样式：透明底 + 浅色细滚动条。
+    """滚动区统一样式：透明底 + 浅色细滚动条（配方绑定，随主题即时重套）。
 
     两层处理：
     1. qfluentwidgets ScrollArea 的滚动条是自绘的 SmoothScrollBar
        （3px 常显悬浮条，不吃 QSS），默认黑色 45% 透明度，正好压在
-       卡片右缘上像一条黑边 —— 这里把滑块改成低对比浅灰；
-    2. 经典 QScrollBar 的 QSS 一并给出（弹窗里的普通滚动区会用到）。
+       卡片右缘上像一条黑边 —— 这里把滑块改成低对比浅灰；明暗两套
+       变色一次写全，切换主题无需重设；
+    2. 经典 QScrollBar 的 QSS 绑定为主题配方（弹窗里的普通滚动区会用到）。
     页面内容右侧再让出 12px（各页 root margins），滑块落在留白里。
     """
     delegate = getattr(scroll, "scrollDelagate", None)
@@ -210,23 +212,22 @@ def style_scroll_area(scroll):
         bar = getattr(delegate, name, None) if delegate is not None else None
         handle = getattr(bar, "handle", None) if bar is not None else None
         if handle is not None:
-            color = QColor(*theme.SCROLL_HANDLE_COLOR)
-            handle.setLightColor(color)
-            handle.setDarkColor(color)
-    scroll.setStyleSheet(
-        "QScrollArea { border: none; background: transparent; }"
-        "QScrollArea > QWidget > QWidget { background: transparent; }"
-        "QScrollBar:vertical { background: transparent; width: 8px;"
-        " margin: 4px 2px 4px 0; }"
-        "QScrollBar::handle:vertical { background: %s;"
-        " border-radius: 3px; min-height: 40px; }"
-        "QScrollBar::handle:vertical:hover { background: %s; }"
-        "QScrollBar::sub-line:vertical, QScrollBar::add-line:vertical"
-        " { height: 0; width: 0; }"
-        "QScrollBar::sub-page:vertical, QScrollBar::add-page:vertical"
-        " { background: transparent; }"
-        % (theme.SCROLLBAR_HANDLE, theme.SCROLLBAR_HANDLE_HOVER)
-    )
+            handle.setLightColor(QColor(*theme.SCROLL_HANDLE_LIGHT))
+            handle.setDarkColor(QColor(*theme.SCROLL_HANDLE_DARK))
+    theme.bind(
+        scroll,
+        lambda: "QScrollArea { border: none; background: transparent; }"
+                "QScrollArea > QWidget > QWidget { background: transparent; }"
+                "QScrollBar:vertical { background: transparent; width: 8px;"
+                " margin: 4px 2px 4px 0; }"
+                "QScrollBar::handle:vertical { background: %s;"
+                " border-radius: 3px; min-height: 40px; }"
+                "QScrollBar::handle:vertical:hover { background: %s; }"
+                "QScrollBar::sub-line:vertical, QScrollBar::add-line:vertical"
+                " { height: 0; width: 0; }"
+                "QScrollBar::sub-page:vertical, QScrollBar::add-page:vertical"
+                " { background: transparent; }"
+                % (theme.SCROLLBAR_HANDLE, theme.SCROLLBAR_HANDLE_HOVER))
     scroll.viewport().setStyleSheet("background: transparent;")
     return scroll
 
@@ -235,16 +236,15 @@ def hline():
     """1px 发丝分隔线（弹窗、卡片内分区用）。"""
     line = QWidget()
     line.setFixedHeight(1)
-    line.setStyleSheet("background: %s;" % theme.SEP)
+    theme.bind(line, lambda: "background: %s;" % theme.SEP)
     return line
 
 
 def inset_row():
     """iOS 设置列表式内嵌行容器：深半档底色 + 6px 圆角。"""
     w = QWidget()
-    w.setStyleSheet(
-        "QWidget { background: %s; border-radius: %dpx; }"
-        % (theme.ROW_INSET, theme.RADIUS_ROW))
+    theme.bind(w, lambda: "QWidget { background: %s; border-radius: %dpx; }"
+               % (theme.ROW_INSET, theme.RADIUS_ROW))
     return w
 
 
@@ -253,29 +253,32 @@ def style_button(btn, kind="ghost", small=False):
 
     kind: ghost（常规）/ danger（破坏性：ERR 色文字 + 重描边）
     small: 日志工具栏等次级操作用小一号规格。
-    颜色全部取自 theme 令牌，明亮/暗夜各自成套。
+    颜色全部取自 theme 令牌并以配方绑定，明亮/暗夜切换即时重套。
     """
-    h = theme.BTN_H_SM if small else theme.BTN_H
-    pad = "4px 12px" if small else "6px 16px"
-    danger_border = ("rgba(255, 255, 255, 0.22)" if theme.is_dark()
-                     else "rgba(0, 0, 0, 0.18)")
-    border = danger_border if kind == "danger" else theme.BTN_BORDER
-    color = theme.ERR if kind == "danger" else theme.BTN_FG
-    weight = "600" if kind == "danger" else "500"
-    btn.setStyleSheet(
-        "PushButton { background: %s; color: %s;"
-        " border: 1px solid %s; border-radius: %dpx; padding: %s;"
-        " font-family: %s; %s }"
-        "PushButton:hover { background: %s; }"
-        "PushButton:pressed { background: %s; }"
-        "PushButton:disabled { color: %s;"
-        " border-color: %s; background: %s; }"
-        % (theme.BTN_BG, color, border, theme.RADIUS_BTN, pad,
-           theme.FONT_FAMILY, theme.font_stack(12.5 if small else 13, weight),
-           theme.BTN_BG_HOVER, theme.BTN_BG_PRESSED,
-           theme.BTN_DISABLED_FG, theme.BTN_DISABLED_BORDER, theme.BTN_DISABLED_BG)
-    )
-    btn.setMinimumHeight(h)
+
+    def _qss():
+        danger_border = ("rgba(255, 255, 255, 0.22)" if theme.is_dark()
+                         else "rgba(0, 0, 0, 0.18)")
+        border = danger_border if kind == "danger" else theme.BTN_BORDER
+        color = theme.ERR if kind == "danger" else theme.BTN_FG
+        weight = "600" if kind == "danger" else "500"
+        pad = "4px 12px" if small else "6px 16px"
+        return (
+            "PushButton { background: %s; color: %s;"
+            " border: 1px solid %s; border-radius: %dpx; padding: %s;"
+            " font-family: %s; %s }"
+            "PushButton:hover { background: %s; }"
+            "PushButton:pressed { background: %s; }"
+            "PushButton:disabled { color: %s;"
+            " border-color: %s; background: %s; }"
+            % (theme.BTN_BG, color, border, theme.RADIUS_BTN, pad,
+               theme.FONT_FAMILY, theme.font_stack(12.5 if small else 13, weight),
+               theme.BTN_BG_HOVER, theme.BTN_BG_PRESSED,
+               theme.BTN_DISABLED_FG, theme.BTN_DISABLED_BORDER, theme.BTN_DISABLED_BG)
+        )
+
+    theme.bind(btn, _qss)
+    btn.setMinimumHeight(theme.BTN_H_SM if small else theme.BTN_H)
     btn.setCursor(Qt.CursorShape.PointingHandCursor)
     return btn
 
@@ -286,18 +289,18 @@ def style_primary_button(btn):
     注意：实例 setStyleSheet 会整体替换 qfluentwidgets 的按钮 qss，
     所以这里必须写全背景/悬停/按下/禁用各态，不能只写增量。
     """
-    btn.setStyleSheet(
-        "PrimaryPushButton { background: %s; color: %s;"
-        " border: none; border-radius: %dpx; padding: 6px 18px;"
-        " font-family: %s; %s }"
-        "PrimaryPushButton:hover { background: %s; }"
-        "PrimaryPushButton:pressed { background: %s; }"
-        "PrimaryPushButton:disabled { background: %s; color: %s; }"
-        % (theme.PRIMARY_BG, theme.PRIMARY_FG, theme.RADIUS_BTN,
-           theme.FONT_FAMILY, theme.font_stack(13, "600"),
-           theme.PRIMARY_HOVER, theme.PRIMARY_PRESSED,
-           theme.PRIMARY_DISABLED_BG, theme.PRIMARY_DISABLED_FG)
-    )
+    theme.bind(
+        btn,
+        lambda: "PrimaryPushButton { background: %s; color: %s;"
+                " border: none; border-radius: %dpx; padding: 6px 18px;"
+                " font-family: %s; %s }"
+                "PrimaryPushButton:hover { background: %s; }"
+                "PrimaryPushButton:pressed { background: %s; }"
+                "PrimaryPushButton:disabled { background: %s; color: %s; }"
+                % (theme.PRIMARY_BG, theme.PRIMARY_FG, theme.RADIUS_BTN,
+                   theme.FONT_FAMILY, theme.font_stack(13, "600"),
+                   theme.PRIMARY_HOVER, theme.PRIMARY_PRESSED,
+                   theme.PRIMARY_DISABLED_BG, theme.PRIMARY_DISABLED_FG))
     btn.setMinimumHeight(theme.BTN_H)
     btn.setCursor(Qt.CursorShape.PointingHandCursor)
     return btn

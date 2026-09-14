@@ -2,12 +2,17 @@
 """配色与设计令牌。
 
 明亮主题 = 暖雾灰（B），暗夜主题 = 暮色深灰（D），
-由 apply(name) 把对应调色板写入模块级同名变量；
-控件在【构造/刷新时】读取这些变量，切换主题通过重建窗口生效。
+由 apply(name) 把对应调色板写入模块级同名变量。
+
+即时换肤：控件的配色样式不直接 setStyleSheet，而是通过 bind(widget, qss_fn)
+登记「样式配方」——apply() 末尾统一重套全部配方，窗口不销毁、不重建。
+未绑定的动态配色（paintEvent / 富文本里读模块变量的）在主题切换后由
+主窗口触发一次全量重画 / 页面刷新，读取的已是新调色板。
 
 立体感公式：背景深一档、卡片亮一档 + 发丝描边 + 柔和投影
 （投影参数在 widgets.Card.apply_shadow，两套主题共用）。
 """
+import weakref
 
 # ---- 与主题无关的常量 ----
 
@@ -137,16 +142,84 @@ _DARK = {
 # 侧边栏（mockup .sidebar，历史遗留保留）
 SIDEBAR_BG = "#20262e"
 
+# 一次写入明暗两套变色的接口用（窗口背景 / 通知条底色 / 滚动条滑块）
+BG_LIGHT = _LIGHT["BG"]
+BG_DARK = _DARK["BG"]
+INFOBAR_BG_LIGHT = _LIGHT["INFOBAR_BG"]
+INFOBAR_BG_DARK = _DARK["INFOBAR_BG"]
+SCROLL_HANDLE_LIGHT = _LIGHT["SCROLL_HANDLE_COLOR"]
+SCROLL_HANDLE_DARK = _DARK["SCROLL_HANDLE_COLOR"]
+
+# ---- 即时换肤：样式配方登记 ----
+
+# bind() 登记的 widget 弱引用；apply() 末尾统一重套，销毁的顺带清理
+_bound_refs = []
 _current = "light"
 
 
 def apply(name):
-    """把指定主题的调色板写入模块级变量。name: "light" / "dark"。"""
+    """把指定主题的调色板写入模块级变量，并重套全部绑定样式。name: "light" / "dark"。"""
     global _current
-    palette = _DARK if name == "dark" else _LIGHT
-    for key, value in palette.items():
+    palette_ = _DARK if name == "dark" else _LIGHT
+    for key, value in palette_.items():
         globals()[key] = value
     _current = "dark" if name == "dark" else "light"
+    _rebind_all()    # 即时换肤核心：重套所有 bind() 配方（无绑定时空转）
+
+
+def bind(widget, qss_fn):
+    """登记样式配方：立即应用 qss_fn() 生成的样式表，主题切换时自动重套。
+
+    同一 widget 重复绑定时以最后一次为准（style_button 之后再补一条
+    覆盖样式的场景）；widget 销毁后条目在下次切换时自动清理。
+    """
+    widget._theme_qss = qss_fn
+    refresh(widget)
+    if not any(r() is widget for r in _bound_refs):
+        _bound_refs.append(weakref.ref(widget))
+
+
+def refresh(widget):
+    """立即重套单个 widget 的绑定样式（运行中的状态色变化后调用）。"""
+    fn = getattr(widget, "_theme_qss", None)
+    if fn is None:
+        return
+    try:
+        widget.setStyleSheet(fn())
+    except (RuntimeError, AttributeError):
+        _forget(widget)          # C++ 对象已销毁：清掉失效绑定
+
+
+def _forget(widget):
+    _bound_refs[:] = [r for r in _bound_refs if r() is not widget]
+
+
+def _rebind_all():
+    """主题切换后重套全部绑定样式；已销毁的条目顺带清理。"""
+    alive = []
+    for r in _bound_refs:
+        w = r()
+        if w is None:
+            continue
+        alive.append(r)
+        fn = getattr(w, "_theme_qss", None)
+        if fn is None:
+            continue
+        try:
+            w.setStyleSheet(fn())
+        except (RuntimeError, AttributeError):
+            alive.pop()          # 本次切换中已销毁：丢弃
+    _bound_refs[:] = alive
+
+
+def palette(name):
+    """指定主题的调色板 dict（供一次写入明暗两套变色的接口取值）。"""
+    return _DARK if name == "dark" else _LIGHT
+
+
+def accent_of(name):
+    """指定主题的强调色（切换时先于 apply 交给 setThemeColor 用）。"""
+    return palette(name)["ACCENT"]
 
 
 def is_dark():

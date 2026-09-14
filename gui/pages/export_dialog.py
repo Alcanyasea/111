@@ -20,7 +20,7 @@ class ExportDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("干员资料导出")
         self.resize(640, 480)
-        self.setStyleSheet("QDialog { background: %s; }" % theme.BG)
+        theme.bind(self, lambda: "QDialog { background: %s; }" % theme.BG)
         root = QVBoxLayout(self)
         root.setContentsMargins(20, 18, 20, 16)
         root.setSpacing(10)
@@ -30,8 +30,8 @@ class ExportDialog(QDialog):
             "本次导出 %d 个账号：%s\n"
             "逐号切号 → 更新等待 → 登录校验 → MAA 干员识别，"
             "结果写入 exports\\（约 3 分钟/号）。" % (len(accounts), names))
-        head.setStyleSheet("font-family: %s; font-size: 12.5px; color: %s;"
-                           % (theme.FONT_FAMILY, theme.TEXT_2))
+        theme.bind(head, lambda: "font-family: %s; font-size: 12.5px; color: %s;"
+                   % (theme.FONT_FAMILY, theme.TEXT_2))
         root.addWidget(head)
 
         self.log_view = QPlainTextEdit()
@@ -42,8 +42,8 @@ class ExportDialog(QDialog):
 
         btns = QHBoxLayout()
         tip = BodyLabel("关闭窗口不会中断导出，完成后右上有提示")
-        tip.setStyleSheet("font-family: %s; font-size: 12px; color: %s;"
-                          % (theme.FONT_FAMILY, theme.TEXT_3))
+        theme.bind(tip, lambda: "font-family: %s; font-size: 12px; color: %s;"
+                   % (theme.FONT_FAMILY, theme.TEXT_3))
         close_btn = style_button(PushButton("后台运行"))
         close_btn.clicked.connect(self.accept)
         btns.addWidget(tip)

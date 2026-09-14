@@ -195,7 +195,7 @@ class CaptureDialog(QDialog):
         self.setWindowTitle("捕获账号" if acc is None else "重新捕获账号")
         self.setModal(True)
         self.resize(560, 560)
-        self.setStyleSheet("QDialog { background: %s; }" % theme.BG)
+        theme.bind(self, lambda: "QDialog { background: %s; }" % theme.BG)
 
         root = QVBoxLayout(self)
         root.setContentsMargins(20, 18, 20, 16)
@@ -210,7 +210,7 @@ class CaptureDialog(QDialog):
             row = QHBoxLayout()
             row.setSpacing(10)
             lab = BodyLabel(label_text)
-            lab.setStyleSheet("color: %s; font-size: 13px;" % theme.TEXT_2)
+            theme.bind(lab, lambda: "color: %s; font-size: 13px;" % theme.TEXT_2)
             lab.setFixedWidth(64)
             row.addWidget(lab)
             row.addWidget(widget, 1)
@@ -236,7 +236,10 @@ class CaptureDialog(QDialog):
             "账号密码仅保存在本机 config.json（明文）。密码含 % ^ _ + = [ ] 等特殊字符"
             "或登录出现验证码时，脚本会自动提示你在模拟器窗口手动完成登录。")
         self.hint_label.setWordWrap(True)
-        self.hint_label.setStyleSheet("color: %s; font-size: 12px;" % theme.TEXT_3)
+        # 提示行配色随运行状态变（正常灰 / 失败红 / 通过绿）：
+        # 状态记在 _hint_state，配方读它，主题切换时按当前状态重套
+        self._hint_state = "normal"
+        theme.bind(self.hint_label, self._hint_qss)
         root.addWidget(self.hint_label)
 
         self.log_view = QPlainTextEdit()
@@ -281,10 +284,20 @@ class CaptureDialog(QDialog):
         self.user_edit.setEnabled(not running)
         self.pass_edit.setEnabled(not running)
 
+    def _hint_qss(self):
+        color = {"err": theme.ERR, "ok": theme.OK}.get(self._hint_state,
+                                                       theme.TEXT_3)
+        return "color: %s; font-size: 12px;" % color
+
+    def _set_hint(self, text, state="normal"):
+        """改提示文案与配色（normal 灰 / err 红 / ok 绿），主题切换后按状态重套。"""
+        self._hint_state = state
+        self.hint_label.setText(text)
+        theme.refresh(self.hint_label)
+
     def _show_error(self, text):
         """对话框内的红色提示（InfoBar 在模态 QDialog 中可能不显示，用可见文案兜底）。"""
-        self.hint_label.setText(text)
-        self.hint_label.setStyleSheet("color: %s; font-size: 12px;" % theme.ERR)
+        self._set_hint(text, "err")
 
     def on_start(self):
         label = self.name_edit.text().strip()
@@ -313,11 +326,10 @@ class CaptureDialog(QDialog):
         self.log_view.clear()
         self._append_log(">>> 开始捕获：%s（%s）槽位 %s" % (label, SERVER_LABELS[server], self._slot))
         self._append_log(">>> 正在启动捕获脚本...")
-        self.hint_label.setText(
+        self._set_hint(
             "捕获进行中：自动启动模拟器（如未运行）→ 清空登录态 → 重启游戏 → "
             "点掉弹窗 → 输入账号密码 → 拉取数据。特殊字符密码或验证码时请留意提示，"
             "在模拟器窗口手动登录。")
-        self.hint_label.setStyleSheet("color: %s; font-size: 12px;" % theme.TEXT_3)
 
         self.worker = CaptureWorker(args, env=env, parent=self)
         self.worker.line.connect(self._append_log)
@@ -346,8 +358,7 @@ class CaptureDialog(QDialog):
     def _verify_token(self):
         """捕获成功后立即探测新 token（<1 秒），结果直接显示在提示行。"""
         cfg, slot = self.cfg, self._slot
-        self.hint_label.setText("正在验证新 token...")
-        self.hint_label.setStyleSheet("color: %s; font-size: 12px;" % theme.TEXT_3)
+        self._set_hint("正在验证新 token...")
         self._token_worker = FuncWorker(
             lambda: token_check.check_slot(cfg, slot), parent=self)
         self._token_worker.done.connect(self._on_token_verified)
@@ -359,16 +370,14 @@ class CaptureDialog(QDialog):
             return
         st = res[1] if (isinstance(res, tuple) and res[0] == "ok") else None
         if st is None:
-            self.hint_label.setText(
+            self._set_hint(
                 "槽位里没有可校验的 SDK 凭据（USER_CACHE），挂机前会再做屏幕级检查")
-            self.hint_label.setStyleSheet("color: %s; font-size: 12px;" % theme.TEXT_3)
         elif st.get("status") == "ok":
-            self.hint_label.setText("✓ 新 token 验证通过，账号已可正常挂机")
-            self.hint_label.setStyleSheet("color: %s; font-size: 12px;" % theme.OK)
+            self._set_hint("✓ 新 token 验证通过，账号已可正常挂机", "ok")
         else:
-            self.hint_label.setText(
-                "⚠ token 验证未通过（%s），仪表盘会保持标红" % (st.get("detail") or "未知原因"))
-            self.hint_label.setStyleSheet("color: %s; font-size: 12px;" % theme.ERR)
+            self._set_hint(
+                "⚠ token 验证未通过（%s），仪表盘会保持标红" % (st.get("detail") or "未知原因"),
+                "err")
 
     def _apply_result(self):
         """成功：写入 cfg（新增或更新账号项）并保存。"""
@@ -437,7 +446,7 @@ class AccountDetailDialog(QDialog):
         self.setWindowTitle("账号详情 - %s" % (acc.get("label") or ""))
         self.setModal(True)
         self.resize(560, 480)
-        self.setStyleSheet("QDialog { background: %s; }" % theme.BG)
+        theme.bind(self, lambda: "QDialog { background: %s; }" % theme.BG)
 
         root = QVBoxLayout(self)
         root.setContentsMargins(20, 18, 20, 16)
@@ -454,8 +463,8 @@ class AccountDetailDialog(QDialog):
         _label_transparent(name)
         meta = BodyLabel("%s · 槽位 %s" % (SERVER_LABELS.get(server, server),
                                            acc.get("slot", "未设置")))
-        meta.setStyleSheet("color: %s; font-size: 12px;" % theme.TEXT_2)
-        _label_transparent(meta)
+        theme.bind(meta, lambda: "color: %s; font-size: 12px;"
+                   " background: transparent;" % theme.TEXT_2)
         name_box.addWidget(name)
         name_box.addWidget(meta)
         head.addLayout(name_box)
@@ -466,13 +475,12 @@ class AccountDetailDialog(QDialog):
 
         line = QWidget()
         line.setFixedHeight(1)
-        line.setStyleSheet("background: %s;" % theme.BORDER)
+        theme.bind(line, lambda: "background: %s;" % theme.BORDER)
         root.addWidget(line)
 
         sec = BodyLabel("常用功能")
-        sec.setStyleSheet("color: %s; font-size: 13px; font-weight: 600;"
-                          % theme.TEXT_2)
-        _label_transparent(sec)
+        theme.bind(sec, lambda: "color: %s; font-size: 13px; font-weight: 600;"
+                   " background: transparent;" % theme.TEXT_2)
         root.addWidget(sec)
 
         grid = QGridLayout()
@@ -506,8 +514,8 @@ class AccountDetailDialog(QDialog):
         order_row = QHBoxLayout()
         order_row.setSpacing(10)
         order_lab = BodyLabel("运行顺序")
-        order_lab.setStyleSheet("color: %s; font-size: 12.5px;" % theme.TEXT_2)
-        _label_transparent(order_lab)
+        theme.bind(order_lab, lambda: "color: %s; font-size: 12.5px;"
+                   " background: transparent;" % theme.TEXT_2)
         order_row.addWidget(order_lab)
         self.up_btn = style_button(PushButton("↑ 上移"), small=True)
         self.up_btn.setToolTip("与上一个账号交换位置（运行顺序 = 列表顺序）")
@@ -523,8 +531,8 @@ class AccountDetailDialog(QDialog):
             "导出干员资料点上方按钮，立即导这一个号（与挂机互斥）。"
             "运行顺序 = 账号列表顺序，列表里按住卡片（或账号名）拖到目标位置即可调整。")
         self.hint.setWordWrap(True)
-        self.hint.setStyleSheet("color: %s; font-size: 12px;" % theme.TEXT_3)
-        _label_transparent(self.hint)
+        theme.bind(self.hint, lambda: "color: %s; font-size: 12px;"
+                   " background: transparent;" % theme.TEXT_3)
         root.addWidget(self.hint)
         root.addStretch(1)
 
@@ -656,9 +664,9 @@ class AccountCard(Card):
         self.name_box = QVBoxLayout()
         self.name_box.setSpacing(2)
         self.name_label = ClickLabel(acc.get("label") or "?")
-        self.name_label.setStyleSheet(
-            "QLabel { background: transparent; color: %s;"
-            " font-size: 20px; font-weight: 600; }" % theme.TEXT)
+        theme.bind(self.name_label,
+                   lambda: "QLabel { background: transparent; color: %s;"
+                           " font-size: 20px; font-weight: 600; }" % theme.TEXT)
         self.name_label.setToolTip(
             "点击修改账号名称\n%s · 槽位 %s"
             % (SERVER_LABELS.get(server, server), acc.get("slot", "未设置")))
@@ -890,8 +898,8 @@ class AccountsPage(ScrollArea):
         bar.addWidget(self.add_btn)
         bar.addStretch(1)
         order_hint = BodyLabel("按住卡片（或账号名）拖动：其他账号会让位预览，松手即调整运行顺序")
-        order_hint.setStyleSheet("color: %s; font-size: 12.5px;" % theme.TEXT_2)
-        _label_transparent(order_hint)
+        theme.bind(order_hint, lambda: "color: %s; font-size: 12.5px;"
+                   " background: transparent;" % theme.TEXT_2)
         bar.addWidget(order_hint)
         action.vbox.addLayout(bar)
         root.addWidget(action)
@@ -900,8 +908,8 @@ class AccountsPage(ScrollArea):
         self.grid_area = CardGridArea(self)
         self.grid_area.setFixedHeight(0)
         self.empty_label = BodyLabel("暂无账号，点击上方「添加账号」开始。")
-        self.empty_label.setStyleSheet("color: %s; font-size: 13px;" % theme.TEXT_3)
-        _label_transparent(self.empty_label)
+        theme.bind(self.empty_label, lambda: "color: %s; font-size: 13px;"
+                   " background: transparent;" % theme.TEXT_3)
         self.empty_label.setParent(self.grid_area)
         self.empty_label.hide()
         root.addWidget(self.grid_area)

@@ -24,8 +24,8 @@ PATH_KEYS = (
 
 def _row_label(text, width=96):
     lab = BodyLabel(text)
-    lab.setStyleSheet("font-family: %s; font-size: 13px; color: %s;"
-                      % (theme.FONT_FAMILY, theme.TEXT_2))
+    theme.bind(lab, lambda: "font-family: %s; font-size: 13px; color: %s;"
+               % (theme.FONT_FAMILY, theme.TEXT_2))
     lab.setFixedWidth(width)
     return lab
 
@@ -60,8 +60,8 @@ class SettingsPage(ScrollArea):
         appear_row.addWidget(_row_label("界面主题"))
         appear_row.addWidget(self.theme_combo)
         appear_hint = BodyLabel("切换后界面立即刷新；MAA 更新进行中暂不可切换")
-        appear_hint.setStyleSheet("font-family: %s; font-size: 12px; color: %s;"
-                                  % (theme.FONT_FAMILY, theme.TEXT_3))
+        theme.bind(appear_hint, lambda: "font-family: %s; font-size: 12px; color: %s;"
+                   % (theme.FONT_FAMILY, theme.TEXT_3))
         appear_row.addWidget(appear_hint)
         appear_row.addStretch(1)
         self.appearance_card.vbox.addLayout(appear_row)
@@ -110,18 +110,18 @@ class SettingsPage(ScrollArea):
         update_hint = BodyLabel(
             "游戏更新等待已内置于登录检查：检测到更新界面/安装器只等待不点击，"
             "最长 2 小时；更新失败会立即判该号失败，不空跑")
-        update_hint.setStyleSheet("color: %s; font-size: 12px;" % theme.TEXT_3)
+        theme.bind(update_hint, lambda: "color: %s; font-size: 12px;" % theme.TEXT_3)
         update_hint.setWordWrap(True)
         self.behavior_card.vbox.addWidget(update_hint)
         self.behavior_card.vbox.addSpacing(10)
         shutdown_hint = BodyLabel(
             "每个启动时间的「关机」开关在仪表盘「班次计划」中设置（60 秒倒计时）")
-        shutdown_hint.setStyleSheet("color: %s; font-size: 12px;" % theme.TEXT_3)
+        theme.bind(shutdown_hint, lambda: "color: %s; font-size: 12px;" % theme.TEXT_3)
         shutdown_hint.setWordWrap(True)
         self.behavior_card.vbox.addWidget(shutdown_hint)
         self.behavior_card.vbox.addSpacing(10)
         acc_hint = BodyLabel("账号增删 / 启用 / 捕获请到「账号管理」页")
-        acc_hint.setStyleSheet("color: %s; font-size: 12px;" % theme.TEXT_3)
+        theme.bind(acc_hint, lambda: "color: %s; font-size: 12px;" % theme.TEXT_3)
         self.behavior_card.vbox.addWidget(acc_hint)
         root.addWidget(self.conn_card)
         root.addWidget(self.behavior_card)
@@ -132,7 +132,7 @@ class SettingsPage(ScrollArea):
             "一键修正对应服务器 MAA 的关键配置（客户端类型 / ADB / 直接运行 / "
             "结束脚本 / 常用任务），目录缺失时自动从另一服复制一份。")
         hint.setWordWrap(True)
-        hint.setStyleSheet("color: %s; font-size: 12px;" % theme.TEXT_3)
+        theme.bind(hint, lambda: "color: %s; font-size: 12px;" % theme.TEXT_3)
         self.maa_setup_card.vbox.addWidget(hint)
         self.maa_setup_card.vbox.addSpacing(10)
         setup_row = QHBoxLayout()
@@ -158,7 +158,7 @@ class SettingsPage(ScrollArea):
             "全部结束后关闭 Clash 并恢复 MAA 原配置；更新前 Clash 已开着则复用，"
             "不会主动关闭。挂机运行或 MAA 正在打开时不能更新。")
         upd_hint.setWordWrap(True)
-        upd_hint.setStyleSheet("color: %s; font-size: 12px;" % theme.TEXT_3)
+        theme.bind(upd_hint, lambda: "color: %s; font-size: 12px;" % theme.TEXT_3)
         self.upd_card.vbox.addWidget(upd_hint)
         self.upd_card.vbox.addSpacing(10)
         self.use_vpn_sw = set_switch_checked_gray(SwitchButton())
@@ -192,7 +192,7 @@ class SettingsPage(ScrollArea):
             "挂机/收菜结束后把结果推送到手机：失败必推，成功按下方开关。"
             "无人值守（自动关机）场景下，失败不再只有本机弹窗。")
         notify_hint.setWordWrap(True)
-        notify_hint.setStyleSheet("color: %s; font-size: 12px;" % theme.TEXT_3)
+        theme.bind(notify_hint, lambda: "color: %s; font-size: 12px;" % theme.TEXT_3)
         self.notify_card.vbox.addWidget(notify_hint)
         self.notify_card.vbox.addSpacing(10)
         self.notify_sw = set_switch_checked_gray(SwitchButton())
@@ -245,7 +245,7 @@ class SettingsPage(ScrollArea):
         clean_row.addStretch(1)
         self.clean_card.vbox.addLayout(clean_row)
         self.clean_hint = BodyLabel("")
-        self.clean_hint.setStyleSheet("color: %s; font-size: 12px;" % theme.TEXT_3)
+        theme.bind(self.clean_hint, lambda: "color: %s; font-size: 12px;" % theme.TEXT_3)
         self.clean_card.vbox.addWidget(self.clean_hint)
         self.clean_card.vbox.addSpacing(10)
         root.addWidget(self.clean_card)
@@ -262,7 +262,7 @@ class SettingsPage(ScrollArea):
         bar.addWidget(reset_btn)
         bar.addStretch(1)
         hint = BodyLabel("保存后计划任务自动更新，无需重启")
-        hint.setStyleSheet("color: %s; font-size: 12px;" % theme.TEXT_3)
+        theme.bind(hint, lambda: "color: %s; font-size: 12px;" % theme.TEXT_3)
         bar.addWidget(hint)
         self.action_card.vbox.addLayout(bar)
         root.addWidget(self.action_card)
@@ -287,7 +287,7 @@ class SettingsPage(ScrollArea):
         row.addWidget(widget, 0)
         if hint:
             h = BodyLabel(hint)
-            h.setStyleSheet("color: %s; font-size: 12px;" % theme.TEXT_3)
+            theme.bind(h, lambda: "color: %s; font-size: 12px;" % theme.TEXT_3)
             row.addWidget(h)
         row.addStretch(1)
         card.vbox.addLayout(row)

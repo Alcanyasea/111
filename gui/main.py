@@ -35,7 +35,7 @@ from widgets import Pill
 
 PAGE_TITLES = ["仪表盘", "账号管理", "运行设置", "运行历史", "日志"]
 
-# 当前主窗口引用（主题切换时会整窗重建，运行设置页通过 swap_window 换窗）
+# 当前主窗口引用（main() 里创建；主题切换就地换肤，不再重建窗口）
 _win = None
 
 # 关窗时仍在运行的后台线程引用（防 GC），线程随进程退出而非随窗口析构
@@ -43,36 +43,8 @@ _detached_threads = []
 
 
 def _export_threads_alive():
-    """是否有已脱离旧窗口、仍在跑的导出线程（主题换窗时 closeEvent 转出的）。"""
+    """是否有已脱离窗口、仍在跑的导出线程（关窗时 closeEvent 转出的）。"""
     return any(w.isRunning() for w in _detached_threads)
-
-
-def swap_window():
-    """用当前配置重建主窗口（主题切换用）：先建新窗再关旧窗，桌面不留空。
-
-    旧窗的位置/尺寸/最大化状态与当前所在页面会带到新窗：先落几何、
-    落页面再 show，重建后窗口不跳回默认大小，也不闪回仪表盘。
-    """
-    global _win
-    old = _win
-    geo = old.geometry() if old is not None else None
-    maximized = old.isMaximized() if old is not None else False
-    page_index = old.stackedWidget.currentIndex() if old is not None else 0
-    _win = MainWindow()
-    if not maximized and geo is not None:
-        _win.setGeometry(geo)
-    # 先把 _prev_page 拨到目标页再 switchTo：currentChanged 触发
-    # _on_page_changed 时因「页码未变」直接返回，重建落页不播页面过渡
-    _win._prev_page = page_index
-    _win.switchTo(_win.stackedWidget.widget(page_index))
-    _win.show()
-    if maximized:
-        # 无边框窗口必须先 show 再最大化，直接 showMaximized 不会生效
-        _win.showMaximized()
-    if old is not None:
-        old._rebuilding = True   # 让 closeEvent 跳过「更新进行中」确认
-        old.close()
-        old.deleteLater()
 
 # 右上角提示默认贴窗口顶边（y=24），会盖住标题栏关闭按钮，导致「点了没反应」；
 # 把提示下移到顶部控制栏下方，不再遮挡任何按钮。
@@ -98,16 +70,16 @@ class HeaderBar(QWidget):
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(12)
         self.title = QLabel("仪表盘")
-        self.title.setStyleSheet(
-            "font-family: %s; %s color: %s; background: transparent;"
-            % (theme.FONT_FAMILY, theme.font_stack(24, "700"), theme.TEXT))
+        theme.bind(self.title, lambda: "font-family: %s; %s color: %s;"
+                   " background: transparent;"
+                   % (theme.FONT_FAMILY, theme.font_stack(24, "700"), theme.TEXT))
         lay.addWidget(self.title)
         self.chip = Pill("空闲")
         lay.addWidget(self.chip, 0, Qt.AlignmentFlag.AlignVCenter)
         self.detail = QLabel("")
-        self.detail.setStyleSheet(
-            "font-family: %s; %s color: %s; background: transparent;"
-            % (theme.FONT_FAMILY, theme.font_stack(12.5), theme.TEXT_2))
+        theme.bind(self.detail, lambda: "font-family: %s; %s color: %s;"
+                   " background: transparent;"
+                   % (theme.FONT_FAMILY, theme.font_stack(12.5), theme.TEXT_2))
         lay.addWidget(self.detail, 0, Qt.AlignmentFlag.AlignVCenter)
         lay.addStretch(1)
         self.stop_btn = style_button(PushButton("停止"))
@@ -149,7 +121,6 @@ class MainWindow(FluentWindow):
         super().__init__()
         self.cfg = appconfig.load()
         self._task_info = None
-        self._rebuilding = False
 
         # 主题：明亮（暖雾灰）/ 暗夜（暮色深灰），读自 config.json
         theme_name = (self.cfg.get("appearance") or {}).get("theme", "light")
@@ -157,9 +128,9 @@ class MainWindow(FluentWindow):
         setTheme(Theme.DARK if theme.is_dark() else Theme.LIGHT)
         setThemeColor(theme.ACCENT)
         # 控制台整体底色：关掉 Win11 默认 Mica 背景后，窗口（含标题栏/侧栏区域）
-        # 统一刷成主题 BG 色；Mica 开启时 setCustomBackgroundColor 不生效
+        # 统一刷成主题 BG 色；明暗两套一次写全，切换主题时 qfluentwidgets 自选
         self.setMicaEffectEnabled(False)
-        self.setCustomBackgroundColor(theme.BG, theme.BG)
+        self.setCustomBackgroundColor(theme.BG_LIGHT, theme.BG_DARK)
         self.setWindowIcon(make_icon())
         self.setWindowTitle("MAA 挂机控制台")
         self.titleBar.setTitle("MAA 挂机控制台")
@@ -325,7 +296,7 @@ class MainWindow(FluentWindow):
         self._task_info = info
 
     def _on_theme_change(self, name):
-        """运行设置页切换外观：保存配置并整窗重建。返回 False 表示拒绝。"""
+        """运行设置页切换外观：保存配置后就地换肤（窗口不重建、不重启）。"""
         if self.dash.update_running():
             InfoBar.warning("MAA 更新进行中", "请等更新结束后再切换外观",
                             parent=self, position=InfoBarPosition.TOP_RIGHT,
@@ -333,8 +304,31 @@ class MainWindow(FluentWindow):
             return False
         self.cfg.setdefault("appearance", {})["theme"] = name
         appconfig.save(self.cfg)
-        QTimer.singleShot(250, swap_window)   # 等下拉框动画走完再换窗
+        QTimer.singleShot(250, lambda: self._switch_theme(name))   # 等下拉框动画走完
         return True
+
+    def _switch_theme(self, name):
+        """就地换肤：先让 qfluentwidgets 换掉它自己的配色，再重套自定义样式。
+
+        顺序很重要：setTheme 会让 qfluentwidgets 对其控件重新套用自带样式
+        （会覆盖 style_button 等写上去的自定义样式），所以 bind() 配方的
+        重套必须放在 theme.apply() 里、走在 setTheme 之后，自定义样式才能
+        最终生效。paintEvent 里实时读色的自绘控件（Card 描边 / BusyStrip /
+        token 标红描边）靠全量 update() 触发重画；富文本里的主题色（耗时
+        数字、RunDirectly 状态、结果圆点、历史摘要）靠页面刷新重新生成。
+        """
+        setTheme(Theme.DARK if name == "dark" else Theme.LIGHT)
+        setThemeColor(theme.accent_of(name))
+        theme.apply(name)          # 更新调色板 + 重套全部 bind() 配方
+        # qfluentwidgets 卡片（CardWidget 等）的背景色缓存在 backgroundColor
+        # 属性里，且只在 themeChanged 时重读——setTheme 那一刻调色板还是旧值，
+        # 所以 apply 之后要把这批控件的背景色再刷一次，否则慢一拍
+        for w in QApplication.allWidgets():
+            if hasattr(w, "_updateBackgroundColor"):
+                w._updateBackgroundColor()
+            w.update()
+        self.dash.refresh()
+        self.history_p.refresh()
 
     def _maybe_auto_clean(self):
         """自动清理到期检查（每 2 秒轮询中顺带执行，判断本身是纯字符串比较）。
@@ -382,7 +376,7 @@ class MainWindow(FluentWindow):
 
     def closeEvent(self, event):
         """关窗前收尾：更新线程先恢复配置再退，轮询线程停净，导出转后台。"""
-        if not self._rebuilding and self.dash.update_running():
+        if self.dash.update_running():
             box = MessageBox(
                 "MAA 更新进行中",
                 "MAA 正在后台更新，现在退出会中止更新。\n\n"
@@ -598,14 +592,17 @@ def make_icon():
 
 
 def _patch_gray_info_bar():
-    """通知条配色跟主题走（图标统一用 INFORMATION，不引入彩色）。"""
+    """通知条配色跟主题走（图标统一用 INFORMATION，不引入彩色）。
+
+    明暗两套底色一次写全，主题切换后新弹出的通知条自动用对配色。
+    """
     orig_new = InfoBar.new.__func__
 
     def _new(cls, icon, title, content, orient=Qt.Horizontal, isClosable=True,
              duration=1000, position=InfoBarPosition.TOP_RIGHT, parent=None):
         bar = orig_new(cls, InfoBarIcon.INFORMATION, title, content, orient,
                        isClosable, duration, position, parent)
-        bar.setCustomBackgroundColor(theme.INFOBAR_BG, theme.INFOBAR_BG)
+        bar.setCustomBackgroundColor(theme.INFOBAR_BG_LIGHT, theme.INFOBAR_BG_DARK)
         return bar
 
     InfoBar.new = classmethod(_new)

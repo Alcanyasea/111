@@ -752,8 +752,15 @@ $total = $accountList.Count
 
         # ---- 登录校验：屏幕级确认游戏已登录；未登录自动输账号密码（官服）并刷新槽位 ----
         # 文件级 uid 校验通过不代表游戏真在登录态（token 失效时会回到登录界面）。
-        # 游戏更新等待（含失败快判/安装器检测）自 v1.3.2 起由 login_check 内部处理
-        $loginOk = ((Run-Switch ("login_check.ps1 -Server {0} -Slot {1}" -f $accServer, $accSlot)) -eq 0)
+        # 游戏更新等待（含失败快判/安装器检测）自 v1.3.2 起由 login_check 内部处理。
+        # B服 与官服登录差异大（无标题画面/token 预检不可用/登录界面不可自动登录），
+        # 拆为独立的 login_check_bilibili.ps1 单独校验（盲点只在更新进行中禁用，
+        # 修复 2026-09-14 更新后无文字画面 240 秒空转超时）。
+        if ($accServer -eq "bilibili") {
+            $loginOk = ((Run-Switch ("login_check_bilibili.ps1 -Slot {0}" -f $accSlot)) -eq 0)
+        } else {
+            $loginOk = ((Run-Switch ("login_check.ps1 -Server {0} -Slot {1}" -f $accServer, $accSlot)) -eq 0)
+        }
         if (-not $loginOk) {
             Log "  [ERROR] Login check failed - 请在控制台重新捕获该账号"
             $results += [PSCustomObject]@{ Account=$accLabel; OK=$false; Duration="0 min"; Minutes=0.0; Reason="登录校验失败" }

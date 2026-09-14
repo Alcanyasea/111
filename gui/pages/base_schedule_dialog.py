@@ -79,7 +79,7 @@ class BaseScheduleDialog(QDialog):
         self.setWindowTitle("精确基建派驻 - %s" % acc.get("label", ""))
         self.setModal(True)
         self.resize(880, 720)
-        self.setStyleSheet("QDialog { background: %s; }" % theme.BG)
+        theme.bind(self, lambda: "QDialog { background: %s; }" % theme.BG)
 
         root = QVBoxLayout(self)
         root.setContentsMargins(22, 18, 22, 16)
@@ -158,8 +158,8 @@ class BaseScheduleDialog(QDialog):
         self.fia_combo.setToolTip(tip)
         fia_row.addWidget(self.fia_combo)
         self.fia_batch_lab = BodyLabel("")
-        self.fia_batch_lab.setStyleSheet("color: %s; font-size: 12px;"
-                                        % theme.TEXT_3)
+        theme.bind(self.fia_batch_lab,
+                   lambda: "color: %s; font-size: 12px;" % theme.TEXT_3)
         fia_row.addWidget(self.fia_batch_lab)
         fia_row.addStretch(1)
         root.addLayout(fia_row)
@@ -170,7 +170,7 @@ class BaseScheduleDialog(QDialog):
 
         self.hint = BodyLabel()
         self.hint.setWordWrap(True)
-        self.hint.setStyleSheet("color: %s; font-size: 12px;" % theme.TEXT_2)
+        theme.bind(self.hint, lambda: "color: %s; font-size: 12px;" % theme.TEXT_2)
         root.addWidget(self.hint)
 
         self.stack = QStackedWidget()
@@ -248,7 +248,7 @@ class BaseScheduleDialog(QDialog):
             if row_label:
                 lab = BodyLabel(row_label)
                 lab.setFixedWidth(52)
-                lab.setStyleSheet("color: %s; font-size: 12px;" % theme.TEXT_2)
+                theme.bind(lab, lambda: "color: %s; font-size: 12px;" % theme.TEXT_2)
                 grid.addWidget(lab, r, 0, Qt.AlignmentFlag.AlignVCenter)
                 start = 1
             else:
@@ -269,7 +269,7 @@ class BaseScheduleDialog(QDialog):
         for r, st in enumerate(stations):
             lab = BodyLabel("%d号站" % (r + 1))
             lab.setFixedWidth(52)
-            lab.setStyleSheet("color: %s; font-size: 12px;" % theme.TEXT_2)
+            theme.bind(lab, lambda: "color: %s; font-size: 12px;" % theme.TEXT_2)
             grid.addWidget(lab, r, 0, Qt.AlignmentFlag.AlignVCenter)
             st["combo"].setMinimumWidth(150)
             grid.addWidget(st["combo"], r, 1, Qt.AlignmentFlag.AlignVCenter)

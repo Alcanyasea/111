@@ -59,12 +59,13 @@ def fmt_ts(ts):
 
 
 def _label(text, size="12.5px", weight="400", color=None):
-    # color 缺省时在调用时读取主题色（不能写成默认参数 theme.TEXT，
-    # 否则会在模块导入时固化，切换主题后仍旧值）
+    """主题色文本标签。color 传调色板令牌名（如 "TEXT_2"），
+    配方随主题切换自动重读；None = TEXT。"""
+    token = color if isinstance(color, str) else "TEXT"
     lab = QLabel(text)
-    lab.setStyleSheet(
-        "font-family: %s; font-size: %s; font-weight: %s; color: %s;"
-        % (theme.FONT_FAMILY, size, weight, color or theme.TEXT))
+    theme.bind(lab, lambda: "font-family: %s; font-size: %s; font-weight: %s;"
+               " color: %s;"
+               % (theme.FONT_FAMILY, size, weight, getattr(theme, token)))
     return lab
 
 
@@ -96,7 +97,7 @@ class AccountCard(Card):
         name_box = QVBoxLayout()
         name_box.setSpacing(1)
         name_box.addWidget(_label(acc["name"], size="14.5px", weight="600"))
-        name_box.addWidget(_label(acc["meta"], size="12px", color=theme.TEXT_2))
+        name_box.addWidget(_label(acc["meta"], size="12px", color="TEXT_2"))
         head.addLayout(name_box)
         head.addStretch(1)
         self.pill = Pill()
@@ -233,7 +234,7 @@ class ScheduleCard(Card):
         head.setSpacing(6)
         for text, w in (("班次", 44), ("时间", 68), ("启用", 75), ("关机", 75),
                         ("账号", 110), ("操作", 56)):
-            hlab = _label(text, size="12px", color=theme.TEXT_3)
+            hlab = _label(text, size="12px", color="TEXT_3")
             hlab.setFixedWidth(w)
             head.addWidget(hlab)
         head.addStretch(1)
@@ -265,7 +266,7 @@ class ScheduleCard(Card):
         self.add_btn.clicked.connect(self._on_add)
         bar.addWidget(self.add_btn)
         hint = _label("格式 HH:MM（00:00 即 24点）；「账号」选每班跑哪些号；增删改立即生效",
-                      size="12px", color=theme.TEXT_3)
+                      size="12px", color="TEXT_3")
         bar.addWidget(hint)
         bar.addStretch(1)
         self.vbox.addLayout(bar)
@@ -303,7 +304,7 @@ class ScheduleCard(Card):
         row.setSpacing(8)
 
         lab = BodyLabel(appconfig.batch_name(entry["time"]))
-        lab.setStyleSheet("color: %s; font-size: 13px;" % theme.TEXT_2)
+        theme.bind(lab, lambda: "color: %s; font-size: 13px;" % theme.TEXT_2)
         lab.setFixedWidth(44)
         edit = LineEdit()
         edit.setFixedWidth(68)
@@ -334,8 +335,10 @@ class ScheduleCard(Card):
         del_btn.setFixedWidth(56)
         del_btn.setToolTip(
             "删除该时间点，计划任务中的对应触发立即移除。")
-        del_btn.setStyleSheet(
-            "PushButton { color: %s; border: 1px solid #9aa1ab; }" % theme.ERR)
+        # 整体替换 style_button 的样式（保持原有覆盖行为），配方绑定随主题重套
+        theme.bind(del_btn,
+                   lambda: "PushButton { color: %s; border: 1px solid #9aa1ab; }"
+                           % theme.ERR)
 
         row.addWidget(lab)
         row.addWidget(edit)
@@ -461,7 +464,7 @@ class ScheduleCard(Card):
         dlg.setWindowTitle("班次账号 - %s（%s）" % (
             appconfig.batch_name(entry["time"]), entry["time"]))
         dlg.setModal(True)
-        dlg.setStyleSheet("QDialog { background: %s; }" % theme.BG)
+        theme.bind(dlg, lambda: "QDialog { background: %s; }" % theme.BG)
         v = QVBoxLayout(dlg)
         v.setContentsMargins(20, 18, 20, 16)
         v.setSpacing(10)
@@ -469,7 +472,7 @@ class ScheduleCard(Card):
             "勾选该班次要运行的账号：全部勾选（或不勾）=「全部账号」，以后新增的号\n"
             "也会跟着跑；只勾部分则该班次只跑这几个号，其余号在该班次不运行。")
         hint.setWordWrap(True)
-        hint.setStyleSheet("color: %s; font-size: 12px;" % theme.TEXT_3)
+        theme.bind(hint, lambda: "color: %s; font-size: 12px;" % theme.TEXT_3)
         v.addWidget(hint)
         boxes = []
         for a in accs:
@@ -553,7 +556,7 @@ class LastRunStrip(Card):
         self.dots_layout.setContentsMargins(0, 0, 0, 0)
         self.dots_layout.setSpacing(6)
         bar.addWidget(self.dots_host, 0, Qt.AlignmentFlag.AlignBottom)
-        self.passed_val = _label("", size="12px", color=theme.TEXT_2)
+        self.passed_val = _label("", size="12px", color="TEXT_2")
         bar.addWidget(self.passed_val, 0, Qt.AlignmentFlag.AlignBottom)
         self.dots_host.hide()
         self.passed_val.hide()
@@ -645,7 +648,8 @@ class StatusCard(Card):
 
         divider = QFrame()
         divider.setFrameShape(QFrame.Shape.VLine)
-        divider.setStyleSheet("border: none; border-left: 1px dashed %s;" % theme.BORDER)
+        theme.bind(divider, lambda: "border: none; border-left: 1px dashed %s;"
+                   % theme.BORDER)
         cols.addWidget(divider)
 
         # 右列：MAA 更新
@@ -660,7 +664,7 @@ class StatusCard(Card):
             right.addWidget(self._kv("%s MAA" % name, pill))
         self.hint = _label("版本更新一次完成（资源随版本包到位）；自动开关 Clash 代理，"
                            "全程几分钟到十几分钟，期间请勿关闭控制台",
-                           size="12px", color=theme.TEXT_3)
+                           size="12px", color="TEXT_3")
         self.hint.setWordWrap(True)
         right.addWidget(self.hint)
         right.addSpacing(4)
@@ -678,7 +682,7 @@ class StatusCard(Card):
     # ---------- 构建 ----------
 
     def _section_label(self, text):
-        return _label(text, size="12px", weight="600", color=theme.TEXT_2)
+        return _label(text, size="12px", weight="600", color="TEXT_2")
 
     def _kv(self, key_text, value_widget):
         """同 widgets.kv_row 的键值行。"""
@@ -788,7 +792,7 @@ class UpdateLogDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("MAA 更新")
         self.resize(620, 460)
-        self.setStyleSheet("QDialog { background: %s; }" % theme.BG)
+        theme.bind(self, lambda: "QDialog { background: %s; }" % theme.BG)
         root = QVBoxLayout(self)
         root.setContentsMargins(20, 18, 20, 16)
         root.setSpacing(10)
@@ -798,8 +802,8 @@ class UpdateLogDialog(QDialog):
         root.addWidget(self.log_view, 1)
         btns = QHBoxLayout()
         tip = BodyLabel("关闭窗口不会中断更新，完成后右上有提示")
-        tip.setStyleSheet("font-family: %s; font-size: 12px; color: %s;"
-                          % (theme.FONT_FAMILY, theme.TEXT_3))
+        theme.bind(tip, lambda: "font-family: %s; font-size: 12px; color: %s;"
+                   % (theme.FONT_FAMILY, theme.TEXT_3))
         close_btn = style_button(PushButton("后台运行"))
         close_btn.clicked.connect(self.accept)
         btns.addWidget(tip)
