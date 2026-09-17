@@ -306,6 +306,37 @@ def style_primary_button(btn):
     return btn
 
 
+def style_tinted_button(btn, small=False):
+    """轻强调按钮：主题强调色低透明度实底（macOS tinted push button 变体）。
+
+    介于 ghost（描边式）与 primary（实底深灰）之间：给卡片内唯一的主操作
+    用——比 ghost 有分量，又不会像 primary 那样在多张卡片上重复出现显得
+    沉重。色相取当前主题 ACCENT 调透明度（不引入新颜色，保持整套灰阶），
+    ACCENT 是 "#rrggbb" 字面量，直接拆出三通道。配方绑定随主题即时重套。
+    """
+
+    def _qss():
+        rgb = tuple(int(theme.ACCENT[i:i + 2], 16) for i in (1, 3, 5))
+        pad = "4px 14px" if small else "6px 18px"
+        return (
+            "PushButton { background: rgba(%d, %d, %d, 0.14); color: %s;"
+            " border: none; border-radius: %dpx; padding: %s;"
+            " font-family: %s; %s }"
+            "PushButton:hover { background: rgba(%d, %d, %d, 0.21); }"
+            "PushButton:pressed { background: rgba(%d, %d, %d, 0.28); }"
+            "PushButton:disabled { background: rgba(%d, %d, %d, 0.07);"
+            " color: %s; }"
+            % (rgb + (theme.TEXT, theme.RADIUS_BTN, pad, theme.FONT_FAMILY,
+                      theme.font_stack(12.5 if small else 13, "600"))
+               + rgb + rgb + rgb + (theme.TEXT_3,))
+        )
+
+    theme.bind(btn, _qss)
+    btn.setMinimumHeight(theme.BTN_H_SM if small else theme.BTN_H)
+    btn.setCursor(Qt.CursorShape.PointingHandCursor)
+    return btn
+
+
 def _label_transparent(widget):
     """让 Fluent 文本标签透明，避免在灰卡片上画出底色方块。
 

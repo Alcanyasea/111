@@ -17,7 +17,8 @@ from PySide6.QtCore import (QEasingCurve, QPoint, QParallelAnimationGroup,
                             QPropertyAnimation, Qt, QTimer)
 from PySide6.QtGui import QColor, QFont, QIcon, QLinearGradient, QPainter, QPixmap
 from PySide6.QtWidgets import (QApplication, QGraphicsOpacityEffect,
-                               QHBoxLayout, QLabel, QVBoxLayout, QWidget)
+                               QHBoxLayout, QLabel, QMenu, QSystemTrayIcon,
+                               QVBoxLayout, QWidget)
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
 
 from qfluentwidgets import (FluentIcon, FluentWindow, InfoBar, InfoBarIcon,
@@ -213,7 +214,9 @@ class MainWindow(FluentWindow):
         # 统一刷成主题 BG 色；明暗两套一次写全，切换主题时 qfluentwidgets 自选
         self.setMicaEffectEnabled(False)
         self.setCustomBackgroundColor(theme.BG_LIGHT, theme.BG_DARK)
-        self.setWindowIcon(make_icon())
+        self._app_icon = make_icon()
+        self.setWindowIcon(self._app_icon)
+        self._init_tray()
         self.setWindowTitle("MAA 挂机控制台")
         self.titleBar.setTitle("MAA 挂机控制台")
         # 标题栏关闭按钮默认悬停是红色，统一改成黑/灰系
@@ -267,6 +270,7 @@ class MainWindow(FluentWindow):
         self.header.stop_btn.clicked.connect(self.on_stop)
         self.accounts_p.export_requested.connect(self.on_export_account)
         self.accounts_p.switch_requested.connect(self.on_switch_account)
+        self.accounts_p.start_requested.connect(self.on_start_account)
         self.dash.export_done.connect(self._on_export_done)
         # 关闭 qfluentwidgets 自带的「向上弹出」切换动画，改用 iOS 式
         # 推入/推出过渡（_on_page_changed 里按切换方向滑入滑出）
@@ -434,6 +438,35 @@ class MainWindow(FluentWindow):
         c["last_run"] = datetime.now().strftime("%Y-%m-%d %H:%M")
         appconfig.save(self.cfg)
 
+    def _init_tray(self):
+        """托盘图标：单击/双击唤起主窗口，右键菜单「打开控制台 / 退出」。
+
+        退出必须走 self.close()（触发 closeEvent 收尾清理），
+        不能直接 QApplication.quit()——那会跳过关窗收尾。
+        """
+        self._tray = QSystemTrayIcon(self._app_icon, self)
+        self._tray.setToolTip("MAA 挂机控制台")
+        menu = QMenu()
+        act_open = menu.addAction("打开控制台")
+        act_open.triggered.connect(self._tray_raise)
+        menu.addSeparator()
+        act_quit = menu.addAction("退出")
+        act_quit.triggered.connect(self.close)
+        self._tray.setContextMenu(menu)
+        self._tray.activated.connect(self._on_tray_activated)
+        self._tray.show()
+
+    def _tray_raise(self):
+        self.show()
+        self.setWindowState(self.windowState() & ~Qt.WindowState.WindowMinimized)
+        self.raise_()
+        self.activateWindow()
+
+    def _on_tray_activated(self, reason):
+        if reason in (QSystemTrayIcon.ActivationReason.Trigger,
+                      QSystemTrayIcon.ActivationReason.DoubleClick):
+            self._tray_raise()
+
     def refresh_status(self):
         self._maybe_auto_clean()
         running = runner.is_running()
@@ -455,6 +488,7 @@ class MainWindow(FluentWindow):
             else:
                 detail = "系统空闲 · 下次 %s" % scheduler.next_run_text(self._task_info)
         self.header.update_state(running, detail)
+        self._tray.setToolTip("MAA 挂机控制台 · " + ("运行中" if running else "空闲"))
 
     def closeEvent(self, event):
         """关窗前收尾：更新线程先恢复配置再退，轮询线程停净，导出转后台。"""
@@ -523,20 +557,6 @@ class MainWindow(FluentWindow):
             InfoBar.warning("没有可收菜的账号", "所有账号均已停用；请在「账号管理」启用至少一个",
                             parent=self, position=InfoBarPosition.TOP_RIGHT,
                             duration=5000)
-            return
-        names = "、".join(str(a.get("label") or a.get("id")) for a in enabled)
-        box = MessageBox(
-            "基建收菜",
-            "将依次对 %d 个已启用账号（%s）只收取基建产物：\n\n"
-            "· 切号 → 登录检查 → MAA 只进制造站/贸易站收产物与订单\n"
-            "· 不换班：所有房间 skip，完全不更换干员，也不动班次计划\n"
-            "· 不跑理智/招募/信用等任务\n"
-            "· 结束后自动恢复 MAA 配置，模拟器照常关闭\n\n"
-            "确定开始吗？" % (len(enabled), names),
-            self)
-        box.yesButton.setText("开始收菜")
-        box.cancelButton.setText("取消")
-        if not box.exec():
             return
         runner.clear_stale_lock()
         runner.start_collect(self.cfg)
@@ -625,6 +645,42 @@ class MainWindow(FluentWindow):
                         parent=self, position=InfoBarPosition.TOP_RIGHT, duration=4000)
         self.refresh_status()
 
+    def on_start_account(self, acc):
+        """账号卡片上点了「快速启动」：互斥检查 + 确认后只推 token 不校验。
+
+        master.ps1 -SwitchTo <slot> -NoLoginCheck：槽位登录数据（token）推入
+        游戏并启动即停，跳过更新等待与登录校验（两者都在 login_check 内），
+        模拟器保持运行，不跑 MAA、不关机不推送。互斥面与切换账号相同。
+        """
+        if runner.is_running():
+            InfoBar.warning("流程运行中", "请先停止当前流程再快速启动账号",
+                            parent=self, position=InfoBarPosition.TOP_RIGHT,
+                            duration=4000)
+            return
+        if self.dash.update_running():
+            InfoBar.warning("MAA 更新进行中", "请等更新结束后再快速启动账号",
+                            parent=self, position=InfoBarPosition.TOP_RIGHT,
+                            duration=4000)
+            return
+        if self.dash.export_running() or _export_threads_alive():
+            InfoBar.warning("干员导出进行中", "导出正在占用模拟器，请等导出结束后再启动",
+                            parent=self, position=InfoBarPosition.TOP_RIGHT,
+                            duration=5000)
+            return
+        name = acc.get("label") or acc.get("slot") or "?"
+        slot = acc.get("slot") or ""
+        if not slot:
+            InfoBar.warning("无法快速启动「%s」" % name,
+                            "该账号没有登录数据槽位，请先捕获登录数据",
+                            parent=self, position=InfoBarPosition.TOP_RIGHT,
+                            duration=5000)
+            return
+        runner.clear_stale_lock()
+        runner.start_switch_fast(self.cfg, slot)
+        InfoBar.success("已开始快速启动", "「%s」登录数据推入后即可手动游戏；日志页可查看进度" % name,
+                        parent=self, position=InfoBarPosition.TOP_RIGHT, duration=4000)
+        self.refresh_status()
+
     def _on_export_done(self, ok, summary):
         self.accounts_p.set_export_busy(False)
         if ok:
@@ -653,7 +709,13 @@ class MainWindow(FluentWindow):
 
 
 def make_icon():
-    """绘制「M」渐变徽标作为窗口图标（同 mockup .logo-badge）。"""
+    """窗口/任务栏图标：gui/app.ico（罗德岛徽记，白底黑三角白棋）。
+
+    图标文件缺失时退回程序绘制的「M」渐变徽标（同 mockup .logo-badge）。
+    """
+    ico = os.path.join(os.path.dirname(os.path.abspath(__file__)), "app.ico")
+    if os.path.exists(ico):
+        return QIcon(ico)
     pm = QPixmap(64, 64)
     pm.fill(Qt.GlobalColor.transparent)
     p = QPainter(pm)
@@ -708,6 +770,12 @@ def _patch_gray_message_box():
 
 
 def main():
+    # 显式声明应用身份（AUMID）：pythonw 裸跑时任务栏按钮默认用 exe 的
+    # Python 图标；声明后任务栏/托盘/通知都改用 setWindowIcon 的图标
+    if sys.platform == "win32":
+        import ctypes
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
+            "MAA.HangConsole.Gui")
     QApplication.setHighDpiScaleFactorRoundingPolicy(
         Qt.HighDpiScaleFactorRoundingPolicy.PassThrough)
     app = QApplication(sys.argv)

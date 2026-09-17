@@ -38,6 +38,8 @@ $device = "127.0.0.1:16384"
 $cli = "D:\软件\MuMu模拟器\MuMuPlayer\nx_main\mumu-cli.exe"
 $scriptDir = "D:\1\scripts"
 $debugDir = "D:\1\scripts\debug"
+# 引导已看过标记补写等共用函数（Ensure-GuideViewed 在此库，登录检查两脚本共用同一份）
+. (Join-Path $scriptDir "login_device_lib.ps1")
 
 # ---- 读取 GUI 配置（D:\1\config.json），字段缺失时回退上面的硬编码默认 ----
 $configPath = "D:\1\config.json"
@@ -149,26 +151,6 @@ function Get-PlayerPrefsName {
     $out = (& $adb -s $device shell "ls /data/data/$pkg/shared_prefs/" 2>$null) -join "`n"
     $name = ($out -split "`n" | Where-Object { $_ -match '\.v2\.playerprefs\.xml' } | Select-Object -First 1)
     return ($name -replace '\s+','')
-}
-
-function Ensure-InfraGuideViewed($ppPath) {
-    # 基建「建筑管理」引导标记：新账号首次进基建会弹引导
-    # （key_GB_viewed#BUILDING_STATION_MANAGE），缺失时每次进基建都重弹。
-    # 这里在槽位 playerprefs 上补写该标记（与游戏自身写入一致），保证
-    # 切号/MAA 运行不再出现首次提示。返回 $true 表示已确保存在。
-    if (-not (Test-Path $ppPath)) { return $false }
-    try {
-        $xml = [System.IO.File]::ReadAllText($ppPath, [System.Text.Encoding]::UTF8)
-        if ($xml.Contains('key_GB_viewed%23BUILDING_STATION_MANAGE')) { return $true }
-        $m = [regex]::Match($xml, 'name="u8sdk_cached_uid">([0-9]+)')
-        if (-not $m.Success) { return $false }
-        $key = $m.Groups[1].Value + '%23key_GB_viewed%23BUILDING_STATION_MANAGE'
-        $marker = '<int name="' + $key + '" value="1" />'
-        if (-not $xml.Contains('</map>')) { return $false }
-        $xml = $xml.Replace('</map>', $marker + "`n</map>")
-        [System.IO.File]::WriteAllText($ppPath, $xml, (New-Object System.Text.UTF8Encoding($false)))
-        return $true
-    } catch { return $false }
 }
 
 function Write-FileRemote($localPath, $remotePath, $mode) {
@@ -530,11 +512,15 @@ New-Item -ItemType Directory -Force $dstShared, $dstFiles | Out-Null
 if (-not (Test-Path (Join-Path $dstFiles "lc.cache"))) {
     LogLine "WARN: 设备上暂无 lc.cache（登录后尚未生成，属正常现象，忽略）"
 }
-# 基建引导标记：补写进槽位 playerprefs，避免新账号首次进基建弹引导、之后每次都重弹
-if (Ensure-InfraGuideViewed (Join-Path $dstShared $ppName)) {
-    LogLine "已确保基建引导标记写入槽位（首次进基建不再弹提示）"
+# 引导已看过标记：把清单里缺失的全部补写进槽位 playerprefs（共用清单见
+# login_device_lib.ps1 的 $guideViewedKeys），各界面首次提示不再弹出
+$nGuide = Ensure-GuideViewed (Join-Path $dstShared $ppName)
+if ($nGuide -lt 0) {
+    LogLine "WARN: 未能补写引导已看过标记（槽位数据可能不完整）"
+} elseif ($nGuide -gt 0) {
+    LogLine ("已补写引导已看过标记 {0} 条（各界面首次进入提示不再弹出）" -f $nGuide)
 } else {
-    LogLine "WARN: 未能补写基建引导标记（槽位数据可能不完整）"
+    LogLine "引导已看过标记齐全，无需补写"
 }
 $uid | Out-File (Join-Path $slotDir "uid.txt") -Encoding ascii -NoNewline
 $label | Out-File (Join-Path $slotDir "label.txt") -Encoding utf8

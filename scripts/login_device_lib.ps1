@@ -42,24 +42,56 @@ function Get-DeviceUid($ppName) {
     return $uid
 }
 
-function Ensure-InfraGuideViewed($ppPath) {
-    # 基建「建筑管理」引导标记：新账号首次进基建会弹引导
-    # （key_GB_viewed#BUILDING_STATION_MANAGE），缺失时每次进基建都重弹。
-    # 这里在槽位 playerprefs 上补写该标记（与游戏自身写入一致），保证
-    # 切号/MAA 运行不再出现首次提示。返回 $true 表示已确保存在。
-    if (-not (Test-Path $ppPath)) { return $false }
+# 「界面首次进入引导」已看过标记清单（key_GB_viewed#...）：游戏把这些 int=1
+# 标记写进 playerprefs 后，对应界面的首次引导不再弹出。清单是四个账号槽位
+# 里实际出现过的全部引导标记并集（2026-09-16 收集）；以后游戏新加引导时，
+# 从任一老账号的槽位 playerprefs 里找到对应键名，在此补一行即可。
+# 注意：B服槽位里的 key_shop_extra_qc_viewed 是 string 时间戳（采购相关），
+# 不是 GB_viewed 引导标记，语义不明，不在此补写。
+$guideViewedKeys = @(
+    'BUILDING_STATION_MANAGE',                              # 基建「建筑管理」引导
+    'CHAR_INFO',                                            # 干员信息界面引导
+    'CRISIS_V2#entry',                                      # 危机合约入口引导
+    'CRISIS_V2#map',                                        # 危机合约地图引导
+    'CRISIS_V2#shop',                                       # 危机合约商店引导
+    'ROGUELIKE_BP#bp',                                      # 集成战略数据（月报）引导
+    'ROGUELIKE_CHARSELECT#select',                          # 肉鸽选人界面引导
+    'ROGUELIKE_CHARSELECT#rl05_stash_select',               # 肉鸽仓库引导（秘宝楼台）
+    'ROGUELIKE_CHARSELECT#rl06_stash_select',               # 肉鸽仓库引导（新主题）
+    'ROGUELIKE_DUNGEON#rogue_5',                            # 肉鸽关卡引导（秘宝楼台）
+    'ROGUELIKE_DUNGEON#rogue_5_copper',                     # 肉鸽券兑换引导
+    'ROGUELIKE_DUNGEON#rogue_5_sp',                         # 肉鸽特殊层引导
+    'ROGUELIKE_DUNGEON#rogue_6',                            # 肉鸽关卡引导（新主题）
+    'SPECIAL_OPERATOR#board',                               # 特殊干员看板引导
+    'STAGE_CAMPAIGN#campaign_world_home_state',             # 作战（主线/活动）主页引导
+    'ART_MAGAZINE'                                          # 艺术杂志活动界面引导
+)
+
+function Ensure-GuideViewed($ppPath) {
+    # 给槽位 playerprefs 补写上面清单里全部缺失的「引导已看过」标记：
+    # 键为 <uid>#key_GB_viewed#<组>#<名>（XML 里 # 转义为 %23，int=1，
+    # 与游戏自身写入一致）。切号推回设备后这些首次提示不再弹出。
+    # 返回补写条数；0 = 本已齐全；-1 = 文件缺失/无 uid/读写失败。
+    if (-not (Test-Path $ppPath)) { return -1 }
     try {
         $xml = [System.IO.File]::ReadAllText($ppPath, [System.Text.Encoding]::UTF8)
-        if ($xml.Contains('key_GB_viewed%23BUILDING_STATION_MANAGE')) { return $true }
         $m = [regex]::Match($xml, 'name="u8sdk_cached_uid">([0-9]+)')
-        if (-not $m.Success) { return $false }
-        $key = $m.Groups[1].Value + '%23key_GB_viewed%23BUILDING_STATION_MANAGE'
-        $marker = '<int name="' + $key + '" value="1" />'
-        if (-not $xml.Contains('</map>')) { return $false }
-        $xml = $xml.Replace('</map>', $marker + "`n</map>")
-        [System.IO.File]::WriteAllText($ppPath, $xml, (New-Object System.Text.UTF8Encoding($false)))
-        return $true
-    } catch { return $false }
+        if (-not $m.Success) { return -1 }
+        $uid = $m.Groups[1].Value
+        if (-not $xml.Contains('</map>')) { return -1 }
+        $added = 0
+        foreach ($g in $guideViewedKeys) {
+            $key = $uid + '%23key_GB_viewed%23' + ($g -replace '#', '%23')
+            if ($xml.Contains('name="' + $key + '"')) { continue }
+            $marker = '<int name="' + $key + '" value="1" />'
+            $xml = $xml.Replace('</map>', $marker + "`n</map>")
+            $added++
+        }
+        if ($added -gt 0) {
+            [System.IO.File]::WriteAllText($ppPath, $xml, (New-Object System.Text.UTF8Encoding($false)))
+        }
+        return $added
+    } catch { return -1 }
 }
 
 function Update-SlotData([bool]$ExpectVoiceKeys) {
@@ -105,8 +137,14 @@ function Update-SlotData([bool]$ExpectVoiceKeys) {
     # lc.cache 是可选缓存：登录后游戏可能还没写它（首次启动实测 zx 目录下无此文件）
     & $adb -s $device pull "/data/data/$pkg/files/zx/lc.cache" (Join-Path $dstFiles "lc.cache") 2>$null | Out-Null
     if (-not (Test-Path (Join-Path $dstFiles "lc.cache"))) { LogLine "WARN: 设备暂无 lc.cache（登录后尚未生成，忽略）" }
-    # 基建引导标记：补写进槽位 playerprefs，避免首次进基建弹提示、之后每次都重弹
-    Ensure-InfraGuideViewed (Join-Path $dstShared $pp) | Out-Null
+    # 引导已看过标记：把清单里缺失的全部补写进槽位 playerprefs，
+    # 各界面首次提示不再弹出（清单与说明见上方 $guideViewedKeys）
+    $n = Ensure-GuideViewed (Join-Path $dstShared $pp)
+    if ($n -lt 0) {
+        LogLine "WARN: 未能补写引导已看过标记（槽位数据可能不完整）"
+    } elseif ($n -gt 0) {
+        LogLine ("[slot] 补写引导已看过标记 {0} 条（首次进入提示不再弹出）" -f $n)
+    }
     $devUid | Out-File $uidFile -Encoding ascii -NoNewline
     LogLine ("[slot] 槽位数据已刷新（uid={0}）" -f $devUid)
     return $true

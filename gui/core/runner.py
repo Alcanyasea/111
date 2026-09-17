@@ -137,6 +137,15 @@ def start_switch(cfg, slot):
     return _launch_master(cfg, ["-SwitchTo", slot, "-NoShutdown"])
 
 
+def start_switch_fast(cfg, slot):
+    """快速启动指定账号：master.ps1 -SwitchTo <slot> -NoLoginCheck。
+
+    只把槽位登录数据（token）推入游戏并启动，跳过更新等待与登录校验即停
+    （账号卡片「快速启动」按钮）；模拟器保持运行供手动游戏，同样不关机。
+    """
+    return _launch_master(cfg, ["-SwitchTo", slot, "-NoLoginCheck", "-NoShutdown"])
+
+
 def stop():
     """停止正在运行的挂机流程。
 

@@ -34,7 +34,8 @@ from core.util import CREATE_NO_WINDOW, decode_console
 from pages.stage_plan_dialog import show_stage_plan_dialog
 from widgets import (Card, IconBadge, Pill, _label_transparent,
                      set_switch_checked_gray, style_button,
-                     style_primary_button, style_scroll_area)
+                     style_primary_button, style_scroll_area,
+                     style_tinted_button)
 
 # ---- 拖动排序的版式与节奏（数值参考 SortableJS / react-beautiful-dnd）----
 GRID_COLS = 2          # 每行 2 张卡片
@@ -697,11 +698,21 @@ class AccountCard(Card):
         row.addWidget(self.sw, 0, Qt.AlignmentFlag.AlignVCenter)
         self.vbox.addLayout(row)
 
-        # 捕获状态（UID）直接显示在卡片上
+        # 捕获状态（UID）在左（跟在名字下方，属账号元信息），
+        # 「快速启动」在右：与顶行开关同一条右缘操作轴
         uid_row = QHBoxLayout()
-        uid_row.addStretch(1)
+        uid_row.setSpacing(8)
         self.uid_pill = Pill()
         uid_row.addWidget(self.uid_pill)
+        uid_row.addStretch(1)
+        self.launch_btn = style_tinted_button(PushButton("▶ 快速启动"), small=True)
+        self.launch_btn.setToolTip(
+            "只把该账号的登录数据（token）推入游戏并启动模拟器：不等待游戏更新、"
+            "不做登录校验，导入完成即可手动游戏（无需输账号密码）。\n"
+            "若槽位里的 token 已失效，游戏会停在登录界面，需手动登录或重新捕获。\n"
+            "与挂机、收菜、导出互斥。")
+        self.launch_btn.clicked.connect(self._on_launch)
+        uid_row.addWidget(self.launch_btn)
         self.vbox.addLayout(uid_row)
         self.vbox.addSpacing(2)
         self.refresh_uid()
@@ -741,9 +752,11 @@ class AccountCard(Card):
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
             pos = event.position().toPoint()
-            # 两个开关自己的区域绝不触发详情/拖动（即使事件冒泡回卡片）
+            # 两个开关与「快速启动」按钮自己的区域绝不触发详情/拖动
+            # （即使事件冒泡回卡片）
             if not (self.base_sw.geometry().contains(pos)
-                    or self.sw.geometry().contains(pos)):
+                    or self.sw.geometry().contains(pos)
+                    or self.launch_btn.geometry().contains(pos)):
                 self._press_pos = pos
                 self._maybe_click = True
         super().mousePressEvent(event)
@@ -778,6 +791,12 @@ class AccountCard(Card):
     def _on_toggle(self, checked):
         self.acc["enabled"] = bool(checked)
         appconfig.save(self.cfg)
+
+    def _on_launch(self):
+        """卡片「快速启动」：只记录意图，互斥检查与确认由主窗口接手
+        （同详情弹窗导出/切换的考虑）。"""
+        if self.page is not None:
+            self.page.start_requested.emit(self.acc)
 
     def _on_base_toggle(self, checked):
         bs = self.acc.get("base_schedule")
@@ -857,10 +876,12 @@ class AccountCard(Card):
 
 class AccountsPage(ScrollArea):
     """账号管理页。export_requested = 详情弹窗里点了「导出干员资料」，
-    switch_requested = 点了「切换到此账号」；都由主窗口做互斥检查与确认后启动。"""
+    switch_requested = 点了「切换到此账号」，
+    start_requested = 卡片上点了「快速启动」；都由主窗口做互斥检查与确认后启动。"""
 
     export_requested = Signal(object)
     switch_requested = Signal(object)
+    start_requested = Signal(object)
 
     def __init__(self, cfg):
         super().__init__()

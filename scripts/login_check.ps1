@@ -223,6 +223,7 @@ $lastPngHash = ""
 $lastWords = $null
 $lastUpdateMarker = ""
 $updateSeen = $false
+$lastUpdateAt = [datetime]::MinValue
 $sawText = $false
 $stageStart = (Get-Date)
 $deadline = (Get-Date).AddSeconds($ScreenTimeoutSec)
@@ -266,6 +267,7 @@ while ((Get-Date) -lt $deadline) {
     }
     if ($upNow -or $installing) {
         $updateSeen = $true
+        $lastUpdateAt = Get-Date
         $posCount = 0
         $lastActionAt = Get-Date
         # 只在命中的标记变化时记日志：更新下载常持续几十分钟，每轮都记会刷屏
@@ -363,12 +365,16 @@ while ((Get-Date) -lt $deadline) {
     # 改版）15 秒一次，无文字画面（加载/过渡）30 秒一次。首次点中央（推进标题画面/
     # 剧情对白，历史行为不变），之后中央、右上角 X 交替：公告弹窗页签文字若改版
     # 识别不到，X 盲点仍能关掉常见弹窗（X 位置实测固定）。
-    # 检测到过游戏更新后禁用盲点：下载/安装期间乱点可能打断更新，只等标记变化。
+    # 检测到游戏更新时禁用盲点：下载/安装期间乱点可能打断更新。但只禁 30 秒
+    # 缓冲窗（更新标记消失即计时）——「正在获取更新」是冷启动必经的过渡文字，
+    # 被误判一次就永久禁盲点的话，开屏页没人推进，会空转到 240 秒超时
+    # （2026-09-17 官服实测；B服 同款问题 2026-09-14 已修，此处对齐其 30 秒冷却）。
     # 游戏冷启动加载阶段（还没见过任何文字）也禁盲点：此时点了也是空点，还可能在
     # 加载完的瞬间落在标题画面上多戳一下（slot_switch 校验提前交棒后加载窗更长）
+    $updateCool = $updateSeen -and (((Get-Date) - $lastUpdateAt).TotalSeconds -lt 30)
     $pokeAllowed = $sawText -or (((Get-Date) - $stageStart).TotalSeconds -gt 60)
     $pokeAfterSec = if ((@($words).Count -gt 0)) { 15 } else { 30 }
-    if (-not $updateSeen -and $pokeAllowed -and ((Get-Date) - $lastActionAt).TotalSeconds -gt $pokeAfterSec) {
+    if (-not $updateCool -and $pokeAllowed -and ((Get-Date) - $lastActionAt).TotalSeconds -gt $pokeAfterSec) {
         if ($blindPokeCount -gt 0 -and ($blindPokeCount % 2 -eq 0)) {
             Invoke-Tap $announceCloseX $announceCloseY
             LogLine "[screen] 无可识别动作，盲点右上角公告关闭位兜底"

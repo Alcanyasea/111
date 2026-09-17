@@ -24,7 +24,10 @@ from core import runner
 from widgets import (Card, Pill, _label_transparent, hline, style_button,
                      style_scroll_area)
 
-MODE_LABELS = {"farm": "挂机", "collect": "收菜", "switch": "切号"}
+MODE_LABELS = {"farm": "挂机", "collect": "收菜", "switch": "切号",
+               "start": "快速启动"}
+# 切号/快速启动是单账号手动操作，班次名无意义不显示
+NO_BATCH_MODES = ("switch", "start")
 
 
 def _fmt_dt(ts, short=False):
@@ -176,7 +179,7 @@ class HistoryPage(QWidget):
     def _make_item(self, rec):
         mode = MODE_LABELS.get(rec.get("mode"), "挂机")
         head = "%s · %s" % (_fmt_dt(rec.get("start")), mode)
-        if rec.get("batch") and rec.get("mode") != "switch":
+        if rec.get("batch") and rec.get("mode") not in NO_BATCH_MODES:
             head += "（%s班）" % rec["batch"]
         item = QListWidgetItem(head + "\n" + self._plain_summary(rec))
         if rec.get("fatal") or self._counts(rec)[2]:
@@ -249,7 +252,7 @@ class HistoryPage(QWidget):
     def _build_detail(self, rec):
         box = self.detail_card.vbox
         mode = MODE_LABELS.get(rec.get("mode"), "挂机")
-        batch = "" if rec.get("mode") == "switch" or not rec.get("batch") \
+        batch = "" if rec.get("mode") in NO_BATCH_MODES or not rec.get("batch") \
             else "（%s班）" % rec["batch"]
         title = _label("%s → %s · %s%s" % (
             _fmt_dt(rec.get("start")), _fmt_dt(rec.get("end"), short=True),

@@ -6,6 +6,9 @@
 #   gui.new.json 全程备份、结束恢复
 # -SwitchTo <slot>: 只切到该槽位账号并完成登录校验即停——不跑 MAA、模拟器保持
 #   运行、不关机不推送（GUI「账号管理 → 切换到此账号」，切完直接手动游戏）
+# -SwitchTo <slot> -NoLoginCheck: 快速启动——只推入槽位登录数据（token）并启动
+#   游戏，跳过更新等待与登录校验（两者都在 login_check 内）即停；token 失效时
+#   游戏会停在登录界面，需手动输账号密码或重新捕获（GUI「账号管理 → 卡片快速启动」）
 # 每轮结束把结果写入 scripts\run_history\run_<时间戳>.json（保留 60 天），
 # GUI「运行历史」页读取；config.notify.enabled 时失败必推、成功可选推送到手机
 # （渠道/密钥在 config.notify，GUI「运行设置 → 通知推送」维护，经 plugins\notify 发送）
@@ -14,7 +17,8 @@
 # 2026-09 性能与成功率优化：模拟器启动接 config 启动等待并轮询开机完成（不再固定
 #   睡 15 秒）、45 秒连不上自动重拉实例；MAA 启动即崩溃（零任务进展）自动重试一次；
 #   完成信号轮询 10→4 秒；各阶段衔接 sleep 3→1 秒
-param([switch]$NoShutdown, [switch]$SkipMAA, [switch]$InfrastCollect, [string]$SwitchTo = "")
+param([switch]$NoShutdown, [switch]$SkipMAA, [switch]$InfrastCollect,
+    [string]$SwitchTo = "", [switch]$NoLoginCheck)
 $ErrorActionPreference = "Continue"
 $ProgressPreference = "SilentlyContinue"
 
@@ -549,10 +553,10 @@ function Save-RunHistory($fatalReason) {
 }
 
 # ---- 通知推送：经 plugins\notify 把本轮结果发到手机（渠道/密钥读 config.notify）----
-# 失败必推、成功按 on_success 开关；手动切号（-SwitchTo）人在电脑前，不推送。
+# 失败必推、成功按 on_success 开关；手动切号/快速启动（-SwitchTo）人在电脑前，不推送。
 # 推送本身失败只记日志，绝不影响收尾（弹窗/关机）。
 function Send-RunNotify($title, $body) {
-    if ($runMode -eq "switch") { return }
+    if ($runMode -eq "switch" -or $runMode -eq "start") { return }
     $n = $null
     if ($config) { $n = $config.notify }
     if (-not $n -or -not $n.enabled) { return }
@@ -575,6 +579,7 @@ if (-not $accountList -or $accountList.Count -eq 0) {
 # ---- -SwitchTo：只切到指定槽位账号、不跑日常（GUI「账号管理 → 切换到此账号」）----
 # 槽位不在 config.accounts 时拒绝运行；与 -InfrastCollect 互斥（后者被忽略）。
 # 目标账号即使已停用也照切（用户明确指定了要切这个号）。
+# -NoLoginCheck：快速启动（GUI 卡片「快速启动」按钮），运行历史记为 start 模式。
 if ($SwitchTo) {
     $match = @($accountList | Where-Object { [string]$_.slot -eq $SwitchTo })
     if ($match.Count -eq 0) {
@@ -584,7 +589,7 @@ if ($SwitchTo) {
     }
     $accountList = @($match)
     $InfrastCollect = $false
-    $runMode = "switch"
+    $runMode = if ($NoLoginCheck) { "start" } else { "switch" }
 }
 
 # MAIN
@@ -755,25 +760,35 @@ function Invoke-AccountRun($acc, $idx, $IsRetry) {
         return [PSCustomObject]@{ Account=$accLabel; OK=$false; Duration="0 min"; Minutes=0.0; Reason="切号失败"; Retried=[bool]$IsRetry }
     }
 
-    # ---- 登录校验：屏幕级确认游戏已登录；未登录自动输账号密码（官服）并刷新槽位 ----
-    # 文件级 uid 校验通过不代表游戏真在登录态（token 失效时会回到登录界面）。
-    # 游戏更新等待（含失败快判/安装器检测）自 v1.3.2 起由 login_check 内部处理。
-    # B服 与官服登录差异大（无标题画面/token 预检不可用/登录界面不可自动登录），
-    # 拆为独立的 login_check_bilibili.ps1 单独校验（盲点只在更新进行中禁用，
-    # 修复 2026-09-14 更新后无文字画面 240 秒空转超时）。
-    if ($accServer -eq "bilibili") {
-        $loginOk = ((Run-Switch ("login_check_bilibili.ps1 -Slot {0}" -f $accSlot)) -eq 0)
+    # ---- 快速启动（-SwitchTo -NoLoginCheck）：跳过更新等待与登录校验 ----
+    # token 已随槽位数据推入，导入完成即可玩；token 失效时游戏会停在登录界面
+    # （需手动登录或重新捕获，这正是跳过校验的代价）。也不做 Refresh-SlotData：
+    # 数据刚从槽位推入、游戏刚拉起还在加载写文件，此时回拉可能抓到写了一半的
+    # 文件覆盖掉槽位里的完好副本。
+    if ($SwitchTo -and $NoLoginCheck) {
+        Log "  [FAST] 快速启动：已跳过更新等待与登录校验，模拟器保持运行"
     } else {
-        $loginOk = ((Run-Switch ("login_check.ps1 -Server {0} -Slot {1}" -f $accServer, $accSlot)) -eq 0)
-    }
-    if (-not $loginOk) {
-        Log "  [ERROR] Login check failed - 请在控制台重新捕获该账号"
-        return [PSCustomObject]@{ Account=$accLabel; OK=$false; Duration="0 min"; Minutes=0.0; Reason="登录校验失败"; Retried=[bool]$IsRetry }
+        # ---- 登录校验：屏幕级确认游戏已登录；未登录自动输账号密码（官服）并刷新槽位 ----
+        # 文件级 uid 校验通过不代表游戏真在登录态（token 失效时会回到登录界面）。
+        # 游戏更新等待（含失败快判/安装器检测）自 v1.3.2 起由 login_check 内部处理。
+        # B服 与官服登录差异大（无标题画面/token 预检不可用/登录界面不可自动登录），
+        # 拆为独立的 login_check_bilibili.ps1 单独校验（盲点只在更新进行中禁用，
+        # 修复 2026-09-14 更新后无文字画面 240 秒空转超时）。
+        if ($accServer -eq "bilibili") {
+            $loginOk = ((Run-Switch ("login_check_bilibili.ps1 -Slot {0}" -f $accSlot)) -eq 0)
+        } else {
+            $loginOk = ((Run-Switch ("login_check.ps1 -Server {0} -Slot {1}" -f $accServer, $accSlot)) -eq 0)
+        }
+        if (-not $loginOk) {
+            Log "  [ERROR] Login check failed - 请在控制台重新捕获该账号"
+            return [PSCustomObject]@{ Account=$accLabel; OK=$false; Duration="0 min"; Minutes=0.0; Reason="登录校验失败"; Retried=[bool]$IsRetry }
+        }
     }
 
     # ---- -SwitchTo 模式：切号 + 登录校验完成即停（不跑日常，模拟器保持运行）----
     if ($SwitchTo) {
-        Refresh-SlotData $accServer $accSlot
+        # 快速启动不回拉槽位数据（见上方 [FAST] 注释）
+        if (-not $NoLoginCheck) { Refresh-SlotData $accServer $accSlot }
         $dur = [math]::Round($sw.Elapsed.TotalMinutes, 1)
         Log ("  [OK] 已切换到「" + $accLabel + "」，模拟器保持运行（不跑日常）")
         return [PSCustomObject]@{ Account=$accLabel; OK=$true; Duration="$dur min"; Minutes=$dur; Reason=""; Retried=$false }
