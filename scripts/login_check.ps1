@@ -35,6 +35,14 @@
 # v8 变更：B服 拆出独立校验（login_check_bilibili.ps1），本脚本只跑官服；
 # 设备/槽位共用函数（安装器检测/点击/playerprefs/uid/槽位刷新）收敛到
 # login_device_lib.ps1，与 B服 脚本共用一份。
+# v9 变更（MAA 同款识别升级）：屏幕识别整体换为 vision_lib.ps1（vision.py：
+# OpenCV 模板匹配 + PaddleOCR det/rec ONNX，模板/模型/阈值与 MAA 同源）——
+#   1. 标题画面判定改为「开始唤醒」模板匹配为主、OCR 文字兜底（MAA 同款双保险）；
+#   2. 公告弹窗改为 CloseAnno 模板定位关闭（替代文字标记 + 固定坐标 1215,75），
+#      删除「盲点右上角公告关闭位」交替兜底（v4 后已绝迹，见日志统计）；
+#   3. 主界面判定加主界面设置齿轮模板，特征词降为同帧并列判据；
+#   4. 截图改 MAA 同款 gzip 快速通道（~100-170ms/帧）；OCR 由 Windows OCR
+#      换 PaddleOCR（MAA 同款模型），识别耗时 ~0.1-0.5 秒/帧（常驻进程）。
 # ============================================================
 param(
     [string]$Server = "official",
@@ -87,13 +95,16 @@ if ($Server -eq "bilibili") {
     $serverName = "官服"
 }
 
-# OCR 库（主机端 Windows OCR）+ 共用画面标记库（与 game_update_wait.ps1 同一套）
-# + 共用设备/槽位函数（与 login_check_bilibili.ps1 同一套）
-. (Join-Path $scriptDir "ocr_lib.ps1")
-. (Join-Path $scriptDir "game_state_lib.ps1")
+# MAA 同款识别库（vision.py 常驻进程 + gzip 截图）+ 共用设备/槽位函数
+# （与 login_check_bilibili.ps1 同一套）
+. (Join-Path $scriptDir "vision_lib.ps1")
 . (Join-Path $scriptDir "login_device_lib.ps1")
+# 首次心跳：先于 Start-Vision 等重初始化写入，识别进程启动阶段挂死也能被看门狗覆盖
+Write-LoginHeartbeat
 if (-not (Test-Path $debugDir)) { New-Item -ItemType Directory $debugDir -Force | Out-Null }
 $png = Join-Path $debugDir ("login_check_{0}.png" -f $(if ($Slot) { $Slot } else { $Server }))
+$vp = Start-Vision
+if (-not $vp) { LogLine "ERROR: 识别进程（vision.py）启动失败，请检查 gui\.venv 与 scripts\vision"; exit 1 }
 
 # input text 可靠字符集（其余字符会让整串丢失，见实测）
 $SAFE_CHARS = '^[A-Za-z0-9@.\!\#\$&\*\(\)\- ]+$'
@@ -105,11 +116,18 @@ $captchaMarkers = @("安全验证", "依次点击", "滑动验证", "拼图")
 # 「寻访一次/寻访十次」为干员寻访页独有按钮：B服 启动公告弹窗盖住主界面时，
 # 盲点中央会点进寻访页（2026-08-28 实测卡死 240s 超时），此页无主界面特征词
 $inGameMarkers = @("公开招募", "干员寻访", "理智", "终端", "采购中心", "寻访一次", "寻访十次")
-# 启动公告弹窗页签（弹窗盖住主界面）：右上角 X 是纯图标、OCR 无文本，坐标实测固定
-# （2026-08-28 实测：点 (1215,75) 弹窗即关，主界面特征词立即出现）
-# 页签标记与游戏更新标记在 game_state_lib.ps1（与 game_update_wait.ps1 共用）
-$announceCloseX = 1215
-$announceCloseY = 75
+# 游戏更新进行中的界面文字标记（v9 起原 game_state_lib.ps1 收敛到此）
+$GameUpdateMarkers = @(
+    "正在获取更新", "获取更新配置", "获取资源更新配置", "更新配置",
+    "开始下载更新", "开始下载", "正在下载更新", "正在下载", "下载更新包",
+    "正在校验资源", "正在校验", "校验资源", "资源校验",
+    "正在解压", "解压资源", "资源解压",
+    "正在安装更新", "正在安装", "安装更新", "安装中",
+    "正在更新", "正在更新资源", "更新中", "资源更新", "更新资源",
+    "版本更新", "强制更新", "更新内容",
+    "更新完成", "重新启动游戏", "正在重新启动",
+    "更新下载失败", "下载更新失败", "更新资源损坏", "安装更新失败"
+)
 # 更新失败/卡住文字：更新出现过之后检测到即快速失败（原 game_update_wait 的判定）
 $failMarkers = @(
     "更新下载失败", "下载更新失败", "下载失败", "更新失败",
@@ -202,70 +220,123 @@ if ($Server -eq "official" -and $slotDir) {
 }
 
 # ---- 阶段 1：轮询屏幕，区分「已登录」与「登录界面」----
-# 判定顺序：验证码（失败）→ 登录标记（进入阶段 2）→ 游戏更新/安装器（只等待，
-# 失败文字快速失败）→ 启动公告弹窗（优先点右上角 X 关闭）→ 主界面特征词（已登录
-# 放行）→ 首次启动弹窗（配音选择/确认/同意）→ 开始唤醒（不点击，直接放行）→
-# 盲点兜底（中央、右上角公告关闭位交替；检测到过更新后禁用）。
-# 每轮只做最多一个动作，动作后下一轮必重新截图检测，不会连续盲点。
-# 「已登录」两条路径：主界面特征词（不依赖标题，B服 无标题直接进主界面）；
-# 标题画面（开始唤醒按钮 + 已登录账号）出现即放行——槽位推送的登录数据有效时
-# 标题即登录态，点击开始唤醒、进主界面、关后续弹窗都由 MAA 的「开始唤醒」任务
-# 完成，脚本不再代点（v4；token 失效时游戏点开才会出登录界面，此路检测不到）。
+# 每轮一次 Invoke-VisionFrame 拿到模板 + OCR 全部判定，再按序处理（每轮最多
+# 一个动作，动作后下一轮必重新截图检测，不会连续盲点）：
+# 验证码（失败）→ 登录标记（进入阶段 2）→ 公告弹窗 X（CloseAnno 模板定位关闭，
+# 替代旧「文字标记 + 固定坐标」）→ 游戏更新/安装器（只等待，失败文字快速失败）→
+# 主界面（特征词或主界面模板，已登录放行）→ 首次启动弹窗（配音选择/确认/同意）→
+# 开始唤醒（模板/文字，不点击直接放行）→ 盲点兜底（屏幕中央；检测到过更新后禁用）。
+# 「已登录」两条路径：主界面（不依赖标题）；标题画面（开始唤醒按钮 + 已登录账号）
+# 出现即放行——槽位推送的登录数据有效时标题即登录态，点击开始唤醒、进主界面、
+# 关后续弹窗都由 MAA 的「开始唤醒」任务完成（v4；token 失效时游戏点开才会出
+# 登录界面，此路检测不到）。
 $reachedLogin = $false
 $loginHit = $null
 $voiceKept = $false
 $dialogHandled = $false
 $posCount = 0
 $lastActionAt = (Get-Date)
-$lastAnnounceTapAt = (Get-Date).AddSeconds(-60)
+$lastStartupTapAt = (Get-Date).AddSeconds(-60)
 $blindPokeCount = 0
 $lastPngHash = ""
-$lastWords = $null
+$lastFrame = $null
 $lastUpdateMarker = ""
 $updateSeen = $false
 $lastUpdateAt = [datetime]::MinValue
 $sawText = $false
 $stageStart = (Get-Date)
 $deadline = (Get-Date).AddSeconds($ScreenTimeoutSec)
-# 游戏更新等待的最长封顶：超过后即使仍在更新也不断延长（防止无限卡死）
-$hardDeadline = (Get-Date).AddHours(2)
 while ((Get-Date) -lt $deadline) {
-    if (-not (Ocr-Screenshot $adb $device $png)) { Start-Sleep 3; continue }
-    # 画面与上一轮完全相同（静态加载/弹窗/表单）→ 复用上一轮 OCR 结果，
-    # 跳过最耗时的重复识别；画面一变立即重新识别。
+    Write-LoginHeartbeat
+    if (-not (Invoke-VisionScreenshot $adb $device $png)) { Start-Sleep 3; continue }
+    # 画面与上一轮完全相同（静态加载/弹窗/表单）→ 复用上一轮识别结果；
+    # 画面一变立即重新识别。
     $pngHash = (Get-FileHash $png -Algorithm MD5 -ErrorAction SilentlyContinue).Hash
-    if ($pngHash -and ($pngHash -eq $lastPngHash) -and ($null -ne $lastWords)) {
-        $words = $lastWords
+    if ($pngHash -and ($pngHash -eq $lastPngHash) -and ($null -ne $lastFrame)) {
+        $frame = $lastFrame
     } else {
-        $words = Get-OcrWords $png
+        $frame = Invoke-VisionFrame $vp $png @{
+            templates = @(
+                @{ name = "StartToWakeUp" }
+                @{ name = "StartButton" }
+                @{ name = "CloseAnno" }
+                @{ name = "MainUiToggleSettings" }
+            )
+            ocr = @(
+                @{ name = "captcha";  text = $captchaMarkers }
+                @{ name = "login";    text = $loginMarkers }
+                @{ name = "loginBtn"; text = @("登录"); exact = $true }
+                @{ name = "startup";  text = @("清除缓存", "网络检测", "START") }
+                @{ name = "startBtn"; text = @("START") }
+                @{ name = "update";   text = $GameUpdateMarkers }
+                @{ name = "fail";     text = $failMarkers }
+                @{ name = "ingame";   text = $inGameMarkers }
+                @{ name = "voice";    text = @("维持原有配置") }
+                @{ name = "confirm";  text = @("确认"); exact = $true }
+                @{ name = "agree";    text = @("同意并继续") }
+                @{ name = "wake";     text = @("开始唤醒") }
+            )
+        }
+        if (-not $frame -or $frame.error) { Start-Sleep 3; continue }
         $lastPngHash = $pngHash
-        $lastWords = $words
+        $lastFrame = $frame
     }
-    if (@($words).Count -gt 0) { $sawText = $true }
-    $cap = Find-AnyMarker $words $captchaMarkers
-    if ($cap) {
-        LogLine ("ERROR: 检测到验证码界面（{0}），无人值守无法处理" -f $cap.Name)
+    $wordCount = @($frame.ocr.captcha.lines).Count
+    if ($wordCount -gt 0) { $sawText = $true }
+    $cap = $frame.ocr.captcha
+    if ($cap.matched) {
+        LogLine ("ERROR: 检测到验证码界面（{0}），无人值守无法处理" -f $cap.hit)
         exit 1
     }
-    $lm = Find-AnyMarker $words $loginMarkers
-    if (-not $lm) {
+    $lm = $null
+    if ($frame.ocr.login.matched) {
+        $lm = [PSCustomObject]@{ X = $frame.ocr.login.center[0]; Y = $frame.ocr.login.center[1]; Name = $frame.ocr.login.hit }
+    } elseif ($frame.ocr.loginBtn.matched) {
         # 密码表单可能只剩裸「登录」按钮（无本机/密码登录链接），用整行精确匹配兜底
-        $lmExact = Find-OcrText $words "登录" -Exact
-        if ($lmExact) { $lm = [PSCustomObject]@{ X = $lmExact.X; Y = $lmExact.Y; Name = "登录" } }
+        $lm = [PSCustomObject]@{ X = $frame.ocr.loginBtn.center[0]; Y = $frame.ocr.loginBtn.center[1]; Name = "登录" }
     }
     if ($lm) { $reachedLogin = $true; $loginHit = $lm; break }
-    # 游戏更新中：只等待不点击（下载/安装期间盲点可能打断更新）；
-    # 公告页的“更新公告”正文用公告分支处理，不在此误判。
+    # 公告弹窗：CloseAnno 模板命中即点其中心（右上角 X 纯图标，不再依赖固定坐标）；
+    # 不刷新 $lastActionAt，X 点不掉仍保留盲点兜底
+    $annoX = Get-VisionFrameCenter $frame.templates.CloseAnno
+    if ($annoX) {
+        Invoke-Tap $annoX.X $annoX.Y
+        LogLine "[dialog] 公告弹窗（CloseAnno 模板命中），点击右上角关闭"
+        Start-Sleep 2
+        continue
+    }
+    # 开屏剧情 START 页（v9 实测官服新增：~4 页轮换的世界观介绍，左上角清除缓存/
+    # 网络检测，底部中央菱形 START 按钮，点击后才进标题画面）。页面会轮换、文字
+    # 不可依赖，按 START 按钮模板识别；模板未命中时用左上角按钮文字兜底判定，
+    # 点击坐标依次：模板中心 → OCR「START」→ 实测固定 (640,675)。限频 3 秒防连点
+    if ($frame.templates.StartButton.matched -or $frame.ocr.startup.matched) {
+        if (((Get-Date) - $lastStartupTapAt).TotalSeconds -ge 3) {
+            if ($frame.templates.StartButton.matched) {
+                $c = Get-VisionFrameCenter $frame.templates.StartButton
+                Invoke-Tap $c.X $c.Y
+                $how = "START按钮模板"
+            } elseif ($frame.ocr.startBtn.matched) {
+                Invoke-Tap $frame.ocr.startBtn.center[0] $frame.ocr.startBtn.center[1]
+                $how = "START文字"
+            } else {
+                Invoke-Tap 640 675
+                $how = $frame.ocr.startup.hit
+            }
+            $lastStartupTapAt = Get-Date
+            LogLine ("[dialog] 开屏剧情（{0}），点击 START 跳过" -f $how)
+        }
+        Start-Sleep 2
+        continue
+    }
+    # 游戏更新中：只等待不点击（下载/安装期间盲点可能打断更新）。
     # 系统包安装器（强制更新重装客户端）OCR 识别不到，用前台包名补判；
     # 只在更新已出现过或画面无文字时查（每轮 dumpsys 有 adb 开销）
-    $annNow = Find-AnyMarker $words $AnnounceMarkers
-    $upNow = $null
-    if (-not $annNow) { $upNow = Find-AnyMarker $words $GameUpdateMarkers }
+    $upNow = $frame.ocr.update
     $installing = $false
-    if (-not $annNow -and -not $upNow -and ($updateSeen -or (@($words).Count -eq 0))) {
+    if (-not $upNow.matched -and ($updateSeen -or ($wordCount -eq 0))) {
         $installing = Is-InstallerForeground
     }
-    if ($upNow -or $installing) {
+    if ($upNow.matched -or $installing) {
         $updateSeen = $true
         $lastUpdateAt = Get-Date
         $posCount = 0
@@ -276,46 +347,33 @@ while ((Get-Date) -lt $deadline) {
                 LogLine "[update] 检测到系统包安装器，正在安装/重新安装客户端，等待完成（不点击）"
                 $lastUpdateMarker = "(安装器)"
             }
-        } elseif ($upNow.Name -ne $lastUpdateMarker) {
-            LogLine ("[update] 检测到游戏更新界面（{0}），等待更新完成（不点击）" -f $upNow.Name)
-            $lastUpdateMarker = $upNow.Name
+        } elseif ($upNow.hit -ne $lastUpdateMarker) {
+            LogLine ("[update] 检测到游戏更新界面（{0}），等待更新完成（不点击）" -f $upNow.hit)
+            $lastUpdateMarker = $upNow.hit
         }
-        if ((Get-Date) -lt $hardDeadline) {
-            # 更新下载/安装可能超过默认登录超时：每次检测到更新顺延一轮
-            $deadline = (Get-Date).AddSeconds($ScreenTimeoutSec)
-        }
+        # 更新下载/安装可能超过默认登录超时：每次检测到更新顺延一轮。
+        # 不设封顶——更新状态由心跳看门狗兜底挂死（30 秒无心跳即杀），
+        # 正常等待多久都合法（用户设定：正常运行不限时）
+        $deadline = (Get-Date).AddSeconds($ScreenTimeoutSec)
         # 更新以分钟计，更密的轮询没有收益，10 秒足够及时
         Start-Sleep 10
         continue
     }
     # 更新出现过之后：失败提示立即报错（原 game_update_wait 的快速失败判定；
     # 探测阶段不判——游戏刚启动的「网络连接已断开」可能是瞬时抖动，可恢复）
-    if ($updateSeen -and -not $annNow) {
-        $fail = Find-AnyMarker $words $failMarkers
-        if ($fail) {
-            LogLine ("ERROR: 游戏更新失败（{0}），请检查网络/存储后重试" -f $fail.Name)
-            exit 1
-        }
+    if ($updateSeen -and $frame.ocr.fail.matched) {
+        LogLine ("ERROR: 游戏更新失败（{0}），请检查网络/存储后重试" -f $frame.ocr.fail.hit)
+        exit 1
     }
-    # 启动公告弹窗：优先处理（盖住主界面时特征词不可见，且要求优先关弹窗再看主界面）。
-    # 点右上角 X 关闭；限频 6 秒防连点；不刷新 $lastActionAt，若 X 点不掉仍保留盲点兜底
-    # $annNow 与上面更新检测共用同一轮判定结果，不再重复扫描
-    $ann = $annNow
-    if ($ann) {
-        if (((Get-Date) - $lastAnnounceTapAt).TotalSeconds -ge 6) {
-            Invoke-Tap $announceCloseX $announceCloseY
-            $lastAnnounceTapAt = Get-Date
-            LogLine ("[dialog] 公告弹窗（{0}），点击右上角关闭" -f $ann.Name)
-        }
-        Start-Sleep 2
-        continue
-    }
-    # 主界面特征词（B服 无标题直接进主界面；官服正常路径也能提前放行）
-    $ig = Find-AnyMarker $words $inGameMarkers
-    if ($ig) {
+    # 主界面（特征词或主界面模板任一命中；B服 无标题直接进主界面，官服正常路径
+    # 也能提前放行）
+    $igName = $null
+    if ($frame.ocr.ingame.matched) { $igName = $frame.ocr.ingame.hit }
+    elseif ($frame.templates.MainUiToggleSettings.matched) { $igName = "主界面模板" }
+    if ($igName) {
         $posCount++
         if ($posCount -ge 2) {
-            LogLine ("[screen] 检测到主界面（{0}），已登录" -f $ig.Name)
+            LogLine ("[screen] 检测到主界面（{0}），已登录" -f $igName)
             Update-SlotData $dialogHandled | Out-Null
             exit 0
         }
@@ -324,9 +382,8 @@ while ((Get-Date) -lt $deadline) {
     }
     $posCount = 0
     # 首次启动弹窗（清登录态/缺 lc.cache 时会走这轮，纯文字画面）
-    $voiceKeep = Find-OcrText $words "维持原有配置"
-    if ($voiceKeep -and (-not $voiceKept)) {
-        Invoke-Tap $voiceKeep.X $voiceKeep.Y
+    if ($frame.ocr.voice.matched -and (-not $voiceKept)) {
+        Invoke-Tap $frame.ocr.voice.center[0] $frame.ocr.voice.center[1]
         $voiceKept = $true
         $dialogHandled = $true
         LogLine "[dialog] 勾选「维持原有配置」"
@@ -334,18 +391,16 @@ while ((Get-Date) -lt $deadline) {
         Start-Sleep 2
         continue
     }
-    $confirm = Find-OcrText $words "确认"
-    if ($confirm) {
-        Invoke-Tap $confirm.X $confirm.Y
+    if ($frame.ocr.confirm.matched) {
+        Invoke-Tap $frame.ocr.confirm.center[0] $frame.ocr.confirm.center[1]
         $dialogHandled = $true
         LogLine "[dialog] 点击「确认」"
         $lastActionAt = Get-Date
         Start-Sleep 2
         continue
     }
-    $agree = Find-OcrText $words "同意并继续"
-    if ($agree) {
-        Invoke-Tap $agree.X $agree.Y
+    if ($frame.ocr.agree.matched) {
+        Invoke-Tap $frame.ocr.agree.center[0] $frame.ocr.agree.center[1]
         $dialogHandled = $true
         LogLine "[dialog] 点击「同意并继续」"
         $lastActionAt = Get-Date
@@ -353,18 +408,16 @@ while ((Get-Date) -lt $deadline) {
         continue
     }
     # 标题画面（开始唤醒按钮 + 已登录账号）：不点击，直接放行交给 MAA。
-    # 点开始唤醒、进主界面、关后续弹窗都由 MAA 的「开始唤醒」任务完成；
-    # 原先点完还要等 3 张稳定帧，每号白等 10~25 秒。
-    $wake = Find-OcrText $words "开始唤醒"
-    if ($wake) {
-        LogLine "[screen] 标题画面（开始唤醒可见），视为已登录，直接放行交给 MAA"
+    # 模板为主、OCR 文字兜底（MAA StartToWakeUp + StartToWakeUpOCR 同款双层）；
+    # 点开始唤醒、进主界面、关后续弹窗都由 MAA 的「开始唤醒」任务完成。
+    if ($frame.templates.StartToWakeUp.matched -or $frame.ocr.wake.matched) {
+        $src = "文字"; if ($frame.templates.StartToWakeUp.matched) { $src = "模板" }
+        LogLine ("[screen] 标题画面（开始唤醒可见-{0}），视为已登录，直接放行交给 MAA" -f $src)
         Update-SlotData $dialogHandled | Out-Null
         exit 0
     }
-    # 无可识别动作时的盲点兜底。节奏分档：有文字画面（剧情对白/未知页面/公告弹窗
-    # 改版）15 秒一次，无文字画面（加载/过渡）30 秒一次。首次点中央（推进标题画面/
-    # 剧情对白，历史行为不变），之后中央、右上角 X 交替：公告弹窗页签文字若改版
-    # 识别不到，X 盲点仍能关掉常见弹窗（X 位置实测固定）。
+    # 无可识别动作时的盲点兜底（屏幕中央）。节奏分档：有文字画面（剧情对白/
+    # 未知页面）15 秒一次，无文字画面（加载/过渡）30 秒一次。
     # 检测到游戏更新时禁用盲点：下载/安装期间乱点可能打断更新。但只禁 30 秒
     # 缓冲窗（更新标记消失即计时）——「正在获取更新」是冷启动必经的过渡文字，
     # 被误判一次就永久禁盲点的话，开屏页没人推进，会空转到 240 秒超时
@@ -373,21 +426,16 @@ while ((Get-Date) -lt $deadline) {
     # 加载完的瞬间落在标题画面上多戳一下（slot_switch 校验提前交棒后加载窗更长）
     $updateCool = $updateSeen -and (((Get-Date) - $lastUpdateAt).TotalSeconds -lt 30)
     $pokeAllowed = $sawText -or (((Get-Date) - $stageStart).TotalSeconds -gt 60)
-    $pokeAfterSec = if ((@($words).Count -gt 0)) { 15 } else { 30 }
+    $pokeAfterSec = if (($wordCount -gt 0)) { 15 } else { 30 }
     if (-not $updateCool -and $pokeAllowed -and ((Get-Date) - $lastActionAt).TotalSeconds -gt $pokeAfterSec) {
-        if ($blindPokeCount -gt 0 -and ($blindPokeCount % 2 -eq 0)) {
-            Invoke-Tap $announceCloseX $announceCloseY
-            LogLine "[screen] 无可识别动作，盲点右上角公告关闭位兜底"
-        } else {
-            Invoke-Tap 640 360
-            LogLine "[screen] 无可识别动作，盲点屏幕中央兜底"
-        }
+        Invoke-Tap 640 360
+        LogLine "[screen] 无可识别动作，盲点屏幕中央兜底"
         $blindPokeCount++
         $lastActionAt = Get-Date
     }
     # 轮询节奏自适应：无动作且画面有文字 → 2 秒（弹窗/对白可能变化，保持较快响应）；
     # 画面完全没有文字（加载/过渡）→ 3 秒（游戏本身需要时间，频繁识别没有收益）
-    if ((@($words).Count -gt 0)) { Start-Sleep 2 } else { Start-Sleep 3 }
+    if (($wordCount -gt 0)) { Start-Sleep 2 } else { Start-Sleep 3 }
 }
 if (-not $reachedLogin) {
     LogLine ("ERROR: {0} 秒内无法确认登录状态" -f $ScreenTimeoutSec)
@@ -421,10 +469,11 @@ if (($loginHit.Name -ne "登录") -and ($loginHit.Name -ne "请输入账号") -a
     $deadline3 = (Get-Date).AddSeconds(20)
     $hit = $null
     while ((Get-Date) -lt $deadline3) {
+        Write-LoginHeartbeat
         Start-Sleep 3
-        if (Ocr-Screenshot $adb $device $png) {
-            $hit = Find-OcrText (Get-OcrWords $png) "密码登录"
-            if ($hit) { break }
+        if (Invoke-VisionScreenshot $adb $device $png) {
+            $f = Invoke-VisionFrame $vp $png @{ ocr = @(@{ name = "pw"; text = @("密码登录") }) }
+            if ($f -and $f.ocr.pw.matched) { $hit = Get-OcrHit $f.ocr.pw; break }
         }
     }
     if ($hit) { Invoke-Tap $hit.X $hit.Y; LogLine "[login] 点击「密码登录」" }
@@ -435,35 +484,37 @@ if (($loginHit.Name -ne "登录") -and ($loginHit.Name -ne "请输入账号") -a
 }
 # 密码表单（「请输入账号」+「请输入密码」占位符可见）
 $deadline4 = (Get-Date).AddSeconds(20)
-$words3 = $null
+$fields = $null
 while ((Get-Date) -lt $deadline4) {
+    Write-LoginHeartbeat
     Start-Sleep 3
-    if (Ocr-Screenshot $adb $device $png) {
-        $w3 = Get-OcrWords $png
-        if ((Find-OcrText $w3 "请输入账号") -and (Find-OcrText $w3 "请输入密码")) { $words3 = $w3; break }
+    if (Invoke-VisionScreenshot $adb $device $png) {
+        $f = Invoke-VisionFrame $vp $png @{ ocr = @(
+            @{ name = "acct"; text = @("请输入账号") }
+            @{ name = "pwd";  text = @("请输入密码") }
+        ) }
+        if ($f -and $f.ocr.acct.matched -and $f.ocr.pwd.matched) { $fields = $f.ocr; break }
     }
 }
-if ($null -eq $words3) { LogLine "ERROR: 密码表单未出现，自动登录失败"; exit 1 }
+if ($null -eq $fields) { LogLine "ERROR: 密码表单未出现，自动登录失败"; exit 1 }
 
 # 输入账号（Type-Field 内含收键盘+聚焦，防首字符被吞）
-$f1 = Find-OcrText $words3 "请输入账号"
-if ($f1) { Type-Field $f1.X $f1.Y $Username } else { Type-Field 545 283 $Username }
+Type-Field $fields.acct.center[0] $fields.acct.center[1] $Username
 # 账号框内容自校验（可见字段）：前 5 字符不匹配则清空重输一次
-if (Ocr-Screenshot $adb $device $png) {
-    $wv = Get-OcrWords $png
-    $fieldText = (($wv | Where-Object { $_.Y -gt 250 -and $_.Y -lt 320 } | ForEach-Object { $_.Text }) -join '')
+if (Invoke-VisionScreenshot $adb $device $png) {
+    $fv = Invoke-VisionFrame $vp $png @{ ocr = @(@{ name = "band"; all = $true; roi = @(0, 245, 1280, 80) }) }
+    $fieldText = if ($fv) { (@($fv.ocr.band.lines) | ForEach-Object { $_.text }) -join '' } else { "" }
     $u = $Username
     $headOk = ($u.Length -lt 5) -or ($fieldText -match [regex]::Escape($u.Substring(0, 5)))
     if (-not $headOk) {
         LogLine ("[login] 账号框内容异常（{0}），清空重输一次" -f $fieldText)
         & $adb -s $device shell "input keyevent 123; for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24; do input keyevent 67; done" 2>$null | Out-Null
         Start-Sleep 2
-        if ($f1) { Type-Field $f1.X $f1.Y $Username } else { Type-Field 545 283 $Username }
+        Type-Field $fields.acct.center[0] $fields.acct.center[1] $Username
     }
 }
 # 输入密码（掩码不可校验，同样用可靠输入序列）
-$f2 = Find-OcrText $words3 "请输入密码"
-if ($f2) { Type-Field $f2.X $f2.Y $Password } else { Type-Field 545 363 $Password }
+Type-Field $fields.pwd.center[0] $fields.pwd.center[1] $Password
 
 # ---- 提交并轮询结果 ----
 # 首次提交不点协议复选框（恢复的登录态通常已勾选过）；25 秒仍停在表单则补点一次重提。
@@ -473,45 +524,56 @@ $loggedIn = $false
 $stableCount2 = 0
 $deadline5 = (Get-Date).AddSeconds($LoginTimeoutSec)
 while ((Get-Date) -lt $deadline5) {
+    Write-LoginHeartbeat
     Start-Sleep 5
-    if (-not (Ocr-Screenshot $adb $device $png)) { continue }
-    $w = Get-OcrWords $png
+    if (-not (Invoke-VisionScreenshot $adb $device $png)) { continue }
+    $f = Invoke-VisionFrame $vp $png @{
+        templates = @(
+            @{ name = "StartToWakeUp" }
+            @{ name = "MainUiToggleSettings" }
+        )
+        ocr = @(
+            @{ name = "captcha";  text = $captchaMarkers }
+            @{ name = "login";    text = $loginMarkers }
+            @{ name = "loginBtn"; text = @("登录"); exact = $true }
+            @{ name = "pwerr";    text = @("密码错误") }
+            @{ name = "ingame";   text = $inGameMarkers }
+            @{ name = "wake";     text = @("开始唤醒") }
+        )
+    }
+    if (-not $f -or $f.error) { continue }
 
-    $cap2 = Find-AnyMarker $w $captchaMarkers
-    if ($cap2) {
-        LogLine ("ERROR: 登录触发验证码（{0}），无人值守无法处理" -f $cap2.Name)
+    if ($f.ocr.captcha.matched) {
+        LogLine ("ERROR: 登录触发验证码（{0}），无人值守无法处理" -f $f.ocr.captcha.hit)
         exit 1
     }
-    if (Find-OcrText $w "密码错误") {
+    if ($f.ocr.pwerr.matched) {
         LogLine "ERROR: 提示账号或密码错误，请检查配置后重新捕获"
         exit 1
     }
 
-    $lm2 = Find-AnyMarker $w $loginMarkers
-    if (-not $lm2) { $e = Find-OcrText $w "登录" -Exact; if ($e) { $lm2 = [PSCustomObject]@{ X = $e.X; Y = $e.Y; Name = "登录" } } }
+    $lm2 = ($f.ocr.login.matched -or $f.ocr.loginBtn.matched)
     if (-not $lm2) {
-        $wake = Find-OcrText $w "开始唤醒"
-        if ($wake) {
+        if ($f.templates.StartToWakeUp.matched -or $f.ocr.wake.matched) {
             LogLine "[login] 已回标题画面（开始唤醒可见），登录成功"
             $loggedIn = $true
             break
         }
-        $ig2 = Find-AnyMarker $w $inGameMarkers
-        if ($ig2) {
-            LogLine ("[login] 检测到主界面（{0}），登录成功" -f $ig2.Name)
+        if ($f.ocr.ingame.matched) {
+            LogLine ("[login] 检测到主界面（{0}），登录成功" -f $f.ocr.ingame.hit)
             $loggedIn = $true
             break
         }
-        if (@($w).Count -gt 0) {
+        if ((@($f.ocr.captcha.lines).Count) -gt 0) {
             $stableCount2++
             if ($stableCount2 -ge 3) { LogLine "[login] 登录界面消失且画面稳定，视为登录成功"; $loggedIn = $true; break }
         } else { $stableCount2 = 0 }
     } else {
         $stableCount2 = 0
-        # 提交点击复用本轮 OCR 结果 $w（原先在这里再截一次屏识别「登录」按钮，
+        # 提交点击复用本轮识别结果（原先在这里再截一次屏识别「登录」按钮，
         # 既多一次最耗时的截图+识别，又与画面状态产生竞态）
         if (($submitCount -eq 0) -and (((Get-Date) - $lastSubmitAt).TotalSeconds -ge 25)) {
-            $btn = Find-OcrText $w "登录" -Exact
+            $btn = Get-OcrHit $f.ocr.loginBtn
             if ($btn) { Invoke-Tap $btn.X $btn.Y } else { Invoke-Tap 640 516 }
             LogLine "[login] 提交登录..."
             $submitCount = 1
@@ -519,7 +581,7 @@ while ((Get-Date) -lt $deadline5) {
         } elseif (($submitCount -eq 1) -and (((Get-Date) - $lastSubmitAt).TotalSeconds -ge 25)) {
             Invoke-Tap 440 440
             Start-Sleep 1
-            $btn = Find-OcrText $w "登录" -Exact
+            $btn = Get-OcrHit $f.ocr.loginBtn
             if ($btn) { Invoke-Tap $btn.X $btn.Y } else { Invoke-Tap 640 516 }
             LogLine "[login] 仍停在表单，补点协议复选框并重新提交"
             $submitCount = 2

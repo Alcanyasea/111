@@ -5,7 +5,7 @@ PySide6 + PyQt-Fluent-Widgets 实现的桌面 GUI，设计见 mockup.html。
 「脚本当引擎，界面当控制台」：master.ps1 / slot_switch.ps1 仍是执行主体，
 计划任务照常直接调用，GUI 关闭不影响 4:00 / 16:00 自动挂机。
 
-GUI 手动「立即运行」时传 -NoShutdown：手动运行即使全部成功也不自动关机。
+GUI 手动「立即运行」时传 -NoShutdown：手动运行不自动关机（无论成败）。
 """
 import atexit
 import os
@@ -178,7 +178,7 @@ class HeaderBar(QWidget):
         self.run_btn = style_primary_button(PrimaryPushButton("立即运行"))
         self.run_btn.setToolTip(
             "手动运行一次完整挂机流程（启动模拟器 → 切号 → 跑 MAA → 关模拟器）。\n"
-            "手动运行即使成功也不会自动关机。")
+            "手动运行不会自动关机（无论成败）。")
         lay.addWidget(self.stop_btn)
         lay.addWidget(self.collect_btn)
         lay.addWidget(self.run_btn)

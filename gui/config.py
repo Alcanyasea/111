@@ -163,10 +163,9 @@ DEFAULTS = {
         "last_run": "",        # 上次清理时间 "YYYY-MM-DD HH:MM"，空 = 从未清理
     },
     "notify": {
-        "enabled": False,      # 挂机结束后推送到手机（失败必推，成功按 on_success）
+        "enabled": False,      # 挂机结束后推送到手机（只推失败：每个失败账号一条，成功不推）
         "provider": "serverchan",  # serverchan / pushplus / wecom
         "key": "",             # SendKey / PushPlus token / 企业微信 webhook key
-        "on_success": False,   # 全部成功时也推送一条摘要
     },
     "appearance": {
         "theme": "light",      # 界面主题：light 明亮（暖雾灰）/ dark 暗夜（暮色灰）

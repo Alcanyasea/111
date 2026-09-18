@@ -322,8 +322,8 @@ class ScheduleCard(Card):
         shutdown_sw.setFixedWidth(75)
         shutdown_sw.setChecked(bool(entry.get("shutdown", False)))
         shutdown_sw.setToolTip(
-            "开启：该时间点运行成功后 60 秒自动关机（无需确认）。\n"
-            "关闭：跑完保持开机。失败时一律不关机，只弹窗提示。\n"
+            "开启：该时间点运行结束后 60 秒自动关机（无需确认）。\n"
+            "失败也关机：失败通知先推送到手机，发完即关机。\n"
             "手动点「立即运行」不受此开关影响，永不关机。")
         acc_btn = style_button(PushButton(self._acc_btn_text(entry)), small=True)
         acc_btn.setFixedWidth(110)

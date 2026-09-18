@@ -8,10 +8,10 @@ setup.bat -> install.ps1 负责：选安装目录、复制文件、修正硬编�
 创建桌面快捷方式、可选创建计划任务。
 
 用法：
-    powershell -ExecutionPolicy Bypass -File build\build_installer.ps1
-    powershell -ExecutionPolicy Bypass -File build\build_installer.ps1 -Version 1.1.3
-    powershell -ExecutionPolicy Bypass -File build\build_installer.ps1 -SevenZip "C:\Program Files\7-Zip\7z.exe"
-    powershell -ExecutionPolicy Bypass -File build\build_installer.ps1 -PythonHome "C:\Python312"
+    pwsh -ExecutionPolicy Bypass -File build\build_installer.ps1
+    pwsh -ExecutionPolicy Bypass -File build\build_installer.ps1 -Version 1.1.3
+    pwsh -ExecutionPolicy Bypass -File build\build_installer.ps1 -SevenZip "C:\Program Files\7-Zip\7z.exe"
+    pwsh -ExecutionPolicy Bypass -File build\build_installer.ps1 -PythonHome "C:\Python312"
 
 7-Zip 缺失时自动引导（无需管理员）：
     1) 若当前有管理员权限，尝试 winget 安装 7zip.7zip；

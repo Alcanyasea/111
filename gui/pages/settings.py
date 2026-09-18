@@ -189,7 +189,8 @@ class SettingsPage(ScrollArea):
         # ---- 通知推送 ----
         self.notify_card = Card("通知推送")
         notify_hint = BodyLabel(
-            "挂机/收菜结束后把结果推送到手机：失败必推，成功按下方开关。"
+            "按账号逐步骤检查（切号 → 登录校验 → 任务自检 → MAA）："
+            "某个步骤失败的账号单独推送一条，标题含账号名与失败步骤；成功不推送。"
             "无人值守（自动关机）场景下，失败不再只有本机弹窗。")
         notify_hint.setWordWrap(True)
         theme.bind(notify_hint, lambda: "color: %s; font-size: 12px;" % theme.TEXT_3)
@@ -211,9 +212,6 @@ class SettingsPage(ScrollArea):
         key_row.addWidget(self.notify_key, 1)
         self.notify_card.vbox.addLayout(key_row)
         self.notify_card.vbox.addSpacing(10)
-        self.notify_success_sw = set_switch_checked_gray(SwitchButton())
-        self._card_row(self.notify_card, "成功也推送", self.notify_success_sw,
-                       "关闭时只有失败才推送")
         test_row = QHBoxLayout()
         test_row.setSpacing(10)
         self.notify_test_btn = style_button(PushButton("发送测试"))
@@ -317,7 +315,6 @@ class SettingsPage(ScrollArea):
             notify.PROVIDERS.index(n["provider"])
             if n.get("provider") in notify.PROVIDERS else 0)
         self.notify_key.setText(str(n.get("key") or ""))
-        self.notify_success_sw.setChecked(bool(n.get("on_success", False)))
 
     def _refresh_clean_hint(self):
         self.clean_hint.setText(cleanup.last_run_text(self.cfg))
@@ -356,7 +353,8 @@ class SettingsPage(ScrollArea):
         n["enabled"] = self.notify_sw.isChecked()
         n["provider"] = notify.PROVIDERS[self.notify_provider.currentIndex()]
         n["key"] = self.notify_key.text().strip()
-        n["on_success"] = self.notify_success_sw.isChecked()
+        # on_success 已废弃（成功不再推送）：保存时顺手从旧配置里清掉
+        n.pop("on_success", None)
 
         try:
             appconfig.save(self.cfg)
@@ -437,7 +435,7 @@ class SettingsPage(ScrollArea):
             n["enabled"] = self.notify_sw.isChecked()
             n["provider"] = notify.PROVIDERS[self.notify_provider.currentIndex()]
             n["key"] = self.notify_key.text().strip()
-            n["on_success"] = self.notify_success_sw.isChecked()
+            n.pop("on_success", None)
             saved_note = "· 通知设置已自动保存"
             try:
                 appconfig.save(self.cfg)

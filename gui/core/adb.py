@@ -1,7 +1,8 @@
 # -*- coding: utf-8 -*-
-"""ADB 与 MuMu 模拟器交互：连接检测、截图、点击、启停。
+"""ADB 与 MuMu 模拟器交互：连接检测、进程检测。
 
-截图走 adb exec-out screencap（mumu-cli 没有截图子命令）。
+设备截图/点击已迁往 scripts\vision（vision.py，MAA 同款模板匹配 + PaddleOCR），
+GUI 自身不再需要屏幕交互能力（v2 删除 screenshot_bytes/tap 死代码）。
 """
 import time
 
@@ -17,41 +18,6 @@ def is_connected(cfg):
     code, out, _ = _run([paths["adb"], "devices"], timeout=_TIMEOUT_QUICK)
     text = decode_console(out)
     return code == 0 and f"{paths['device']}\tdevice" in text
-
-
-def connect(cfg):
-    """连接设备（与 master.ps1 相同的探测方式），返回输出文本。"""
-    paths = cfg["paths"]
-    code, out, _ = _run([paths["adb"], "connect", paths["device"]],
-                        timeout=_TIMEOUT_QUICK)
-    return decode_console(out).strip()
-
-
-def screenshot_bytes(cfg):
-    """截取模拟器当前画面，返回 PNG 字节；失败返回 None。"""
-    paths = cfg["paths"]
-    code, out, _ = _run(
-        [paths["adb"], "-s", paths["device"], "exec-out", "screencap", "-p"],
-        timeout=30,
-    )
-    if code != 0 or not out:
-        return None
-    # adb 输出可能带 \r\n 前缀杂质，按 PNG 头定位
-    png_head = b"\x89PNG\r\n\x1a\n"
-    idx = out.find(png_head)
-    return out[idx:] if idx > 0 else out
-
-
-def tap(cfg, x, y):
-    """在设备上实际点击（取点验证用）。"""
-    paths = cfg["paths"]
-    _run(
-        [
-            paths["adb"], "-s", paths["device"], "shell", "input", "tap",
-            str(int(x)), str(int(y)),
-        ],
-        timeout=10,
-    )
 
 
 def maa_running():

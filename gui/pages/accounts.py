@@ -316,7 +316,7 @@ class CaptureDialog(QDialog):
 
         script = Path(self.cfg["paths"]["script_dir"]) / "capture_account.ps1"
         args = [
-            "powershell", "-NoProfile", "-ExecutionPolicy", "Bypass",
+            "pwsh", "-NoProfile", "-ExecutionPolicy", "Bypass",
             "-File", str(script),
             "-Server", server, "-Slot", self._slot, "-Label", label,
         ]

@@ -11,6 +11,16 @@
 # 强制更新走系统包安装器时的前台包名特征（OCR 常识别不到安装进度）
 $installPkgPattern = 'packageinstaller|permissioncontroller'
 
+function Write-LoginHeartbeat {
+    # 心跳：每轮主循环刷新一次，master.ps1 的看门狗按「距上次心跳 30 秒」判挂死。
+    # 循环还活着（游戏更新等待、慢截图、识别中等）心跳就一直续命；卡死在
+    # vision ReadLine / adb 截图时心跳停止，30 秒后被看门狗强杀。
+    try {
+        Set-Content -Path (Join-Path $scriptDir "login_heartbeat.tmp") `
+            -Value (Get-Date).ToString('HH:mm:ss') -Encoding ascii -ErrorAction Stop
+    } catch {}
+}
+
 function Is-InstallerForeground {
     $out = (& $adb -s $device shell "dumpsys window windows" 2>$null) -join "`n"
     return ($out -match $installPkgPattern)

@@ -1,9 +1,10 @@
 # -*- coding: utf-8 -*-
 """运行控制：启动 / 停止 master.ps1，检测运行状态。
 
-GUI 手动启动时传 -NoShutdown：即使用户在上午手动运行且全部成功，
-也不触发自动关机（用户偏好，见记忆 user-shutdown-preference）。
-计划任务照常直接调 master.ps1，不带该参数，行为不变。
+GUI 手动启动时传 -NoShutdown：手动运行不触发自动关机（无论成败，用户偏好，
+见记忆 user-shutdown-preference）。
+计划任务照常直接调 master.ps1，不带该参数：成败都按班次关机
+（失败时通知先推送到手机，发完即关机）。
 """
 import json
 import subprocess
@@ -91,7 +92,7 @@ def _launch_master(cfg, extra_args):
     global _proc_ref
     master = Path(cfg["paths"]["script_dir"]) / "master.ps1"
     args = [
-        "powershell", "-NoProfile", "-ExecutionPolicy", "Bypass",
+        "pwsh", "-NoProfile", "-ExecutionPolicy", "Bypass",
         "-File", str(master),
     ] + list(extra_args)
     debug_dir = SCRIPT_DIR / "debug"

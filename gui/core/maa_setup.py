@@ -16,6 +16,15 @@ SERVER_NAMES = {"official": "官服", "bilibili": "B服"}
 CLIENT_TYPES = {"official": "Official", "bilibili": "Bilibili"}
 KEY_TASKS = ("StartUpTask", "RecruitTask", "InfrastTask", "FightTask",
              "MallTask", "AwardTask")
+# 任务中文名（配置结果消息里不露内部类型名）；与 plugins/farm_guard 的 TASK_NAMES 同名同序
+TASK_NAMES = {
+    "StartUpTask": "开始唤醒",
+    "RecruitTask": "公招",
+    "InfrastTask": "基建",
+    "FightTask": "理智作战",
+    "MallTask": "信用",
+    "AwardTask": "领奖",
+}
 
 
 def _maa_dir(cfg, server):
@@ -127,10 +136,11 @@ def apply_server_config(cfg, server):
                     if isinstance(t, dict) and t.get("$type") == tname \
                             and not t.get("IsEnable", True):
                         t["IsEnable"] = True
-                        changes.append("启用 %s" % tname)
+                        changes.append("启用 %s" % TASK_NAMES[tname])
         missing = [t for t in KEY_TASKS if t not in present]
         if missing:
-            changes.append("任务队列缺少 %s（未自动创建）" % "、".join(missing))
+            changes.append("任务队列缺少 %s（未自动创建）" % "、".join(
+                TASK_NAMES[t] for t in missing))
 
     try:
         _write_json(gui_new, data)

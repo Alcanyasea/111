@@ -1,8 +1,12 @@
 ﻿# ============================================================
-# 账号捕获 v1 — 清空登录态 → 进入登录界面 → 输入账号密码 → 拉取登录数据到槽位
+# 账号捕获 v2 — 清空登录态 → 进入登录界面 → 输入账号密码 → 拉取登录数据到槽位
+# v2（MAA 同款识别升级，与 login_check v9 同批）：识别换 vision_lib.ps1
+#（OpenCV 模板匹配 + PaddleOCR ONNX）；弹窗关闭改 CloseAnno 模板定位、删除
+# 右上角固定坐标盲点兜底；删除与 login_device_lib.ps1 重复的本地函数定义
+#（Invoke-Tap/Get-DeviceUid/Get-PlayerPrefsName，此前本地定义遮蔽了库版本）。
 # 流程（官服）：
 #   停游戏 → 备份并移走 3 个登录数据文件 → 写入最小 SDK prefs → 启动游戏
-#   → OCR 循环点掉首次启动弹窗（配音包下载/选择）→ 标题画面 → 登录界面
+#   → 识别循环点掉首次启动弹窗（配音包下载/选择）→ 标题画面 → 登录界面
 #   → 账号登录 → 密码登录 → 输入账号/密码 → 登录
 #   → 轮询 u8sdk_cached_uid 出现即登录成功 → 处理剩余首次启动弹窗（公告/配音
 #     选择等）并等标记写入 playerprefs → 拉取文件到 accounts\<slot>\
@@ -105,17 +109,15 @@ if ($Server -eq "bilibili") {
 }
 $slotDir = Join-Path $accountsDir $Slot
 
-# OCR 库（主机端 Windows OCR）
-. (Join-Path $scriptDir "ocr_lib.ps1")
+# MAA 同款识别库（vision.py 常驻进程 + gzip 截图）
+. (Join-Path $scriptDir "vision_lib.ps1")
+$vp = Start-Vision
+if (-not $vp) { Write-Output "ERROR: 识别进程（vision.py）启动失败，请检查 gui\.venv 与 scripts\vision"; exit 1 }
 
 if (-not (Test-Path $debugDir)) { New-Item -ItemType Directory $debugDir -Force | Out-Null }
 
 # input text 可靠字符集（其余字符会让整串丢失，见实测）
 $SAFE_CHARS = '^[A-Za-z0-9@.\!\#\$&\*\(\)\- ]+$'
-
-function Invoke-Tap($x, $y) {
-    & $adb -s $device shell "input tap $x $y" 2>$null | Out-Null
-}
 
 function Type-Field($x, $y, $text) {
     # 可靠输入序列：点字段聚焦 → 收键盘 → 再点一次重新聚焦 → 输入。
@@ -131,27 +133,11 @@ function Type-Field($x, $y, $text) {
     Start-Sleep 1
 }
 
-function Get-DeviceUid($ppName) {
-    # 拉回本地解析 u8sdk_cached_uid（adb shell 引号转义不可靠）
-    $tmpPp = Join-Path $env:TEMP "ark_cap_pp.xml"
-    $uid = ""
-    & $adb -s $device pull ("/data/data/{0}/shared_prefs/{1}" -f $pkg, $ppName) $tmpPp 2>$null | Out-Null
-    if (Test-Path $tmpPp) {
-        try {
-            $ppContent = [System.IO.File]::ReadAllText($tmpPp, [System.Text.Encoding]::UTF8)
-            $m = [regex]::Match($ppContent, 'name="u8sdk_cached_uid">([0-9]+)')
-            if ($m.Success) { $uid = $m.Groups[1].Value }
-        } catch {}
-        Remove-Item $tmpPp -Force -ErrorAction SilentlyContinue
-    }
-    return $uid
-}
+# Invoke-Tap / Get-DeviceUid / Get-PlayerPrefsName 共用实现在 login_device_lib.ps1
+#（此前本地重复定义遮蔽了库版本，v2 删除；Type-Field 仅捕获流程使用，保留在此）
 
-function Get-PlayerPrefsName {
-    $out = (& $adb -s $device shell "ls /data/data/$pkg/shared_prefs/" 2>$null) -join "`n"
-    $name = ($out -split "`n" | Where-Object { $_ -match '\.v2\.playerprefs\.xml' } | Select-Object -First 1)
-    return ($name -replace '\s+','')
-}
+# Invoke-Tap / Get-DeviceUid / Get-PlayerPrefsName 共用实现在 login_device_lib.ps1
+#（此前本地重复定义遮蔽了库版本，v2 删除）；Type-Field 仅捕获流程使用，保留在此
 
 function Write-FileRemote($localPath, $remotePath, $mode) {
     # 推送到设备并修正 owner/权限/上下文
@@ -236,35 +222,59 @@ Remove-Item $minSdk -Force -ErrorAction SilentlyContinue
 LogLine "启动游戏..."
 & $adb -s $device shell "monkey -p $pkg -c android.intent.category.LAUNCHER 1" 2>$null | Out-Null
 
-# ---- OCR 弹窗循环（官服：配音包弹窗 → 解压 → 配音选择 → 标题画面 → 登录界面）----
+# ---- 识别弹窗循环（官服：配音包弹窗 → 解压 → 配音选择 → 标题画面 → 登录界面）----
 $reachedLogin = $false
 $png = Join-Path $debugDir ("cap_{0}_screen.png" -f $Slot)
 if ($Server -eq "official") {
     $deadline = (Get-Date).AddMinutes($DialogTimeoutMin)
     $lastBlindTap = (Get-Date).AddSeconds(-60)
     $voiceKept = $false
+    $act = $null
     while ((Get-Date) -lt $deadline) {
-        if (-not (Ocr-Screenshot $adb $device $png)) { Start-Sleep 5; continue }
-        $words = Get-OcrWords $png
+        if (-not (Invoke-VisionScreenshot $adb $device $png)) { Start-Sleep 5; continue }
+        $frame = Invoke-VisionFrame $vp $png @{
+            templates = @(
+                @{ name = "StartToWakeUp" }
+                @{ name = "StartButton" }
+                @{ name = "CloseAnno" }
+            )
+            ocr = @(
+                @{ name = "acctLogin"; text = @("账号登录") }
+                @{ name = "voice";     text = @("维持原有配置") }
+                @{ name = "confirm";   text = @("确认"); exact = $true }
+                @{ name = "agree";     text = @("同意并继续") }
+            )
+        }
+        if (-not $frame -or $frame.error) { Start-Sleep 5; continue }
         $act = $null
-        if (Find-OcrText $words "账号登录") { $act = "login"; break }
-        if ((Find-OcrText $words "维持原有配置") -and (-not $voiceKept)) {
+        if ($frame.ocr.acctLogin.matched) { break }
+        if ($frame.ocr.voice.matched -and (-not $voiceKept)) {
             # 配音选择弹窗：先勾选「维持原有配置」，下一轮再点确认（避免只点选项不确认）
-            $hit = Find-OcrText $words "维持原有配置"
-            Invoke-Tap $hit.X $hit.Y
+            Invoke-Tap $frame.ocr.voice.center[0] $frame.ocr.voice.center[1]
             $voiceKept = $true
             $act = "voice_keep"
         }
-        elseif (Find-OcrText $words "确认") { $hit = Find-OcrText $words "确认"; Invoke-Tap $hit.X $hit.Y; $act = "confirm" }
-        elseif (Find-OcrText $words "同意并继续") { $hit = Find-OcrText $words "同意并继续"; Invoke-Tap $hit.X $hit.Y; $act = "agree" }
-        elseif (Find-OcrText $words "开始唤醒") { $hit = Find-OcrText $words "开始唤醒"; Invoke-Tap $hit.X $hit.Y; $act = "wake" }
+        elseif ($c = Get-VisionFrameCenter $frame.templates.CloseAnno) {
+            Invoke-Tap $c.X $c.Y; $act = "announce_close"
+        }
+        elseif ($c = Get-VisionFrameCenter $frame.templates.StartButton) {
+            # 开屏剧情 START 页（v9 实测官服新增）：点菱形 START 进入下一页/标题画面
+            Invoke-Tap $c.X $c.Y; $act = "start_tap"
+        }
+        elseif ($frame.ocr.confirm.matched) { Invoke-Tap $frame.ocr.confirm.center[0] $frame.ocr.confirm.center[1]; $act = "confirm" }
+        elseif ($frame.ocr.agree.matched) { Invoke-Tap $frame.ocr.agree.center[0] $frame.ocr.agree.center[1]; $act = "agree" }
+        elseif ($frame.templates.StartToWakeUp.matched) {
+            # 标题画面：捕获流程要点开始唤醒进入登录界面（MAA StartToWakeUp 模板同款 ClickSelf）
+            $c = Get-VisionFrameCenter $frame.templates.StartToWakeUp
+            Invoke-Tap $c.X $c.Y; $act = "wake"
+        }
         elseif (((Get-Date) - $lastBlindTap).TotalSeconds -gt 45) {
             Invoke-Tap 640 360; $lastBlindTap = Get-Date; $act = "blind_tap"
         }
         if ($act) { LogLine ("[dialog] " + $act) }
         Start-Sleep 5
     }
-    if ($act -eq "login") {
+    if ($act -eq "acctLogin" -or $frame.ocr.acctLogin.matched) {
         $reachedLogin = $true
         LogLine "已到达登录界面"
     } else {
@@ -280,17 +290,18 @@ $autoTyped = $false
 if ($reachedLogin -and $Server -eq "official" -and $Username -and $Password) {
     if ($Username -match $SAFE_CHARS -and $Password -match $SAFE_CHARS) {
         LogLine "自动输入账号密码..."
-        # 1) 登录界面 → 点「账号登录」（$words 为弹窗循环最后一张截图，含该按钮）
-        $hit = Find-OcrText $words "账号登录"
-        if ($hit) { Invoke-Tap $hit.X $hit.Y }
+        # 1) 登录界面 → 点「账号登录」（$frame 为弹窗循环最后一张截图，含该按钮）
+        if ($frame.ocr.acctLogin.matched) {
+            Invoke-Tap $frame.ocr.acctLogin.center[0] $frame.ocr.acctLogin.center[1]
+        }
         # 2) 轮询等待「密码登录」链接出现（手机号表单渲染可能需要几秒）
         $deadline3 = (Get-Date).AddSeconds(20)
         $hit = $null
         while ((Get-Date) -lt $deadline3) {
             Start-Sleep 3
-            if (Ocr-Screenshot $adb $device $png) {
-                $hit = Find-OcrText (Get-OcrWords $png) "密码登录"
-                if ($hit) { break }
+            if (Invoke-VisionScreenshot $adb $device $png) {
+                $f = Invoke-VisionFrame $vp $png @{ ocr = @(@{ name = "pw"; text = @("密码登录") }) }
+                if ($f -and $f.ocr.pw.matched) { $hit = Get-OcrHit $f.ocr.pw; break }
             }
         }
         if ($hit) { Invoke-Tap $hit.X $hit.Y } else {
@@ -299,45 +310,44 @@ if ($reachedLogin -and $Server -eq "official" -and $Username -and $Password) {
         }
         # 3) 轮询等待密码表单出现（「请输入账号」占位符可见）
         $deadline4 = (Get-Date).AddSeconds(20)
-        $words3 = $null
+        $fields = $null
         while ((Get-Date) -lt $deadline4) {
             Start-Sleep 3
-            if (Ocr-Screenshot $adb $device $png) {
-                $w3 = Get-OcrWords $png
-                if ((Find-OcrText $w3 "请输入账号") -and (Find-OcrText $w3 "请输入密码")) {
-                    $words3 = $w3
-                    break
-                }
+            if (Invoke-VisionScreenshot $adb $device $png) {
+                $f = Invoke-VisionFrame $vp $png @{ ocr = @(
+                    @{ name = "acct"; text = @("请输入账号") }
+                    @{ name = "pwd";  text = @("请输入密码") }
+                ) }
+                if ($f -and $f.ocr.acct.matched -and $f.ocr.pwd.matched) { $fields = $f.ocr; break }
             }
         }
-        if ($null -eq $words3) {
+        if ($null -eq $fields) {
             LogLine "WARN: 密码表单未出现，放弃自动输入，转人工登录"
         } else {
             # 4) 输入账号（Type-Field 内含收键盘+聚焦+3秒等待，防首字符被吞）
-            $f1 = Find-OcrText $words3 "请输入账号"
-            if ($f1) { Type-Field $f1.X $f1.Y $Username } else { Type-Field 545 283 $Username }
+            Type-Field $fields.acct.center[0] $fields.acct.center[1] $Username
             # 账号框内容自校验（可见字段）：必须匹配前 5 个字符，否则清空重输一次
-            if (Ocr-Screenshot $adb $device $png) {
-                $wv = Get-OcrWords $png
-                $fieldText = (($wv | Where-Object { $_.Y -gt 250 -and $_.Y -lt 320 } | ForEach-Object { $_.Text }) -join '')
+            if (Invoke-VisionScreenshot $adb $device $png) {
+                $fv = Invoke-VisionFrame $vp $png @{ ocr = @(@{ name = "band"; all = $true; roi = @(0, 245, 1280, 80) }) }
+                $fieldText = if ($fv) { (@($fv.ocr.band.lines) | ForEach-Object { $_.text }) -join '' } else { "" }
                 $u = $Username
                 $headOk = ($u.Length -lt 5) -or ($fieldText -match [regex]::Escape($u.Substring(0, 5)))
                 if (-not $headOk) {
                     LogLine "账号框内容异常（$fieldText），清空重输一次"
                     & $adb -s $device shell "input keyevent 123; for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24; do input keyevent 67; done" 2>$null | Out-Null
                     Start-Sleep 2
-                    if ($f1) { Type-Field $f1.X $f1.Y $Username } else { Type-Field 545 283 $Username }
+                    Type-Field $fields.acct.center[0] $fields.acct.center[1] $Username
                 }
             }
             # 5) 输入密码（掩码不可校验，同样用可靠输入序列）
-            $f2 = Find-OcrText $words3 "请输入密码"
-            if ($f2) { Type-Field $f2.X $f2.Y $Password } else { Type-Field 545 363 $Password }
+            Type-Field $fields.pwd.center[0] $fields.pwd.center[1] $Password
             # 6) 勾选用户协议（清空登录态后必为未勾选，实测空心圆），再点登录
             Invoke-Tap 440 440
             Start-Sleep 1
             $btn = $null
-            if (Ocr-Screenshot $adb $device $png) {
-                $btn = Find-OcrText (Get-OcrWords $png) "登录" -Exact
+            if (Invoke-VisionScreenshot $adb $device $png) {
+                $f = Invoke-VisionFrame $vp $png @{ ocr = @(@{ name = "btn"; text = @("登录"); exact = $true }) }
+                if ($f) { $btn = Get-OcrHit $f.ocr.btn }
             }
             if ($btn) { Invoke-Tap $btn.X $btn.Y } else { Invoke-Tap 640 516 }
             LogLine "已提交登录，等待结果..."
@@ -368,15 +378,21 @@ while ((Get-Date) -lt $deadline2) {
     # 自动输入后仍停留在密码表单 → 再点一次登录（协议已在提交前勾选，避免重复点复选框反而取消勾选）
     # 判定：协议行在屏 且 账号框还显示着输入的用户名（表单未被 SDK 重置）
     if ($autoTyped -and -not $checkboxTried) {
-        if (Ocr-Screenshot $adb $device $png) {
-            $w = Get-OcrWords $png
-            if (Find-OcrText $w "用户注册协议") {
-                $fieldText = (($w | Where-Object { $_.Y -gt 250 -and $_.Y -lt 320 } | ForEach-Object { $_.Text }) -join '')
+        if (Invoke-VisionScreenshot $adb $device $png) {
+            $f = Invoke-VisionFrame $vp $png @{
+                ocr = @(
+                    @{ name = "agree";  text = @("用户注册协议") }
+                    @{ name = "band";   all = $true; roi = @(0, 245, 1280, 80) }
+                    @{ name = "btn";    text = @("登录"); exact = $true }
+                )
+            }
+            if ($f -and $f.ocr.agree.matched) {
+                $fieldText = if ($f) { (@($f.ocr.band.lines) | ForEach-Object { $_.text }) -join '' } else { "" }
                 $u = $Username
                 $stillForm = ($u.Length -lt 5) -or ($fieldText -match [regex]::Escape($u.Substring(0, 5)))
                 if ($stillForm) {
                     LogLine "仍在登录表单，重新点一次登录..."
-                    $btn = Find-OcrText $w "登录" -Exact
+                    $btn = Get-OcrHit $f.ocr.btn
                     if ($btn) { Invoke-Tap $btn.X $btn.Y } else { Invoke-Tap 640 516 }
                     $checkboxTried = $true
                 }
@@ -391,14 +407,11 @@ if (-not $uid) {
 }
 
 # ---- 登录成功：处理剩余首次启动弹窗并等主界面 ----
-# 与 login_check.ps1 的判定一致：公告弹窗点右上角 X，配音选择勾「维持原有配置」，
-# 再点确认/同意并继续/开始唤醒，直到主界面特征词出现（理智/公开招募等）。
-# 这样拉回来的 playerprefs 才带 KEY_GLOBAL_VOICE_LANG / KEY_VOICE_LANG_PREF_DONTCG
-# 与公告版本号等「已处理」标记，下次切号不会重复弹窗。
+# 与 login_check.ps1 的判定一致：公告弹窗 CloseAnno 模板点右上角 X，配音选择勾
+# 「维持原有配置」，再点确认/同意并继续/开始唤醒，直到主界面特征词出现
+#（理智/公开招募等）。这样拉回来的 playerprefs 才带 KEY_GLOBAL_VOICE_LANG /
+# KEY_VOICE_LANG_PREF_DONTCG 与公告版本号等「已处理」标记，下次切号不会重复弹窗。
 $inGameMarkers = @("公开招募", "干员寻访", "理智", "终端", "采购中心", "寻访一次", "寻访十次")
-$announceMarkers = @("活动公告", "系统公告", "资讯速报")
-$announceCloseX = 1215
-$announceCloseY = 75
 $voiceKeptSettle = $false
 $settlePng = Join-Path $debugDir ("cap_{0}_settle.png" -f $Slot)
 $settleDeadline = (Get-Date).AddMinutes(3)
@@ -406,72 +419,62 @@ $lastPokeAt = (Get-Date)
 $pokeCount = 0
 $settled = $false
 while ((Get-Date) -lt $settleDeadline) {
-    if (-not (Ocr-Screenshot $adb $device $settlePng)) { Start-Sleep 4; continue }
-    $w = Get-OcrWords $settlePng
-    # 主界面特征词（登录后仍在弹窗/加载时不会出现）
-    $igName = $null
-    foreach ($m in $inGameMarkers) {
-        $hit = Find-OcrText $w $m
-        if ($hit) { $igName = $m; break }
+    if (-not (Invoke-VisionScreenshot $adb $device $settlePng)) { Start-Sleep 4; continue }
+    $frame = Invoke-VisionFrame $vp $settlePng @{
+        templates = @(
+            @{ name = "StartToWakeUp" }
+            @{ name = "CloseAnno" }
+            @{ name = "MainUiToggleSettings" }
+        )
+        ocr = @(
+            @{ name = "ingame";  text = $inGameMarkers }
+            @{ name = "voice";   text = @("维持原有配置") }
+            @{ name = "confirm"; text = @("确认"); exact = $true }
+            @{ name = "agree";   text = @("同意并继续") }
+        )
     }
+    if (-not $frame -or $frame.error) { Start-Sleep 4; continue }
+    # 主界面（特征词或主界面模板任一命中；登录后仍在弹窗/加载时不会出现）
+    $igName = $null
+    if ($frame.ocr.ingame.matched) { $igName = $frame.ocr.ingame.hit }
+    elseif ($frame.templates.MainUiToggleSettings.matched) { $igName = "主界面模板" }
     if ($igName) {
         LogLine ("[settle] 检测到主界面（{0}），首次启动弹窗处理完成" -f $igName)
         $settled = $true
         break
     }
     $act = $null
-    # 公告弹窗：点右上角 X 关闭（纯图标，坐标实测固定）
-    $ann = $null
-    foreach ($m in $announceMarkers) {
-        $hit = Find-OcrText $w $m
-        if ($hit) { $ann = $hit; break }
-    }
-    if ($ann) {
-        Invoke-Tap $announceCloseX $announceCloseY
+    # 公告弹窗：CloseAnno 模板命中点右上角 X（纯图标，不再依赖固定坐标）
+    if ($c = Get-VisionFrameCenter $frame.templates.CloseAnno) {
+        Invoke-Tap $c.X $c.Y
         $act = "announce_close"
         Start-Sleep 3
-    } else {
-        $vk = Find-OcrText $w "维持原有配置"
-        if ($vk -and (-not $voiceKeptSettle)) {
-            Invoke-Tap $vk.X $vk.Y
-            $voiceKeptSettle = $true
-            $act = "voice_keep"
-            Start-Sleep 3
-        } else {
-            $cf = Find-OcrText $w "确认"
-            if ($cf) {
-                Invoke-Tap $cf.X $cf.Y
-                $act = "confirm"
-                Start-Sleep 3
-            } else {
-                $ag = Find-OcrText $w "同意并继续"
-                if ($ag) {
-                    Invoke-Tap $ag.X $ag.Y
-                    $act = "agree"
-                    Start-Sleep 3
-                } else {
-                    $wk = Find-OcrText $w "开始唤醒"
-                    if ($wk) {
-                        Invoke-Tap $wk.X $wk.Y
-                        $act = "wake"
-                        Start-Sleep 4
-                    }
-                }
-            }
-        }
+    } elseif ($frame.ocr.voice.matched -and (-not $voiceKeptSettle)) {
+        Invoke-Tap $frame.ocr.voice.center[0] $frame.ocr.voice.center[1]
+        $voiceKeptSettle = $true
+        $act = "voice_keep"
+        Start-Sleep 3
+    } elseif ($frame.ocr.confirm.matched) {
+        Invoke-Tap $frame.ocr.confirm.center[0] $frame.ocr.confirm.center[1]
+        $act = "confirm"
+        Start-Sleep 3
+    } elseif ($frame.ocr.agree.matched) {
+        Invoke-Tap $frame.ocr.agree.center[0] $frame.ocr.agree.center[1]
+        $act = "agree"
+        Start-Sleep 3
+    } elseif ($frame.templates.StartToWakeUp.matched) {
+        $c = Get-VisionFrameCenter $frame.templates.StartToWakeUp
+        Invoke-Tap $c.X $c.Y
+        $act = "wake"
+        Start-Sleep 4
     }
     if ($act) {
         LogLine ("[settle] " + $act)
     } else {
-        # 无可识别动作：中央与右上角公告关闭位交替盲点兜底
+        # 无可识别动作：盲点屏幕中央兜底
         if (((Get-Date) - $lastPokeAt).TotalSeconds -gt 20) {
-            if ($pokeCount -gt 0 -and ($pokeCount % 2 -eq 0)) {
-                Invoke-Tap $announceCloseX $announceCloseY
-                LogLine "[settle] 无可识别动作，盲点右上角公告关闭位兜底"
-            } else {
-                Invoke-Tap 640 360
-                LogLine "[settle] 无可识别动作，盲点屏幕中央兜底"
-            }
+            Invoke-Tap 640 360
+            LogLine "[settle] 无可识别动作，盲点屏幕中央兜底"
             $pokeCount++
             $lastPokeAt = Get-Date
         }

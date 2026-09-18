@@ -116,7 +116,7 @@ def load_config():
 def run_ps1(name, args, timeout=3600):
     """调用 scripts 下 PowerShell 子脚本，返回 (退出码, 合并输出文本)。"""
     cmd = [
-        "powershell", "-NoProfile", "-ExecutionPolicy", "Bypass",
+        "pwsh", "-NoProfile", "-ExecutionPolicy", "Bypass",
         "-File", str(BASE / name),
     ] + [str(a) for a in args]
     try:
@@ -320,15 +320,9 @@ def process_account(cfg, acc, out_dir, no_switch=False, touch="maatouch",
             res["error"] = "官服槽位 {} 不存在，拒绝运行（防跑错号）".format(slot)
             return res
 
-        # 完整流程才做独立的更新等待；--no-switch 跳过它：冷启动可能闪过
-        # 「获取更新配置」后停在标题画面（无可继续标记、不点击），会让
-        # game_update_wait 干等到超时。标题点击/更新/公告等待由 login_check 处理
-        update_timeout_sec = int(cfg.get("timeouts", {}).get("game_update_min", 90)) * 60
-        rc, out = run_ps1("game_update_wait.ps1",
-                          ["-Server", server, "-TimeoutSec", update_timeout_sec])
-        if rc != 0:
-            res["error"] = "游戏更新未完成（game_update_wait 退出码 {}）".format(rc)
-            return res
+        # 更新等待已内置于 login_check（v1.3.2 起合并），不再单独跑
+        # game_update_wait.ps1：冷启动可能闪过「获取更新配置」后停在标题画面，
+        # 独立等待只会干等到超时，标题/更新/公告都由 login_check 处理
     else:
         # --no-switch：不切号，但把游戏重启到干净状态（识别不能从残留页面开始）
         pkg = get_game_package(maa_dir, server)
@@ -343,12 +337,14 @@ def process_account(cfg, acc, out_dir, no_switch=False, touch="maatouch",
                        capture_output=True)
         time.sleep(5)
 
-    # 登录校验：点掉标题画面 → 确认/自动登录 → 主界面放行（两种模式都必经）
-    rc, out = run_ps1("login_check.ps1",
+    # 登录校验：按服务器分派（B服 有独立流程：开屏剧情 START 跳过、无标题画面、
+    # 登录界面快速失败——此前对 B服 也跑官服式校验，开屏剧情页会盲点空转到超时）
+    login_script = "login_check_bilibili.ps1" if server == "bilibili" else "login_check.ps1"
+    rc, out = run_ps1(login_script,
                       ["-Server", server, "-Slot", slot,
                        "-ScreenTimeoutSec", 300])
     if rc != 0:
-        res["error"] = "登录校验失败（login_check 退出码 {}），请重新捕获该账号".format(rc)
+        res["error"] = "登录校验失败（{} 退出码 {}），请重新捕获该账号".format(login_script, rc)
         return res
 
     out_path = out_dir / "{}.json".format(slot or "no-slot")

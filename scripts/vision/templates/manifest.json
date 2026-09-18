@@ -1,0 +1,17 @@
+[
+  {"name": "StartToWakeUp", "file": "WakeUp/StartToWakeUp.png", "roi": [450, 430, 380, 160], "threshold": 0.7},
+  {"name": "StartButton", "file": "StartButton.png", "roi": [480, 560, 320, 160], "threshold": 0.65},
+  {"name": "GameStart", "file": "WakeUp/GameStart.png", "roi": [550, 600, 200, 120], "threshold": 0.7},
+  {"name": "StartLoginBServer", "file": "WakeUp/StartLoginBServer.png", "roi": [400, 350, 500, 150], "threshold": 0.7},
+  {"name": "StartUpConnectingFlag", "file": "WakeUp/StartUpConnectingFlag.png", "roi": [0, 635, 450, 85], "threshold": 0.7},
+  {"name": "CloseAnno", "file": "WakeUp/CloseAnno/CloseAnno.png", "roi": [1100, 0, 180, 200], "threshold": 0.7},
+  {"name": "CloseAnnoTexas", "file": "WakeUp/CloseAnno/CloseAnnoTexas.png", "roi": [1125, 24, 138, 139], "threshold": 0.7},
+  {"name": "CloseAnnoSpecialAccess", "file": "WakeUp/CloseAnno/CloseAnnoSpecialAccess.png", "roi": [998, 87, 143, 143], "threshold": 0.7},
+  {"name": "BiliNoMorePromptsClose", "file": "WakeUp/BiliBiliNoMorePromptsNextTimeClose.png", "roi": [930, 120, 150, 150], "threshold": 0.7},
+  {"name": "LoadingIcon", "file": "LoadingIcon.png", "roi": [480, 210, 320, 280], "threshold": 0.7},
+  {"name": "PopupConfirm", "file": "PopupConfirm.png", "roi": [630, 400, 650, 160], "threshold": 0.7},
+  {"name": "PopupCancel", "file": "PopupCancel.png", "roi": [630, 400, 650, 160], "threshold": 0.7},
+  {"name": "OfflineConfirm", "file": "OfflineConfirm.png", "roi": [310, 409, 648, 165], "threshold": 0.7},
+  {"name": "MainUiToggleSettings", "file": "UiTheme/SwitchTheme@ToggleSettingsMenu.png", "roi": [200, 300, 220, 210], "threshold": 0.7},
+  {"name": "MainUiTerminal", "file": "UiTheme/Terminal.png", "roi": null, "threshold": 0.75}
+]

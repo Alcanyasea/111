@@ -55,6 +55,11 @@ PLANS_DIR = PLUGIN_DIR / "plans"
 DEFAULT_CONFIG = Path(r"D:\1\config.json")
 
 BATCHES = ["4点", "16点"]
+# farm 换班要进的标准设施（与 MAA GUI 设施列表同序）。旧版基建收菜曾把 farm
+# 方案改成「只勾制造/贸易」，残留的禁用房间会让自定义换班跳过控制中枢/会客室
+# /办公室/发电站/加工站（2026-09-18 官服三号连坑的根因，当时只补回了 Dorm）
+STANDARD_ROOMS = ("Mfg", "Trade", "Control", "Power", "Reception",
+                  "Office", "Dorm", "Processing", "Training")
 MANUFACTURE_PRODUCTS = ["Pure Gold", "Originium Shard", "Battle Record"]
 TRADING_PRODUCTS = ["LMD", "Orundum"]
 DEFAULT_MANUFACTURE_PRODUCT = "Pure Gold"
@@ -436,11 +441,44 @@ def _atomic_json_write(path, data):
     os.replace(tmp, path)
 
 
+def normalize_room_list(task):
+    """把 InfrastTask 设施列表整理成标准房间全启用、MAA GUI 固定顺序。返回是否改动。
+
+    幂等：已达标则原文件不动。房间条目缺失时显式补建（MAA 对缺失设施会按
+    禁用自动补齐，留空等于这些房间永远不换班）；多余的非标准条目原样保留、
+    挪到末尾。
+    """
+    rooms = task.get("RoomList")
+    if not isinstance(rooms, list):
+        task["RoomList"] = [{"Room": name, "IsEnabled": True}
+                            for name in STANDARD_ROOMS]
+        return True
+    known, extras = {}, []
+    for r in rooms:
+        if isinstance(r, dict) and r.get("Room") in STANDARD_ROOMS:
+            known[r["Room"]] = dict(r)
+        else:
+            extras.append(r)
+    rebuilt = []
+    for name in STANDARD_ROOMS:
+        entry = known.get(name) or {}
+        entry["Room"] = name
+        entry["IsEnabled"] = True
+        rebuilt.append(entry)
+    rebuilt.extend(extras)
+    if rebuilt == rooms:
+        return False
+    rooms[:] = rebuilt
+    return True
+
+
 def apply_maa_config(maa_dir, plan_path, plan_index=None, log=print):
     """把某套 MAA 当前配置的基建任务切到 Custom(plan) 或恢复 Rotation。
 
     修改 gui.new.json 的 InfrastTask（Mode/Filename/PlanSelect）与
     gui.json 的 Infrast.InfrastMode。返回改动的文件名列表。
+    设施列表整表恢复为标准房间全启用（normalize_room_list）：MAA 自定义
+    换班按这份清单过滤房间，哪个房间被禁用哪个房间的排班就静默失效。
     切换到 Custom（精确换班）时强制开启 InfrastTask 的
     DormFilterNotStationed（「不将已进驻的干员放入宿舍」）：宿舍 autofill
     补位只从「未进驻」干员里选，避免把训练室/加工站等已在岗的干员拉进宿舍、
@@ -466,27 +504,16 @@ def apply_maa_config(maa_dir, plan_path, plan_index=None, log=print):
                 infrast = [t for t in queue
                            if isinstance(t, dict) and t.get("$type") == "InfrastTask"]
                 if infrast:
-                    # 撤除「一键休整」：只保留一个基建任务（清理旧版双任务残留）
-                    for extra in infrast[1:]:
-                        queue.remove(extra)
+                    # 撤除「一键休整」：只保留一个基建任务（清理旧版双任务残留）。
+                    # 按对象身份删：remove 按值删第一个相等的，两任务内容相同时
+                    # 会误删要保留的那个、留下没配置过的
+                    drop = {id(t) for t in infrast[1:]}
+                    queue[:] = [t for t in queue if id(t) not in drop]
                     first = infrast[0]
-                    # 恢复宿舍管理：设施列表补回 Dorm（一键休整版本移除过）
-                    rooms = first.get("RoomList")
-                    if isinstance(rooms, list):
-                        enabled_names = [r.get("Room") for r in rooms
-                                         if isinstance(r, dict)
-                                         and r.get("IsEnabled", True)]
-                        if "Dorm" not in enabled_names:
-                            # 先移除可能存在的禁用 Dorm 条目（MAA GUI 会自动补禁用的缺失设施）
-                            rooms[:] = [r for r in rooms
-                                        if not (isinstance(r, dict)
-                                                and r.get("Room") == "Dorm")]
-                            pos = len(rooms)
-                            for i, r in enumerate(rooms):
-                                if isinstance(r, dict) and r.get("Room") == "Office":
-                                    pos = i + 1
-                                    break
-                            rooms.insert(pos, {"Room": "Dorm"})
+                    # 设施列表整表恢复：标准房间全部启用（含被旧版收菜/一键休整
+                    # 残留禁用的房间）。自定义换班按这份清单过滤房间，只补 Dorm
+                    # 不够——禁用的控制中枢/会客室等会让该房间的排班静默失效
+                    normalize_room_list(first)
                     if mode == "Custom":
                         # 精确换班期间不让已进驻的干员进入宿舍：MAA 宿舍补位
                         # 会按此开关用游戏内的「未进驻」筛选，已在其它设施上岗

@@ -6,3 +6,7 @@ PySideSix-Frameless-Window==0.8.2
 shiboken6==6.11.2
 darkdetect==0.8.0
 pywin32==312
+# vision.py（登录检查屏幕识别，scripts\vision）运行依赖
+opencv-python==5.0.0.93
+numpy==2.5.3
+onnxruntime==1.30.0

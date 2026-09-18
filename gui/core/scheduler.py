@@ -11,7 +11,7 @@ from datetime import datetime
 from core.util import decode_console, run as _run
 
 TASK_NAME = "MAA_明日方舟自动挂机"
-RUN_CMD = r"powershell.exe -ExecutionPolicy Bypass -WindowStyle Minimized -File D:\1\scripts\master.ps1"
+RUN_CMD = r"pwsh.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Minimized -File D:\1\scripts\master.ps1"
 
 _PS_DATE_RE = re.compile(r"/Date\((\d+)\)/")
 _HHMM_RE = re.compile(r"T(\d{2}:\d{2})")
@@ -23,17 +23,21 @@ APPLY_TIMEOUT = 40
 
 
 def _ps(script, timeout=QUERY_TIMEOUT):
-    return _run(["powershell", "-NoProfile", "-Command", script], timeout=timeout)
+    return _run(["pwsh", "-NoProfile", "-Command", script], timeout=timeout)
 
 
 def _parse_date(value):
-    """PS 5.1 ConvertTo-Json 的日期格式：/Date(1756224000000)/，也可能是 ISO。"""
+    """计划任务时间解析：5.1 是 /Date(毫秒)/，pwsh 7 是 ISO 8601 字符串。"""
     if isinstance(value, (int, float)):
         return datetime.fromtimestamp(value / 1000)
     if isinstance(value, str):
         m = _PS_DATE_RE.search(value)
         if m:
             return datetime.fromtimestamp(int(m.group(1)) / 1000)
+        try:
+            return datetime.fromisoformat(value)
+        except ValueError:
+            pass
     return None
 
 
@@ -99,8 +103,8 @@ def apply(cfg):
     script = (
         "$ErrorActionPreference='Stop';"
         "$name = '%s';"
-        "$action = New-ScheduledTaskAction -Execute 'powershell.exe'"
-        "  -Argument '-ExecutionPolicy Bypass -WindowStyle Minimized -File D:\\1\\scripts\\master.ps1';"
+        "$action = New-ScheduledTaskAction -Execute 'pwsh.exe'"
+        "  -Argument '-NoProfile -ExecutionPolicy Bypass -WindowStyle Minimized -File D:\\1\\scripts\\master.ps1';"
         "$triggers = @(%s | ForEach-Object {"
         "  New-ScheduledTaskTrigger -Daily -At ([datetime]::Parse($_)) });"
         "$t = Get-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue;"
