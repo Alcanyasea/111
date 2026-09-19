@@ -5,13 +5,30 @@
 需要管理员权限——失败时返回可读错误，由界面弹 InfoBar 提示。
 """
 import json
+import os
 import re
 from datetime import datetime
 
 from core.util import decode_console, run as _run
 
 TASK_NAME = "MAA_明日方舟自动挂机"
-RUN_CMD = r"pwsh.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Minimized -File D:\1\scripts\master.ps1"
+
+# 计划任务必须用 pwsh 绝对路径：任务计划程序不按用户 PATH 解析裸 pwsh.exe，
+# 商店版（MSIX）的执行别名直接 0x80070002 起不来；MSI 版 Program Files 优先。
+_PWSH_CANDIDATES = (
+    r"C:\Program Files\PowerShell\7\pwsh.exe",
+    os.path.expandvars(r"%LOCALAPPDATA%\Microsoft\WindowsApps\pwsh.exe"),
+)
+
+
+def pwsh_exe():
+    for p in _PWSH_CANDIDATES:
+        if os.path.isfile(p):
+            return p
+    return "pwsh.exe"
+
+
+RUN_CMD = "%s -NoProfile -ExecutionPolicy Bypass -WindowStyle Minimized -File D:\\1\\scripts\\master.ps1" % pwsh_exe()
 
 _PS_DATE_RE = re.compile(r"/Date\((\d+)\)/")
 _HHMM_RE = re.compile(r"T(\d{2}:\d{2})")
@@ -103,7 +120,7 @@ def apply(cfg):
     script = (
         "$ErrorActionPreference='Stop';"
         "$name = '%s';"
-        "$action = New-ScheduledTaskAction -Execute 'pwsh.exe'"
+        "$action = New-ScheduledTaskAction -Execute '%s'"
         "  -Argument '-NoProfile -ExecutionPolicy Bypass -WindowStyle Minimized -File D:\\1\\scripts\\master.ps1';"
         "$triggers = @(%s | ForEach-Object {"
         "  New-ScheduledTaskTrigger -Daily -At ([datetime]::Parse($_)) });"
@@ -113,7 +130,7 @@ def apply(cfg):
         "if (%s) { Enable-ScheduledTask -TaskName $name }"
         "else { Disable-ScheduledTask -TaskName $name };"
         "'APPLIED'"
-    ) % (TASK_NAME, times_ps, en_ps)
+    ) % (TASK_NAME, pwsh_exe(), times_ps, en_ps)
     code, out, err = _ps(script, timeout=APPLY_TIMEOUT)
     err_text = decode_console(err).strip()
     if code != 0 or "APPLIED" not in decode_console(out):

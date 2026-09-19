@@ -347,6 +347,11 @@ function Invoke-Plugin($pyPath, $tag, $name, $argList, $missNote) {
 # farm 用的 Default 全程不被触碰；收菜结束由 infrast_collect.py restore 切回
 # Default，即使中断，farm_guard 也会在下次挂机启动前强制切回。
 
+# 子脚本统一用 pwsh 绝对路径拉起：计划任务环境不保证按 PATH 解析裸 pwsh.exe
+# （商店版执行别名更解析不到，0x80070002）；本机已换 MSI 版固定在 Program Files。
+$pwshExe = "C:\Program Files\PowerShell\7\pwsh.exe"
+if (-not (Test-Path $pwshExe)) { $pwshExe = "pwsh" }
+
 function Run-Switch($s) {
     # $s 形如 "slot_switch.ps1 -Server official -Slot official_2"；返回子脚本退出码
     $parts = $s -split ' '
@@ -358,7 +363,7 @@ function Run-Switch($s) {
     # Redirect child process stdout to temp file to avoid encoding issues
     # with the console pipeline (2>&1 on child powershell mangles output)
     $tmpOut = "$scriptDir\switch_output.tmp"
-    $proc = Start-Process -FilePath pwsh `
+    $proc = Start-Process -FilePath $pwshExe `
         -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$sp`" $extraArgs" `
         -NoNewWindow -PassThru `
         -RedirectStandardOutput $tmpOut

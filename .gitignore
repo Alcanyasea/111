@@ -53,3 +53,6 @@ plugins/infrast_collect/collect_plan.json
 
 # Run history records (generated data, one JSON per batch)
 scripts/run_history/
+
+# Heartbeat watchdog residue
+scripts/login_heartbeat.tmp
