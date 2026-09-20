@@ -27,13 +27,17 @@ r"""基建收菜插件：独立「收菜」配置方案 + 切 Current 指针，�
 
 import argparse
 import json
-import os
 import sys
-from datetime import datetime
 from pathlib import Path
 
 PLUGIN_DIR = Path(__file__).resolve().parent
 DEFAULT_CONFIG = Path(r"D:\1\config.json")
+
+# 插件公共工具（plugins\common.py）——此前本文件与其它四个插件各复制一份
+sys.path.insert(0, str(PLUGIN_DIR.parent))
+from common import (atomic_json_write as _atomic_json_write, find_account,
+                    load_config, log_file, maa_dir_for as _maa_dir,
+                    read_json as _read_json)
 
 # 收菜方案里停用的任务（开始唤醒 + 基建保留：要先进游戏才收得了菜）
 DISABLE_TASKS = ("RecruitTask", "FightTask", "MallTask", "AwardTask")
@@ -45,11 +49,8 @@ COLLECT_SCHEME = "收菜"
 FARM_SCHEME = "Default"
 
 
-def _atomic_json_write(path, data):
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-    os.replace(tmp, path)
+def _log_file(cfg, msg):
+    log_file(cfg, "基建收菜", msg)
 
 
 def _deepcopy(obj):
@@ -86,34 +87,6 @@ def write_collect_plan():
     path = PLUGIN_DIR / "collect_plan.json"
     _atomic_json_write(path, plan)
     return path
-
-
-def load_config(path):
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except (OSError, json.JSONDecodeError):
-        return {}
-
-
-def find_account(cfg, acc_id):
-    for a in cfg.get("accounts") or []:
-        if isinstance(a, dict) and a.get("id") == acc_id:
-            return a
-    return None
-
-
-def _maa_dir(cfg, server):
-    key = "maa_bilibili_dir" if server == "bilibili" else "maa_official_dir"
-    d = (cfg.get("paths") or {}).get(key)
-    return Path(d) if d else None
-
-
-def _read_json(path):
-    try:
-        return json.loads(Path(path).read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return None
 
 
 def apply_collect(maa_dir):
@@ -246,18 +219,6 @@ def restore_default(maa_dir):
     if changed:
         return True, "Current 已切回 Default（%s）" % "、".join(changed)
     return True, "Current 本就是 Default，无需切换"
-
-
-def _log_file(cfg, msg):
-    try:
-        lp = (cfg.get("paths") or {}).get("log_file")
-        if not lp:
-            return
-        with open(lp, "a", encoding="utf-8") as f:
-            f.write("%s - [基建收菜] %s\n" % (
-                datetime.now().strftime("%Y-%m-%d %H:%M:%S"), msg))
-    except OSError:
-        pass
 
 
 def cmd_apply(args):

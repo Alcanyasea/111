@@ -8,6 +8,7 @@ import json
 import os
 import re
 from datetime import datetime
+from pathlib import Path
 
 from core.util import decode_console, run as _run
 
@@ -20,15 +21,16 @@ _PWSH_CANDIDATES = (
     os.path.expandvars(r"%LOCALAPPDATA%\Microsoft\WindowsApps\pwsh.exe"),
 )
 
+# master.ps1 路径按本文件位置推导（gui\core\scheduler.py → 项目根\scripts），
+# 不再写死 D:\1：项目挪目录/装到别的盘后计划任务仍指向正确脚本
+MASTER_PS1 = str(Path(__file__).resolve().parents[2] / "scripts" / "master.ps1")
+
 
 def pwsh_exe():
     for p in _PWSH_CANDIDATES:
         if os.path.isfile(p):
             return p
     return "pwsh.exe"
-
-
-RUN_CMD = "%s -NoProfile -ExecutionPolicy Bypass -WindowStyle Minimized -File D:\\1\\scripts\\master.ps1" % pwsh_exe()
 
 _PS_DATE_RE = re.compile(r"/Date\((\d+)\)/")
 _HHMM_RE = re.compile(r"T(\d{2}:\d{2})")
@@ -40,7 +42,8 @@ APPLY_TIMEOUT = 40
 
 
 def _ps(script, timeout=QUERY_TIMEOUT):
-    return _run(["pwsh", "-NoProfile", "-Command", script], timeout=timeout)
+    # 用 pwsh 绝对路径：GUI 由 pythonw 拉起时 PATH 不保证含 pwsh
+    return _run([pwsh_exe(), "-NoProfile", "-Command", script], timeout=timeout)
 
 
 def _parse_date(value):
@@ -121,7 +124,8 @@ def apply(cfg):
         "$ErrorActionPreference='Stop';"
         "$name = '%s';"
         "$action = New-ScheduledTaskAction -Execute '%s'"
-        "  -Argument '-NoProfile -ExecutionPolicy Bypass -WindowStyle Minimized -File D:\\1\\scripts\\master.ps1';"
+        # -File 路径加双引号：项目目录含空格时任务计划程序照样能启动
+        "  -Argument '-NoProfile -ExecutionPolicy Bypass -WindowStyle Minimized -File \"%s\"';"
         "$triggers = @(%s | ForEach-Object {"
         "  New-ScheduledTaskTrigger -Daily -At ([datetime]::Parse($_)) });"
         "$t = Get-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue;"
@@ -130,7 +134,7 @@ def apply(cfg):
         "if (%s) { Enable-ScheduledTask -TaskName $name }"
         "else { Disable-ScheduledTask -TaskName $name };"
         "'APPLIED'"
-    ) % (TASK_NAME, pwsh_exe(), times_ps, en_ps)
+    ) % (TASK_NAME, pwsh_exe(), MASTER_PS1, times_ps, en_ps)
     code, out, err = _ps(script, timeout=APPLY_TIMEOUT)
     err_text = decode_console(err).strip()
     if code != 0 or "APPLIED" not in decode_console(out):

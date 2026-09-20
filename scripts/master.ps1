@@ -26,35 +26,73 @@ param([switch]$NoShutdown, [switch]$SkipMAA, [switch]$InfrastCollect,
 $ErrorActionPreference = "Continue"
 $ProgressPreference = "SilentlyContinue"
 
-# PID-based file lock — prevents race condition from dual scheduled-task launch
-# More reliable than Global\mutex which requires admin and can fail across sessions
+# PID+StartTime 文件锁 — 防计划任务双触发并发双跑（Global\mutex 需管理员且跨会话
+# 不可靠，故用文件锁；v4.1 起在旧版基础上加固两个洞）：
+# 1) 抢锁用 [System.IO.File]::Open(CreateNew) 独占创建——文件已存在即失败，
+#    「检查→写入」合一为一步原子操作。旧版 Test-Path→Remove→Move 三步之间无
+#    互斥，两个计划任务同时启动可同时通过检查、各自写锁后双跑。
+# 2) 锁内容为 "PID|进程启动时间(UTC Ticks)"，校验时与 Get-Process StartTime 比对：
+#    进程已死 / 进程名不是 pwsh / 启动时间对不上（PID 被系统复用给别的 pwsh 窗口）
+#    都按陈旧锁清理后重抢。旧版只看 PID+进程名——断电残留的陈旧锁，其 PID 恰好
+#    被用户自己开的 pwsh 窗口复用时，会永久拒绝运行且不清理锁（master.lock 挡死）。
+#    旧格式锁（仅 PID 无 |）退回命令行特征判断：命令行含 master.ps1 才算在跑；
+#    命令行读不到（跨权限）时保守视为在跑——宁可少跑一轮，不冒双跑风险。
 $lockFile = "D:\1\scripts\master.lock"
 
-# Check if another instance is already running
-if (Test-Path $lockFile) {
-    try {
-        $oldPid = [int](Get-Content $lockFile -Raw -ErrorAction Stop)
-        $oldProc = Get-Process -Id $oldPid -ErrorAction Stop
-        if ($oldProc.ProcessName -match "^(powershell|pwsh)$") {
-            # Old master.ps1 still running — abort
-            Write-Host "Another instance is already running (PID $oldPid). Exiting."
-            exit 0
-        } else {
-            # Lock file exists but PID is not powershell — stale lock, clean up
-            Write-Host "Stale lock found (PID $oldPid is $($oldProc.ProcessName)), cleaning up."
-            Remove-Item $lockFile -Force
+function Test-LockHeldByLiveMaster([string]$content) {
+    # $true = 锁持有者仍是活着的 master 实例（应放弃启动）；$false = 陈旧锁可清理
+    $parts = $content -split '\|'
+    [int]$lockPid = 0
+    if (-not [int]::TryParse($parts[0], [ref]$lockPid) -or $lockPid -le 0) { return $false }
+    $proc = Get-Process -Id $lockPid -ErrorAction SilentlyContinue
+    if (-not $proc -or $proc.ProcessName -notmatch "^(powershell|pwsh)$") { return $false }
+    if ($parts.Count -ge 2 -and $parts[1]) {
+        [long]$oldTicks = 0
+        if ([long]::TryParse($parts[1], [ref]$oldTicks) -and $oldTicks -gt 0) {
+            try {
+                return ($proc.StartTime.ToUniversalTime().Ticks -eq $oldTicks)
+            } catch { }  # StartTime 读不到（跨权限），退回命令行判断
         }
-    } catch {
-        # PID not found or file corrupt — stale lock, clean up
-        Write-Host "Stale lock found (process dead), cleaning up."
-        Remove-Item $lockFile -Force -ErrorAction SilentlyContinue
     }
+    try {
+        $cl = (Get-CimInstance Win32_Process -Filter "ProcessId=$lockPid" -ErrorAction Stop).CommandLine
+        if ($null -ne $cl) { return ($cl -match 'master\.ps1') }
+    } catch { }
+    return $true
 }
 
-# Write current PID to lock file (atomic via temp+move to avoid partial writes)
-$pidFileTemp = "$lockFile.tmp"
-"$pid" | Out-File $pidFileTemp -Encoding ascii -NoNewline
-Move-Item $pidFileTemp $lockFile -Force
+$lockAcquired = $false
+$myStartTicks = (Get-Process -Id $PID).StartTime.ToUniversalTime().Ticks
+for ($lockAttempt = 0; $lockAttempt -lt 2 -and -not $lockAcquired; $lockAttempt++) {
+    try {
+        $fs = [System.IO.File]::Open($lockFile, [System.IO.FileMode]::CreateNew,
+            [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
+        $lockBytes = [System.Text.Encoding]::ASCII.GetBytes("$PID|$myStartTicks")
+        $fs.Write($lockBytes, 0, $lockBytes.Length)
+        $fs.Flush(); $fs.Close()
+        $lockAcquired = $true
+    } catch [System.IO.IOException] {
+        # 文件已存在：校验持有者是否真是活着的 master
+        $lockContent = ""
+        try { $lockContent = [System.IO.File]::ReadAllText($lockFile).Trim() } catch { }
+        if (Test-LockHeldByLiveMaster $lockContent) {
+            Write-Host "Another instance is already running (lock: $lockContent). Exiting."
+            try {
+                Add-Content -Path "D:\1\scripts\master_log.txt" -Value ("[{0}] Another instance is already running (lock: {1}), exit." -f (Get-Date -Format "yyyy-MM-dd HH:mm:ss"), $lockContent) -ErrorAction SilentlyContinue
+            } catch { }
+            exit 0
+        }
+        Write-Host "Stale lock found (content: '$lockContent'), cleaning up."
+        Remove-Item $lockFile -Force -ErrorAction SilentlyContinue
+        Start-Sleep -Milliseconds 200
+    }
+}
+if (-not $lockAcquired) {
+    # 两轮都没抢到且持有者不像活实例（清理后瞬间被第三方占用等极端竞态）：
+    # 保守放弃——宁可不跑这一轮，不冒与别人双跑的风险
+    Write-Host "Could not acquire master.lock, exiting."
+    exit 0
+}
 
 
 $adb = "D:\软件\MuMu模拟器\MuMuPlayer\nx_main\adb.exe"
@@ -418,6 +456,11 @@ function Run-Switch($s) {
     return $code
 }
 
+# 槽位回拉用共用库的 Ensure-GuideViewed（引导标记清单收敛在 login_device_lib.ps1，
+# 与 login_check / capture_account 同源维护，避免多份拷贝漂移——此前本函数漏了
+# 这步：MAA 期间游戏新弹过引导时，回拉的槽位仍缺标记，下次切号还会弹）
+. (Join-Path $scriptDir "login_device_lib.ps1")
+
 function Refresh-SlotData($Server, $Slot) {
     # MAA 跑完后把设备上最新的登录数据拉回槽位：游戏在处理首次启动弹窗/公告弹窗后
     # 会往 playerprefs 写入「已处理」标记（配音选择、公告版本号等），且写入有延迟。
@@ -457,6 +500,10 @@ function Refresh-SlotData($Server, $Slot) {
     Move-Item $tmpPp (Join-Path $dstShared $ppName) -Force
     & $adb -s $device pull "/data/data/$pkg/shared_prefs/HypergryphSdkPreferences.xml" (Join-Path $dstShared "HypergryphSdkPreferences.xml") 2>$null | Out-Null
     & $adb -s $device pull "/data/data/$pkg/files/zx/lc.cache" (Join-Path $dstFiles "lc.cache") 2>$null | Out-Null
+    # 引导已看过标记：回拉后补齐清单内缺失项（与 lib 的 Update-SlotData 同口径），
+    # 下次切号进对应界面不再弹「首次进入」引导；失败仅告警
+    $nGuide = Ensure-GuideViewed (Join-Path $dstShared $ppName)
+    if ($nGuide -gt 0) { Log ("  [Refresh] 补写引导已看过标记 {0} 条" -f $nGuide) }
     Log "  [Refresh] slot '$Slot' data updated from device"
 }
 

@@ -32,12 +32,15 @@ Fiammetta，互斥生效。
 
 import argparse
 import json
-import os
 import sys
-from datetime import datetime
 from pathlib import Path
 
 DEFAULT_CONFIG = Path(r"D:\1\config.json")
+
+# 插件公共工具（plugins\common.py）——此前本文件与其它四个插件各复制一份
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from common import (atomic_json_write as _atomic_json_write, find_account,
+                    load_config, log_file, maa_dir_for as _maa_dir)
 
 # 复用精确基建插件的班次判断（当前时间落在哪个班次），避免两边逻辑漂移
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "base_schedule"))
@@ -47,38 +50,8 @@ except Exception:   # noqa: BLE001 - 插件缺失时退回「取第一个开启�
     bsplugin = None
 
 
-def load_config(path):
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except (OSError, json.JSONDecodeError):
-        return {}
-
-
-def find_account(cfg, acc_id):
-    for a in cfg.get("accounts") or []:
-        if isinstance(a, dict) and a.get("id") == acc_id:
-            return a
-    return None
-
-
 def _log_file(cfg, msg):
-    try:
-        lp = (cfg.get("paths") or {}).get("log_file")
-        if not lp:
-            return
-        with open(lp, "a", encoding="utf-8") as f:
-            f.write("%s - [菲亚梅塔] %s\n" % (
-                datetime.now().strftime("%Y-%m-%d %H:%M:%S"), msg))
-    except OSError:
-        pass
-
-
-def _atomic_json_write(path, data):
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2),
-                   encoding="utf-8")
-    os.replace(tmp, path)
+    log_file(cfg, "菲亚梅塔", msg)
 
 
 def active_batch(cfg):
@@ -198,9 +171,8 @@ def cmd_apply(args):
         print("WARN enabled but no target, skip")
         enabled = False
 
-    maa_key = "maa_bilibili_dir" if server == "bilibili" else "maa_official_dir"
-    maa_dir = (cfg.get("paths") or {}).get(maa_key)
-    if not maa_dir or not Path(maa_dir).exists():
+    maa_dir = _maa_dir(cfg, server)
+    if not maa_dir or not maa_dir.exists():
         _log_file(cfg, "WARN 未找到 %s 的 MAA 目录：%s，跳过菲亚梅塔设置"
                   % (server, maa_dir))
         print("WARN no maa dir")

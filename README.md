@@ -154,7 +154,7 @@ accounts\<slot>\
 
 | 机制 | 文件 | 说明 |
 |------|------|------|
-| 互斥锁 | `master.lock` | 存当前运行的 PID，防止重复启动 |
+| 互斥锁 | `master.lock` | 存当前运行的 PID + 进程启动时间（原子创建，防重复启动与 PID 复用误判） |
 | 完成信号 | `maa_done.signal` | MAA 跑完后由 `signal_done.ps1` 创建，`master.ps1` 轮询检测 |
 | MAA 回调 | `signal_done.ps1` / `signal_done.bat` | 在 MAA 设置中配置为「任务结束后执行脚本」，指向 `signal_done.bat` |
 

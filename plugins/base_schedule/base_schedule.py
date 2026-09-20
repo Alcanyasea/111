@@ -43,6 +43,7 @@ MAA 按宿舍 1→4 顺序处理且 autofill 会先消耗可用干员，因此�
 """
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -53,6 +54,15 @@ from pathlib import Path
 PLUGIN_DIR = Path(__file__).resolve().parent
 PLANS_DIR = PLUGIN_DIR / "plans"
 DEFAULT_CONFIG = Path(r"D:\1\config.json")
+
+# 插件公共工具（plugins\common.py）——此前五个插件各复制一份、改一处漏四处
+sys.path.insert(0, str(PLUGIN_DIR.parent))
+from common import (atomic_json_write as _atomic_json_write, find_account,
+                    load_config, log_file, maa_dir_for as _maa_dir)
+
+
+def _log_file(cfg, msg):
+    log_file(cfg, "基建插件", msg)
 
 BATCHES = ["4点", "16点"]
 # farm 换班要进的标准设施（与 MAA GUI 设施列表同序）。旧版基建收菜曾把 farm
@@ -398,8 +408,19 @@ def build_plan_document(bs, entries=None, title="自定义基建",
 
 
 def plan_path_for_slot(slot):
-    safe = re.sub(r"[^0-9A-Za-z_\-]", "_", slot or "account")
-    return PLANS_DIR / (safe + ".json")
+    """槽位 → 计划文件路径。
+
+    文件名防碰撞：槽位名经字符清洗才合法时（含空格/中文等），附加原始名的
+    短哈希——否则「acc 1」与「acc_1」清洗后同名，两个账号的计划文件互相覆盖，
+    A 号会静默加载 B 号的排班。清洗后与原名一致（如 official_1）保持原文件名，
+    既有部署的计划文件名不受影响。
+    """
+    raw = str(slot or "account")
+    safe = re.sub(r"[^0-9A-Za-z_\-]", "_", raw)
+    if safe == raw:
+        return PLANS_DIR / (safe + ".json")
+    short = hashlib.md5(raw.encode("utf-8")).hexdigest()[:8]
+    return PLANS_DIR / ("%s_%s.json" % (safe, short))
 
 
 def regenerate_for_account(cfg, acc):
@@ -435,12 +456,6 @@ def current_batch(now=None, entries=None):
     return batch_name(pick["time"])
 
 
-def _atomic_json_write(path, data):
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-    os.replace(tmp, path)
-
-
 def normalize_room_list(task):
     """把 InfrastTask 设施列表整理成标准房间全启用、MAA GUI 固定顺序。返回是否改动。
 
@@ -472,11 +487,23 @@ def normalize_room_list(task):
     return True
 
 
+def _read_maa_json(path, log):
+    """读 MAA 配置 JSON；损坏/被占用（MAA 运行中可能正在写该文件）时记 ERROR
+    返回 None——由调用方按失败处理，而不是裸 traceback 中断启动链。"""
+    try:
+        return json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError) as e:
+        log("ERROR: 读取 MAA 配置 %s 失败（%s）" % (path, e))
+        return None
+
+
 def apply_maa_config(maa_dir, plan_path, plan_index=None, log=print):
     """把某套 MAA 当前配置的基建任务切到 Custom(plan) 或恢复 Rotation。
 
     修改 gui.new.json 的 InfrastTask（Mode/Filename/PlanSelect）与
-    gui.json 的 Infrast.InfrastMode。返回改动的文件名列表。
+    gui.json 的 Infrast.InfrastMode。返回改动的文件名列表；MAA 配置读取
+    失败时返回 None（调用方应判为该账号失败，master 的失败重试会在 MAA
+    写入窗口过去后重跑本插件，瞬时冲突自愈）。
     设施列表整表恢复为标准房间全启用（normalize_room_list）：MAA 自定义
     换班按这份清单过滤房间，哪个房间被禁用哪个房间的排班就静默失效。
     切换到 Custom（精确换班）时强制开启 InfrastTask 的
@@ -494,7 +521,9 @@ def apply_maa_config(maa_dir, plan_path, plan_index=None, log=print):
 
     gui_new = Path(maa_dir) / "config" / "gui.new.json"
     if gui_new.exists():
-        data = json.loads(gui_new.read_text(encoding="utf-8"))
+        data = _read_maa_json(gui_new, log)
+        if data is None:
+            return None
         cur = data.get("Current") or "Default"
         section = (data.get("Configurations") or {}).get(cur)
         found = False
@@ -531,7 +560,9 @@ def apply_maa_config(maa_dir, plan_path, plan_index=None, log=print):
 
     gui_json = Path(maa_dir) / "config" / "gui.json"
     if gui_json.exists():
-        data = json.loads(gui_json.read_text(encoding="utf-8"))
+        data = _read_maa_json(gui_json, log)
+        if data is None:
+            return None
         cur = data.get("Current") or "Default"
         section = (data.get("Configurations") or {}).get(cur)
         if isinstance(section, dict):
@@ -540,33 +571,6 @@ def apply_maa_config(maa_dir, plan_path, plan_index=None, log=print):
             changed.append("gui.json")
 
     return changed
-
-
-def load_config(path):
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except (OSError, json.JSONDecodeError):
-        return {}
-
-
-def find_account(cfg, acc_id):
-    for a in cfg.get("accounts") or []:
-        if isinstance(a, dict) and a.get("id") == acc_id:
-            return a
-    return None
-
-
-def _log_file(cfg, msg):
-    try:
-        lp = (cfg.get("paths") or {}).get("log_file")
-        if not lp:
-            return
-        with open(lp, "a", encoding="utf-8") as f:
-            f.write("%s - [基建插件] %s\n" % (
-                datetime.now().strftime("%Y-%m-%d %H:%M:%S"), msg))
-    except OSError:
-        pass
 
 
 def cmd_apply(args):
@@ -597,9 +601,8 @@ def cmd_apply(args):
         _log_file(cfg, "账号「%s」启用精确基建（%s批），计划已生成：%s"
                   % (label, batch, plan_path.name))
 
-    maa_key = "maa_bilibili_dir" if server == "bilibili" else "maa_official_dir"
-    maa_dir = (cfg.get("paths") or {}).get(maa_key)
-    if not maa_dir or not Path(maa_dir).exists():
+    maa_dir = _maa_dir(cfg, server)
+    if not maa_dir or not maa_dir.exists():
         _log_file(cfg, "WARN 未找到 %s 的 MAA 目录：%s，跳过配置写入"
                   % (server, maa_dir))
         print("WARN no maa dir")
@@ -608,6 +611,11 @@ def cmd_apply(args):
     changed = apply_maa_config(
         maa_dir, plan_path, plan_index=plan_index,
         log=lambda m: _log_file(cfg, m))
+    if changed is None:
+        _log_file(cfg, "ERROR: MAA 配置读取失败（文件损坏或被 MAA 占用），"
+                  "账号「%s」按失败处理，等待整轮重试" % label)
+        print("ERROR maa config unreadable")
+        return 1
     if enabled:
         _log_file(cfg, "已切换 MAA 基建为自定义计划 %s（%s批，%s）"
                   % (plan_path.name, batch, ", ".join(changed) or "无改动"))

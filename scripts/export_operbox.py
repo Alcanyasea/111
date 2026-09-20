@@ -76,9 +76,12 @@ def _snap_processes():
 
 
 def master_running():
-    """master.ps1（挂机）是否在运行：锁文件里的 PID 是活着的 powershell。"""
+    """master.ps1（挂机）是否在运行：锁文件里的 PID 是活着的 powershell。
+
+    兼容两种锁格式：旧版纯 PID，新版 "PID|进程启动时间Ticks"（master.ps1 v4.1 起）。
+    """
     try:
-        pid = int(MASTER_LOCK.read_text(encoding="ascii").strip())
+        pid = int(MASTER_LOCK.read_text(encoding="ascii").strip().split("|")[0])
     except (OSError, ValueError):
         return False
     procs = _snap_processes()

@@ -207,6 +207,30 @@ if ($backupExists -match 'playerprefs|sdk|lc') {
 LogLine "备份并清空登录态..."
 & $adb -s $device shell "mkdir -p /data/local/tmp/ark_cap; mv /data/data/$pkg/shared_prefs/$ppName /data/local/tmp/ark_cap/playerprefs.xml; mv /data/data/$pkg/shared_prefs/HypergryphSdkPreferences.xml /data/local/tmp/ark_cap/sdk.xml; mv /data/data/$pkg/files/zx/lc.cache /data/local/tmp/ark_cap/lc.cache" 2>$null | Out-Null
 
+# ---- 校验清空生效（v4.1 加固，防旧账号数据误存新槽位）----
+# mv 经 adb shell 执行且错误被吞掉：一旦静默失败，旧 playerprefs（含旧
+# u8sdk_cached_uid）留在设备上，后面「轮询登录成功」会在第一轮就把它当成
+# 登录成功、把旧账号数据拉进新槽位且不报任何错。这里轮询确认三个文件确实
+# 已移走；有残留 → 还原备份后明确失败（原登录态完好，可直接重试）。
+# 注意：清空验证通过后，后续任何 uid 都只能来自本次新登录，因此无需
+# （也不应）比对「捕获前后 uid 是否相同」——同账号重新捕获时 uid 本就相同。
+$cleared = $false
+for ($i = 0; $i -lt 3; $i++) {
+    Start-Sleep 2
+    $ls = (& $adb -s $device shell "ls /data/data/$pkg/shared_prefs/ /data/data/$pkg/files/zx/ 2>/dev/null") -join "`n"
+    if ($ls -notmatch [regex]::Escape($ppName) -and $ls -notmatch 'HypergryphSdkPreferences\.xml' -and $ls -notmatch 'lc\.cache') {
+        $cleared = $true
+        break
+    }
+    LogLine "清空登录态尚未确认生效，重试验证..."
+}
+if (-not $cleared) {
+    LogLine "ERROR: 登录数据清空失败（旧登录文件仍留在设备上），捕获中止"
+    LogLine "ERROR: 为防止把旧账号数据存进新槽位，本次捕获不继续；原登录态已还原，可直接重试"
+    Restore-Backup $ppName
+    exit 1
+}
+
 # ---- 写入最小 SDK prefs（已同意用户协议，跳过协议弹窗）----
 $minSdk = Join-Path $env:TEMP "ark_min_sdk.xml"
 @'

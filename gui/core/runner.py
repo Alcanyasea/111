@@ -35,9 +35,14 @@ def _run(args, timeout=15):
 
 
 def lock_pid():
-    """master.lock 里的 PID；文件缺失/损坏返回 None。"""
+    """master.lock 里的 PID；文件缺失/损坏返回 None。
+
+    兼容两种格式：旧版纯 PID，新版 "PID|进程启动时间Ticks"
+    （master.ps1 v4.1 起写入，锁校验自身比对 StartTime 防 PID 复用；
+    GUI 侧仍按进程名判定，口径不变）。
+    """
     try:
-        return int(LOCK_FILE.read_text(encoding="ascii").strip())
+        return int(LOCK_FILE.read_text(encoding="ascii").strip().split("|")[0])
     except (OSError, ValueError):
         return None
 
@@ -79,7 +84,8 @@ def clear_stale_lock():
     if pid is None:
         return None
     try:
-        if LOCK_FILE.read_text(encoding="ascii").strip() != str(pid):
+        # 重读比对 PID 部分（新版锁内容为 "PID|启动时间Ticks"，仍属同一把陈旧锁才删）
+        if LOCK_FILE.read_text(encoding="ascii").strip().split("|")[0] != str(pid):
             return None
         LOCK_FILE.unlink()
     except OSError:

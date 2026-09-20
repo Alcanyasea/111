@@ -12,40 +12,20 @@ Current）里第二个理智作战任务的 StagePlan，与 MAA「候选关卡�
 
 import argparse
 import json
-import os
 import sys
-from datetime import datetime
 from pathlib import Path
 
 PLUGIN_DIR = Path(__file__).resolve().parent
 DEFAULT_CONFIG = Path(r"D:\1\config.json")
 
-
-def _atomic_json_write(path, data):
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-    os.replace(tmp, path)
-
-
-def load_config(path):
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except (OSError, json.JSONDecodeError):
-        return {}
+# 插件公共工具（plugins\common.py）——此前本文件与其它四个插件各复制一份
+sys.path.insert(0, str(PLUGIN_DIR.parent))
+from common import (atomic_json_write as _atomic_json_write, find_account,
+                    load_config, log_file, maa_dir_for as _maa_dir)
 
 
-def find_account(cfg, acc_id):
-    for a in cfg.get("accounts") or []:
-        if isinstance(a, dict) and a.get("id") == acc_id:
-            return a
-    return None
-
-
-def _maa_dir(cfg, server):
-    key = "maa_bilibili_dir" if server == "bilibili" else "maa_official_dir"
-    d = (cfg.get("paths") or {}).get(key)
-    return Path(d) if d else None
+def _log_file(cfg, msg):
+    log_file(cfg, "理智关卡", msg)
 
 
 def apply_plan_to_maa(maa_dir, plan, use_optional=True):
@@ -87,18 +67,6 @@ def apply_plan_to_maa(maa_dir, plan, use_optional=True):
     names = ["当前/上次" if not str(s).strip() else str(s) for s in plan]
     return True, "第二个理智作战候选关卡已映射为 %s（%s）" % (
         "、".join(names), gui_new.name)
-
-
-def _log_file(cfg, msg):
-    try:
-        lp = (cfg.get("paths") or {}).get("log_file")
-        if not lp:
-            return
-        with open(lp, "a", encoding="utf-8") as f:
-            f.write("%s - [理智关卡] %s\n" % (
-                datetime.now().strftime("%Y-%m-%d %H:%M:%S"), msg))
-    except OSError:
-        pass
 
 
 def cmd_apply(args):

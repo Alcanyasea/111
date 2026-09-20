@@ -31,6 +31,7 @@ from widgets import BusyStrip, style_button, style_primary_button
 import config as appconfig
 import theme
 from core import cleanup, logparse, poller, proc, runner, scheduler
+from core import maa_update
 from pages.accounts import AccountsPage
 from pages.dashboard import DashboardPage
 from pages.history import HistoryPage
@@ -794,6 +795,13 @@ def main():
     _single_server.newConnection.connect(_on_second_instance)
     _win = MainWindow()
     _win.show()
+    # MAA 更新途中控制台被强杀/断电时，临时配置修改（RunDirectly=false 等）
+    # 不会被 finally 恢复，之后每轮挂机会等完成信号全部超时。启动时按恢复
+    # 标记里的原值快照自动复原，事件写入 master_log（日志页可见）
+    try:
+        maa_update.recover_all(_win.cfg)
+    except Exception:
+        pass
     if appconfig.LAST_LOAD_WARNING:
         # 配置损坏已备份：必须让用户知道，避免误以为账号还在列表里
         box = MessageBox("配置文件异常", appconfig.LAST_LOAD_WARNING, _win)

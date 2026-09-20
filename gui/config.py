@@ -7,6 +7,7 @@ GUI 与 PowerShell 脚本（master.ps1 / slot_switch.ps1 等）共享这份配�
 import json
 import os
 import re
+import time
 from copy import deepcopy
 from datetime import datetime
 from pathlib import Path
@@ -340,10 +341,27 @@ def load() -> dict:
 
 
 def save(cfg: dict):
-    """原子写入（临时文件 + 替换），UTF-8 无 BOM，中文不转义。"""
+    """原子写入（临时文件 + 替换），UTF-8 无 BOM，中文不转义。
+
+    临时文件名带进程 ID：固定名 config.json.tmp 在两个写方（历史版本/
+    异常并发）同时落盘时会互相截断；os.replace 带短重试——杀软/索引器
+    瞬时占用目标文件是 Windows 上替换失败的常见原因，重试即可恢复。
+    最终失败仍抛出（调用方 settings 页已有捕获弹窗，静默丢配置更危险）。
+    """
     CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
-    tmp = CONFIG_PATH.with_suffix(".json.tmp")
+    tmp = CONFIG_PATH.with_suffix(".json.tmp-%d" % os.getpid())
     with open(tmp, "w", encoding="utf-8", newline="\n") as f:
         json.dump(cfg, f, ensure_ascii=False, indent=2)
         f.write("\n")
-    os.replace(tmp, CONFIG_PATH)
+    for attempt in range(3):
+        try:
+            os.replace(tmp, CONFIG_PATH)
+            return
+        except OSError:
+            if attempt == 2:
+                try:
+                    os.unlink(tmp)
+                except OSError:
+                    pass
+                raise
+            time.sleep(0.15)

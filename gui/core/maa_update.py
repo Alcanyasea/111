@@ -30,6 +30,7 @@ import subprocess
 import time
 import winreg
 from ctypes import wintypes
+from datetime import datetime
 from pathlib import Path
 
 from core import proc, runner
@@ -266,6 +267,28 @@ def _backup(path):
         pass
 
 
+# 崩溃恢复标记：改 gui.new.json 前先把「原值快照」写进该标记，恢复成功后删除。
+# 控制台在更新途中被强杀/断电时，update_one 的 finally 恢复不会执行，残留的
+# RunDirectly=false 会让之后每轮挂机等 maa_done.signal 全部超时失败。控制台
+# 启动（main.py）与每次更新前（run_full_update）检测到标记即按快照自动复原。
+# 标记先于配置修改写入：强杀落在「标记已写、配置未改」的窗口时，恢复只是把
+# 原值原样写回（无副作用）；反过来先改配置就会留下无法察觉的残留。
+RECOVER_MARKER = "gui.new.json.update-recover"
+
+
+def _master_log(cfg, msg):
+    """恢复事件写进 master_log.txt（控制台日志页可见）；失败静默。"""
+    try:
+        lp = (cfg.get("paths") or {}).get("log_file") if isinstance(cfg, dict) else None
+        if not lp:
+            return
+        with open(lp, "a", encoding="utf-8") as f:
+            f.write("%s - [MAA更新恢复] %s\n" % (
+                datetime.now().strftime("%Y-%m-%d %H:%M:%S"), msg))
+    except OSError:
+        pass
+
+
 def _apply_update_config(maa_dir, proxy_url):
     """临时改 gui.new.json：下载走代理、强制自动更新、暂停直接运行。
 
@@ -292,6 +315,7 @@ def _apply_update_config(maa_dir, proxy_url):
         su = conf.setdefault("Gui", {}).setdefault("StartUpSettings", {})
         saved["RunDirectly"] = su.get("RunDirectly", True)
         su["RunDirectly"] = False   # 更新期间不要连模拟器跑任务
+    _write_json(Path(maa_dir) / "config" / RECOVER_MARKER, saved)
     _write_json(gui_new, data)
     return saved
 
@@ -316,7 +340,54 @@ def _restore_update_config(maa_dir, saved):
     try:
         _write_json(gui_new, data)
     except OSError:
+        return
+    # 恢复成功才删标记：恢复本身失败（读损坏/写失败）时标记保留，
+    # 下次控制台启动会再试一次
+    try:
+        (Path(maa_dir) / "config" / RECOVER_MARKER).unlink()
+    except OSError:
         pass
+
+
+def recover_pending_update(maa_dir):
+    """检测并恢复上次更新崩溃残留的临时配置。返回是否执行了恢复。"""
+    marker = Path(maa_dir) / "config" / RECOVER_MARKER
+    try:
+        saved = json.loads(marker.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        saved = None
+    if not isinstance(saved, dict):
+        # 标记缺失或损坏（写一半被断电）：损坏则删掉，防每次启动都白检测
+        try:
+            if marker.exists():
+                marker.unlink()
+        except OSError:
+            pass
+        return False
+    _restore_update_config(maa_dir, saved)
+    return not marker.exists()
+
+
+def recover_all(cfg, log=None):
+    """对两套 MAA 逐一做崩溃恢复。返回恢复的套数。
+
+    GUI 启动（main.py）与 run_full_update 开头调用：挂机流程要求 MAA 的
+    RunDirectly=true，残留不恢复则每轮挂机必超时失败。
+    """
+    n = 0
+    for _key, name, d in _maa_targets(cfg):
+        if not d or not Path(d).is_dir():
+            continue
+        try:
+            if recover_pending_update(d):
+                n += 1
+                msg = "检测到 %s MAA 上次更新异常中断，已自动恢复其临时配置修改" % name
+                if log:
+                    log(msg)
+                _master_log(cfg, msg)
+        except Exception:  # 恢复失败不阻塞启动/更新，标记保留待下次再试
+            pass
+    return n
 
 
 # ---------- 更新流程 ----------
@@ -573,6 +644,8 @@ def run_full_update(cfg, log, cancel=None):
         return False, "挂机正在运行，请先停止挂机再更新 MAA"
     if proc.process_running(MAA_EXE):
         return False, "MAA 正在打开，请先关闭 MAA 窗口再更新"
+
+    recover_all(cfg, log)   # 上次更新强杀残留的临时配置，更新前先复原
 
     mu = cfg.get("maa_update") or {}
     timeout_min = to_int(mu.get("timeout_min"), 15)
