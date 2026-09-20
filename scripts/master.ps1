@@ -26,72 +26,50 @@ param([switch]$NoShutdown, [switch]$SkipMAA, [switch]$InfrastCollect,
 $ErrorActionPreference = "Continue"
 $ProgressPreference = "SilentlyContinue"
 
-# PID+StartTime 文件锁 — 防计划任务双触发并发双跑（Global\mutex 需管理员且跨会话
-# 不可靠，故用文件锁；v4.1 起在旧版基础上加固两个洞）：
-# 1) 抢锁用 [System.IO.File]::Open(CreateNew) 独占创建——文件已存在即失败，
-#    「检查→写入」合一为一步原子操作。旧版 Test-Path→Remove→Move 三步之间无
-#    互斥，两个计划任务同时启动可同时通过检查、各自写锁后双跑。
-# 2) 锁内容为 "PID|进程启动时间(UTC Ticks)"，校验时与 Get-Process StartTime 比对：
-#    进程已死 / 进程名不是 pwsh / 启动时间对不上（PID 被系统复用给别的 pwsh 窗口）
-#    都按陈旧锁清理后重抢。旧版只看 PID+进程名——断电残留的陈旧锁，其 PID 恰好
-#    被用户自己开的 pwsh 窗口复用时，会永久拒绝运行且不清理锁（master.lock 挡死）。
-#    旧格式锁（仅 PID 无 |）退回命令行特征判断：命令行含 master.ps1 才算在跑；
-#    命令行读不到（跨权限）时保守视为在跑——宁可少跑一轮，不冒双跑风险。
+# master.lock 句柄独占锁 — 防计划任务双触发并发双跑（v4.2 重构）：
+# 排他性由「打开锁文件并持有 FileShare.Read 独占句柄到进程退出」保证，OS 兜底：
+# 持有者活着 = 其他 master 再用 ReadWrite 打开必失败（IOException）；持有者死了 =
+# OS 自动关闭其句柄，残留锁文件可被下一轮 OpenOrCreate 直接接管覆写，无需判活。
+# 旧版 CreateNew+读内容判活方案的两个洞由此消除：
+# 1) A 创建锁后、写入内容前的瞬间，B 读到空内容会把 A 的活锁误判成陈旧锁删掉
+#    （双跑）——新方案完全不读内容判活，不存在该窗口；
+# 2) 断电残留锁的 PID 被复用给别的 pwsh 窗口时，需要启动时间/命令行层层兜底——
+#    新方案里死进程句柄必然被 OS 回收，PID 复用与判活彻底无关。
+# FileShare.Read 允许 GUI/导出脚本（runner.lock_details、export_operbox、cleanup）
+# 在挂机运行中读取锁内容做诊断显示，不破坏现有读方；但写打开仍互斥。
+# 锁内容仍写 "PID|进程启动时间(UTC Ticks)"（ASCII，v4.1 格式不变），只作诊断，
+# 不参与本脚本的判活。
 $lockFile = "D:\1\scripts\master.lock"
-
-function Test-LockHeldByLiveMaster([string]$content) {
-    # $true = 锁持有者仍是活着的 master 实例（应放弃启动）；$false = 陈旧锁可清理
-    $parts = $content -split '\|'
-    [int]$lockPid = 0
-    if (-not [int]::TryParse($parts[0], [ref]$lockPid) -or $lockPid -le 0) { return $false }
-    $proc = Get-Process -Id $lockPid -ErrorAction SilentlyContinue
-    if (-not $proc -or $proc.ProcessName -notmatch "^(powershell|pwsh)$") { return $false }
-    if ($parts.Count -ge 2 -and $parts[1]) {
-        [long]$oldTicks = 0
-        if ([long]::TryParse($parts[1], [ref]$oldTicks) -and $oldTicks -gt 0) {
-            try {
-                return ($proc.StartTime.ToUniversalTime().Ticks -eq $oldTicks)
-            } catch { }  # StartTime 读不到（跨权限），退回命令行判断
-        }
-    }
-    try {
-        $cl = (Get-CimInstance Win32_Process -Filter "ProcessId=$lockPid" -ErrorAction Stop).CommandLine
-        if ($null -ne $cl) { return ($cl -match 'master\.ps1') }
-    } catch { }
-    return $true
-}
-
-$lockAcquired = $false
+$script:lockFs = $null
 $myStartTicks = (Get-Process -Id $PID).StartTime.ToUniversalTime().Ticks
-for ($lockAttempt = 0; $lockAttempt -lt 2 -and -not $lockAcquired; $lockAttempt++) {
+try {
+    $script:lockFs = [System.IO.File]::Open($lockFile,
+        [System.IO.FileMode]::OpenOrCreate, [System.IO.FileAccess]::ReadWrite,
+        [System.IO.FileShare]::Read)
+} catch {
+    # 打不开 = 有活实例持有句柄（死进程的句柄会被 OS 回收，不会阻塞）；其余
+    # 异常（权限等）同样保守放弃——宁可少跑一轮，不冒双跑风险
+    $lockContent = ""
+    try { $lockContent = [System.IO.File]::ReadAllText($lockFile).Trim() } catch { }
+    Write-Host "Another instance is already running (or lock unavailable: $lockContent). Exiting."
     try {
-        $fs = [System.IO.File]::Open($lockFile, [System.IO.FileMode]::CreateNew,
-            [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
-        $lockBytes = [System.Text.Encoding]::ASCII.GetBytes("$PID|$myStartTicks")
-        $fs.Write($lockBytes, 0, $lockBytes.Length)
-        $fs.Flush(); $fs.Close()
-        $lockAcquired = $true
-    } catch [System.IO.IOException] {
-        # 文件已存在：校验持有者是否真是活着的 master
-        $lockContent = ""
-        try { $lockContent = [System.IO.File]::ReadAllText($lockFile).Trim() } catch { }
-        if (Test-LockHeldByLiveMaster $lockContent) {
-            Write-Host "Another instance is already running (lock: $lockContent). Exiting."
-            try {
-                Add-Content -Path "D:\1\scripts\master_log.txt" -Value ("[{0}] Another instance is already running (lock: {1}), exit." -f (Get-Date -Format "yyyy-MM-dd HH:mm:ss"), $lockContent) -ErrorAction SilentlyContinue
-            } catch { }
-            exit 0
-        }
-        Write-Host "Stale lock found (content: '$lockContent'), cleaning up."
-        Remove-Item $lockFile -Force -ErrorAction SilentlyContinue
-        Start-Sleep -Milliseconds 200
-    }
-}
-if (-not $lockAcquired) {
-    # 两轮都没抢到且持有者不像活实例（清理后瞬间被第三方占用等极端竞态）：
-    # 保守放弃——宁可不跑这一轮，不冒与别人双跑的风险
-    Write-Host "Could not acquire master.lock, exiting."
+        Add-Content -Path "D:\1\scripts\master_log.txt" -Value ("[{0}] Another instance is already running (lock: {1}), exit." -f (Get-Date -Format "yyyy-MM-dd HH:mm:ss"), $lockContent) -ErrorAction SilentlyContinue
+    } catch { }
     exit 0
+}
+# 接管陈旧锁时文件可能比新内容长（旧 PID|ticks 更长）：先截断再写，防残留
+# 字节拼进 ticks 字段被 GUI 读出错值。写入后不关句柄：独占持有到进程退出
+$script:lockFs.SetLength(0)
+$lockBytes = [System.Text.Encoding]::ASCII.GetBytes("$PID|$myStartTicks")
+$script:lockFs.Write($lockBytes, 0, $lockBytes.Length)
+$script:lockFs.Flush()
+
+function Release-Lock {
+    # 收尾统一出口：先关句柄再删文件（句柄未关时 Remove-Item 会因占用失败）；
+    # 崩溃/被杀场景句柄由 OS 回收，残留锁文件由下一轮 OpenOrCreate 直接接管
+    try { if ($script:lockFs) { $script:lockFs.Close() } } catch { }
+    $script:lockFs = $null
+    Remove-Item $lockFile -Force -ErrorAction SilentlyContinue
 }
 
 
@@ -134,6 +112,10 @@ $runMode = "farm"
 # config.json 由「MAA 挂机控制台」GUI 生成；文件不存在时流程与旧版完全一致。
 . (Join-Path $PSScriptRoot "config_lib.ps1")
 $config = Read-AppConfigJson "D:\1\config.json"
+# 插件/通知统一经 --config 传入的配置路径：必须显式定义——未定义的变量求值
+# 为 $null，pwsh 7 会把参数数组里的 $null 元素直接丢弃，子进程 argparse 收到
+# 「--config --account」报 expected one argument（exit 2），farm 全线误判自检失败
+$configPath = "D:\1\config.json"
 if ($config) {
     $p = $config.paths
     if ($null -ne $p -and $p.adb)          { $adb = [string]$p.adb }
@@ -227,16 +209,19 @@ function Start-MuMu {
     Log "ERROR: MuMu timeout"; return $false
 }
 
-function Wait-MAADone($t, $maaDir) {
+function Wait-MAADone($t, $maaDir, $maaProc) {
     # 完成信号由 signal_done.bat（MAA 任务结束后回调）创建。
     # 心跳 = MAA 的 asst.log 持续出现 SubTask 事件（进战斗、战斗中 PRTS 轮询、
     # 结算等，正常战斗下每几秒一条）；超过 $t 秒没有任何心跳才判超时。
+    # 存活判定用 Run-MAA -PassThru 拿到的进程对象（本脚本拉起的那个实例），
+    # 不按进程名全局扫描——用户手动开的无关 MAA 不影响 dead/dead-early 判定。
     # 返回状态字符串：ok / stall（无进展超时）/ dead（进程退出且已执行过任务）/
     #   dead-early（进程启动即退出、一次任务都没跑过，由 Run-MAA 自动重试一次）。
     Log ("Waiting for MAA tasks... ({0} 秒无战斗/任务进展判超时)" -f $t)
     if (Test-Path $signalFile) { Remove-Item $signalFile -Force }
     $logPath = Join-Path $maaDir "debug\asst.log"
     $logPos = -1
+    $carry = ""   # 上一块日志尾部（跨读块边界的心跳匹配用，见下方读取段）
     if (Test-Path $logPath) {
         try {
             $fs = [System.IO.File]::Open($logPath, 'Open', 'Read', 'ReadWrite')
@@ -257,9 +242,9 @@ function Wait-MAADone($t, $maaDir) {
             return "ok"
         }
         # MAA 进程意外退出（启动即崩溃/被手动关闭）→ 不傻等心跳超时，快速判失败；
-        # 连续 2 轮检测不到才判，避开进程刚拉起的瞬间。是否执行过任务决定
+        # 连续 2 轮 HasExited 才判，避开进程刚拉起的瞬间。是否执行过任务决定
         # Run-MAA 是否自动重试（已有进展的退出重试可能重复执行任务，不重试）
-        if (-not (Get-Process -Name "MAA" -ErrorAction SilentlyContinue)) {
+        if ($null -eq $maaProc -or $maaProc.HasExited) {
             $maaDeadCount++
             if ($maaDeadCount -ge 2) {
                 if ($sawProgress) {
@@ -288,14 +273,27 @@ function Wait-MAADone($t, $maaDir) {
             try {
                 $fs = [System.IO.File]::Open($logPath, 'Open', 'Read', 'ReadWrite')
                 $len = $fs.Length
-                if ($len -lt $logPos) { $logPos = 0 }   # asst.log 被轮转/重建
+                $readFail = 0   # 恢复可读即清零连击（旧版只在匹配心跳时清零，安静期偶发失败会跨成功读取累积）
+                if ($len -lt $logPos) { $logPos = 0; $carry = "" }   # asst.log 被轮转/重建
                 if ($len -gt $logPos) {
                     $fs.Seek($logPos, 'Begin') | Out-Null
                     $n = $len - $logPos
                     $buf = New-Object byte[] $n
-                    [void]$fs.Read($buf, 0, $n)
-                    $logPos = $len
-                    $chunk = [System.Text.Encoding]::UTF8.GetString($buf)
+                    # Read 不保证一次读满（短读合法）：循环读满，且只按实际读到
+                    # 的字节推进 logPos，余下字节下轮接着读
+                    $off = 0
+                    while ($off -lt $n) {
+                        $r = $fs.Read($buf, $off, $n - $off)
+                        if ($r -le 0) { break }
+                        $off += $r
+                    }
+                    $logPos += $off
+                    # 心跳串可能正好被读块边界切开（4 秒一轮按字节续读）：保留
+                    # 上块尾部 64 字符拼到本块前面再匹配；UTF-8 多字节字符跨界
+                    # 至多解码成替换符，不影响 ASCII 心跳串匹配
+                    $chunk = $carry + [System.Text.Encoding]::UTF8.GetString($buf, 0, $off)
+                    if ($chunk.Length -gt 64) { $carry = $chunk.Substring($chunk.Length - 64) }
+                    else { $carry = $chunk }
                     if ($chunk -match 'append_callback \| SubTask') {
                         $lastAct = Get-Date
                         $sawProgress = $true
@@ -305,9 +303,28 @@ function Wait-MAADone($t, $maaDir) {
                 $fs.Dispose()
             } catch {
                 if ($fs) { try { $fs.Dispose() } catch {} }
-                # MAA 独占日志等短暂不可读：前几次宽容，之后按无进展计
+                # 日志读不到（杀软扫描/MAA 独占写等瞬时竞争）：旧版连败 4 次
+                # （约 16 秒）就把 lastAct 拨到超时点、当轮立即判 stall——正常
+                # 战斗会被瞬时锁误杀。补强为「文件增长判活」：MAA 活着就持续
+                # 追加日志，元数据查询（Get-Item）不打开数据流、不受数据锁
+                # 影响（已实测）——在长即视为有进展刷新 lastAct；查不到或不在
+                # 长则不动 lastAct，由统一的 stall 计时自然兜底（与日志可读时
+                # 完全同口径，不会更快也不会更慢）
                 $readFail++
-                if ($readFail -gt 3) { $lastAct = (Get-Date).AddSeconds(-$t) }
+                $len2 = -1
+                try { $len2 = (Get-Item -LiteralPath $logPath -ErrorAction Stop).Length } catch { }
+                if ($len2 -gt 0) {
+                    if ($logPos -ge 0 -and $len2 -gt $logPos) {
+                        $lastAct = Get-Date   # 在长 = MAA 活着在写，进度照常
+                        $logPos = $len2       # 增长字节已计入基线，成功读取后无需重扫
+                        $readFail = 0
+                    } elseif ($logPos -lt 0) {
+                        $logPos = $len2       # 首次建立基线，不给进度
+                    }
+                }
+                if ($readFail -eq 3) {
+                    Log "  [WARN] asst.log 连续 3 次读取失败且文件无增长（疑似被独占），按无进展计时中"
+                }
             }
         }
         $idleSec = ((Get-Date) - $lastAct).TotalSeconds
@@ -320,15 +337,31 @@ function Wait-MAADone($t, $maaDir) {
     }
 }
 
+function Stop-StaleMaa([string]$maaDir) {
+    # 启动前清理：只杀「本 MAA 目录」下的残留实例（上次崩溃/异常遗留）。按进程
+    # 可执行文件路径前缀匹配，不按名字全局杀——用户手动开的别的 MAA（人工
+    # 排障/查看）不能误杀；同目录的手动 MAA 与脚本会写同一份配置，必须清
+    Get-Process -Name "MAA" -ErrorAction SilentlyContinue | ForEach-Object {
+        try {
+            $p = $_.Path
+            if ($p -and $p.StartsWith($maaDir, [System.StringComparison]::OrdinalIgnoreCase)) {
+                Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue
+            }
+        } catch { }   # Path 读不到（权限/刚好退出）的实例不碰
+    }
+}
+
 function Run-MAA($exe, $dir, $label) {
     Log ("=== Run MAA [" + $label + "] ===")
-    Get-Process -Name "MAA" -ErrorAction SilentlyContinue | Stop-Process -Force
+    Stop-StaleMaa $dir
     Start-Sleep 2
     if (Test-Path $signalFile) { Remove-Item $signalFile -Force }
     Log "Launching MAA..."
-    Start-Process $exe -WorkingDirectory $dir
+    # -PassThru 拿到本脚本拉起的进程对象：存活判定与收尾只针对它，
+    # 用户手动开的无关 MAA 不再被误杀/误判
+    $maaProc = Start-Process $exe -WorkingDirectory $dir -PassThru
     Start-Sleep 5
-    $status = Wait-MAADone $maaStallTimeoutSec $dir
+    $status = Wait-MAADone $maaStallTimeoutSec $dir $maaProc
     $script:LastMaaStatus = $status
     if ($status -eq "dead-early") {
         # 启动即崩溃（一次任务都没跑）自动重试一次：偶发崩溃/被占用拦截时自愈。
@@ -336,12 +369,15 @@ function Run-MAA($exe, $dir, $label) {
         Log "WARN: 3 秒后自动重试一次 MAA 启动"
         Start-Sleep 3
         Log "Launching MAA (retry)..."
-        Start-Process $exe -WorkingDirectory $dir
+        $maaProc = Start-Process $exe -WorkingDirectory $dir -PassThru
         Start-Sleep 5
-        $status = Wait-MAADone $maaStallTimeoutSec $dir
+        $status = Wait-MAADone $maaStallTimeoutSec $dir $maaProc
         $script:LastMaaStatus = $status
     }
-    Get-Process -Name "MAA" -ErrorAction SilentlyContinue | Stop-Process -Force
+    # 收尾只杀自己拉起的实例（按 Id），不按名字全局杀
+    if ($maaProc -and -not $maaProc.HasExited) {
+        Stop-Process -Id $maaProc.Id -Force -ErrorAction SilentlyContinue
+    }
     Start-Sleep 2
     $ok = ($status -eq "ok")
     if ($ok) { Log ("MAA [" + $label + "] completed successfully") }
@@ -659,7 +695,7 @@ function Send-RunNotify($title, $body) {
 if (-not $accountList -or $accountList.Count -eq 0) {
     Log "FATAL: config.accounts 缺失或不是数组格式，无法运行"
     Log "FATAL: 请在控制台「账号管理」页配置账号后重试"
-    Remove-Item $lockFile -Force -ErrorAction SilentlyContinue
+    Release-Lock
     exit 1
 }
 
@@ -671,7 +707,7 @@ if ($SwitchTo) {
     $match = @($accountList | Where-Object { [string]$_.slot -eq $SwitchTo })
     if ($match.Count -eq 0) {
         Log ("FATAL: -SwitchTo 槽位 '" + $SwitchTo + "' 不在 config.accounts 中")
-        Remove-Item $lockFile -Force -ErrorAction SilentlyContinue
+        Release-Lock
         exit 1
     }
     $accountList = @($match)
@@ -748,7 +784,7 @@ if (-not $SwitchTo -and $null -ne $pick) {
             if ($filtered.Count -eq 0) {
                 Log ("FATAL: 班次 " + $bsBatch + " 勾选的账号在当前列表中都不存在，跳过本轮")
                 Log "FATAL: 请在控制台「仪表盘 → 班次计划 → 账号」重新勾选"
-                Remove-Item $lockFile -Force -ErrorAction SilentlyContinue
+                Release-Lock
                 exit 1
             }
             $accountList = $filtered
@@ -795,7 +831,7 @@ if (-not (Start-MuMu)) {
             shutdown /s /t 60
         }
     }
-    Remove-Item $lockFile -Force -ErrorAction SilentlyContinue
+    Release-Lock
     exit 1
 }
 
@@ -1036,11 +1072,9 @@ Log "========================================"
 # 本轮结果写入运行历史（所有模式都留痕；-SwitchTo 找不到槽位的 FATAL 在上面已单独退出）
 Save-RunHistory $null
 
-# Release PID lock and cleanup BEFORE any blocking prompt,
+# Release lock and cleanup BEFORE any blocking prompt,
 # so the 16:00 run is never blocked by a leftover popup
-Remove-Item $lockFile -Force -ErrorAction SilentlyContinue
-# Clean up temp file too (paranoid)
-Remove-Item "$lockFile.tmp" -Force -ErrorAction SilentlyContinue
+Release-Lock
 
 # 成功 -> no popup, no confirmation needed
 if ($failed -eq 0) {
