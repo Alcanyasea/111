@@ -359,7 +359,19 @@ function Invoke-Plugin($pyPath, $tag, $name, $argList, $missNote) {
         Log ("  [WARN] " + $name + "不可用（venv python 或脚本缺失），" + $missNote)
         return $false
     }
-    $out = & $venvPython $pyPath @argList 2>&1
+    # 插件输出统一 UTF-8：控制台代码页为 cp1252 等编不了中文的环境下，插件
+    # print 中文会 UnicodeEncodeError 直接崩（CI 实测）。只对这一次子进程调用
+    # 做作用域内 UTF-8（子进程编码与父进程解码两端同时切），不影响 adb 等
+    # 其它命令的解码
+    $oldConsoleEnc = [Console]::OutputEncoding
+    $env:PYTHONIOENCODING = "utf-8"
+    try {
+        [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+        $out = & $venvPython $pyPath @argList 2>&1
+    } finally {
+        [Console]::OutputEncoding = $oldConsoleEnc
+        Remove-Item Env:PYTHONIOENCODING -ErrorAction SilentlyContinue
+    }
     foreach ($l in $out) {
         $line = [string]$l
         if ($line) {

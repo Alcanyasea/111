@@ -4,6 +4,7 @@
 覆盖 import 链（plugins/common.py）、参数路径、MAA 配置写入与收菜/还原循环。
 """
 import json
+import os
 import re
 import subprocess
 import sys
@@ -16,9 +17,13 @@ PLUGIN_DIR = ROOT / "plugins"
 
 
 def _run(plugin, *argv):
+    # PYTHONIOENCODING：CI/部分机器控制台是 cp1252 等编不了中文的代码页，
+    # 插件 print 中文会 UnicodeEncodeError 直接崩——子进程统一强制 UTF-8 输出
+    env = dict(os.environ)
+    env["PYTHONIOENCODING"] = "utf-8"
     r = subprocess.run([sys.executable, str(plugin), *argv],
                        capture_output=True, text=True,
-                       encoding="utf-8", errors="replace")
+                       encoding="utf-8", errors="replace", env=env)
     return r.returncode, (r.stdout or "") + (r.stderr or "")
 
 
