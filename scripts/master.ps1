@@ -1044,8 +1044,11 @@ if ($SwitchTo) {
 } elseif ($closeEmulator) {
     Log " "; Log "=== Closing emulator ==="
     Log "Shutting down MuMu..."
+    # 两步关法（同 gui/core/adb.py close_emulator）：先关虚拟机，再 main close 关主程序。
+    # 直接杀 MuMuNxMain 会被服务拉起，必须用 mumu-cli main close 正常退出。
     & $cli control -v 0 shutdown 2>$null | Out-Null
     Start-Sleep 5
+    & $cli main close 2>$null | Out-Null
     Log "Emulator closed"
 } else {
     Log " "
