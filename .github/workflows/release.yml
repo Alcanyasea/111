@@ -12,8 +12,25 @@ on:
         default: ""
 
 jobs:
+  test:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      # tests/ 只用标准库（unittest），零安装；GUI 的模块也不依赖 PySide6
+      - name: Run unit tests
+        shell: pwsh
+        run: python -m unittest discover -s tests -v
+
   build:
     runs-on: windows-latest
+    needs: test
     permissions:
       contents: write
     steps:
@@ -26,6 +43,9 @@ jobs:
             if ($env:GITHUB_EVENT_NAME -eq 'push') { $tag = $env:GITHUB_REF_NAME }
             else { $tag = git describe --tags --abbrev=0 }
           }
+          if ($tag -notmatch '^v\d+\.\d+\.\d+$') {
+            throw "tag '$tag' 不符合 v*.*.* 格式（workflow_dispatch 手填时检查输入）"
+          }
           "tag=$tag" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
 
       - name: Checkout
@@ -37,6 +57,15 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+          cache: pip
+          cache-dependency-path: gui/requirements.txt
+
+      - name: Cache build tools (7-Zip MSI / SFX module)
+        uses: actions/cache@v4
+        with:
+          path: build\tools
+          key: build-tools-7zip2409-sfx
+          restore-keys: build-tools-7zip2409-sfx
 
       - name: Install GUI dependencies
         shell: pwsh
@@ -53,6 +82,17 @@ jobs:
             -RepoRoot (Get-Location) `
             -OutputDir (Join-Path (Get-Location) 'build\dist')
 
+      - name: Upload build log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-logs
+          path: |
+            build/**/*.log
+            gui/debug/*.log
+          if-no-files-found: ignore
+          retention-days: 14
+
       - name: Attach to release
         shell: pwsh
         env:
@@ -60,6 +100,7 @@ jobs:
         run: |
           $tag = "${{ steps.tag.outputs.tag }}"
           $exe = Get-ChildItem 'build\dist\*.exe' | Select-Object -First 1
+          if (-not $exe) { throw "build\dist 下没有找到安装包 exe" }
           gh release view $tag --repo $env:GITHUB_REPOSITORY *> $null
           if ($LASTEXITCODE -ne 0) {
             gh release create $tag --repo $env:GITHUB_REPOSITORY --title $tag --generate-notes

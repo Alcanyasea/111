@@ -60,25 +60,22 @@ $scriptDir = "D:\1\scripts"
 # ---- 读取 GUI 配置（D:\1\config.json），字段缺失时回退上面的硬编码默认 ----
 $Username = ""
 $Password = ""
-$configPath = "D:\1\config.json"
-if (Test-Path $configPath) {
-    try {
-        $raw = [System.IO.File]::ReadAllText($configPath, [System.Text.Encoding]::UTF8)
-        $cfg = $raw | ConvertFrom-Json
-        if ($null -ne $cfg.paths -and $cfg.paths.adb)    { $adb = [string]$cfg.paths.adb }
-        if ($null -ne $cfg.paths -and $cfg.paths.device) { $device = [string]$cfg.paths.device }
-        if ($null -ne $cfg.paths -and $cfg.paths.script_dir) { $scriptDir = [string]$cfg.paths.script_dir }
-        # 凭据从 config.accounts 按 server+slot 匹配（不经命令行传递，避免泄露）
-        if ($cfg.accounts -is [System.Array]) {
-            foreach ($a in $cfg.accounts) {
-                if ([string]$a.server -eq $Server -and [string]$a.slot -eq $Slot) {
-                    if ($null -ne $a.username) { $Username = [string]$a.username }
-                    if ($null -ne $a.password) { $Password = [string]$a.password }
-                    break
-                }
+. (Join-Path $PSScriptRoot "config_lib.ps1")
+$config = Read-AppConfigJson "D:\1\config.json"
+if ($config) {
+    if ($null -ne $config.paths -and $config.paths.adb)    { $adb = [string]$config.paths.adb }
+    if ($null -ne $config.paths -and $config.paths.device) { $device = [string]$config.paths.device }
+    if ($null -ne $config.paths -and $config.paths.script_dir) { $scriptDir = [string]$config.paths.script_dir }
+    # 凭据从 config.accounts 按 server+slot 匹配（不经命令行传递，避免泄露）
+    if ($config.accounts -is [System.Array]) {
+        foreach ($a in $config.accounts) {
+            if ([string]$a.server -eq $Server -and [string]$a.slot -eq $Slot) {
+                if ($null -ne $a.username) { $Username = [string]$a.username }
+                if ($null -ne $a.password) { $Password = [string]$a.password }
+                break
             }
         }
-    } catch {}
+    }
 }
 $debugDir = Join-Path $scriptDir "debug"
 $accountsDir = Join-Path $scriptDir "accounts"
@@ -106,8 +103,8 @@ $png = Join-Path $debugDir ("login_check_{0}.png" -f $(if ($Slot) { $Slot } else
 $vp = Start-Vision
 if (-not $vp) { LogLine "ERROR: 识别进程（vision.py）启动失败，请检查 gui\.venv 与 scripts\vision"; exit 1 }
 
-# input text 可靠字符集（其余字符会让整串丢失，见实测）
-$SAFE_CHARS = '^[A-Za-z0-9@.\!\#\$&\*\(\)\- ]+$'
+# input text 可靠字符集（$SAFE_CHARS）与登录表单录入函数（Type-Field）
+# 共用实现在 login_device_lib.ps1（v4.1 从两份逐字拷贝收敛）
 # 登录界面标记（出现任一 = 未登录）；验证码标记 = 无人值守无法处理，直接失败
 $loginMarkers = @("账号登录", "密码登录", "本机号码登录", "验证码登录", "请输入账号", "请输入密码")
 $captchaMarkers = @("安全验证", "依次点击", "滑动验证", "拼图")
@@ -134,19 +131,6 @@ $failMarkers = @(
     "更新资源损坏", "获取资源更新配置失败", "网络连接已断开",
     "安装更新失败", "安装失败", "储存空间不足", "存储空间不足"
 )
-function Type-Field($x, $y, $text) {
-    # 可靠输入序列：点字段聚焦 → 收键盘 → 再点一次重新聚焦 → 输入。
-    # 实测：收键盘后直接 input text，首字符会被吞（首个按键用于重新聚焦）；
-    # 收键盘后补一次点击再输入，字符串完整落框。
-    Invoke-Tap $x $y
-    Start-Sleep 2
-    & $adb -s $device shell "input keyevent 4" 2>$null | Out-Null
-    Start-Sleep 1
-    Invoke-Tap $x $y
-    Start-Sleep 2
-    & $adb -s $device shell ("input text '" + ($text -replace "'","") + "'") 2>$null | Out-Null
-    Start-Sleep 1
-}
 
 LogLine ("=== Login check: {0} (slot: {1}) ===" -f $serverName, $(if ($Slot) { $Slot } else { "(无槽位)" }))
 

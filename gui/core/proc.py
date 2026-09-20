@@ -116,3 +116,65 @@ def process_name(pid):
         return None
     finally:
         kernel32.CloseHandle(snapshot)
+
+
+def snapshot():
+    """全量进程快照 [(pid, parent_pid, exe名小写), ...]；失败返回 None。"""
+    snap = kernel32.CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)
+    invalid = ctypes.c_void_p(-1).value
+    if not snap or snap == invalid:
+        return None
+    out = []
+    try:
+        entry = _ProcessEntry32W()
+        entry.dwSize = ctypes.sizeof(_ProcessEntry32W)
+        ok = kernel32.Process32FirstW(snap, ctypes.byref(entry))
+        while ok:
+            out.append((int(entry.th32ProcessID), int(entry.th32ParentProcessID),
+                        str(entry.szExeFile).lower()))
+            ok = kernel32.Process32NextW(snap, ctypes.byref(entry))
+        return out
+    finally:
+        kernel32.CloseHandle(snap)
+
+
+kernel32.GetProcessTimes.restype = wintypes.BOOL
+kernel32.GetProcessTimes.argtypes = [
+    wintypes.HANDLE, ctypes.POINTER(wintypes.FILETIME),
+    ctypes.POINTER(wintypes.FILETIME), ctypes.POINTER(wintypes.FILETIME),
+    ctypes.POINTER(wintypes.FILETIME)]
+
+# FILETIME 纪元 1601-01-01 与 .NET DateTime 纪元 0001-01-01 的差（100ns 单位）。
+# master.ps1 锁里写的是 PowerShell 的 StartTime.ToUniversalTime().Ticks（.NET 纪元），
+# 这边换算成同一口径才能比对。
+_FILETIME_TO_DOTNET_TICKS = 504911232000000000
+
+
+def process_start_ticks(pid):
+    """进程启动时间，.NET UTC Ticks 口径（与 PowerShell StartTime.Ticks 可比）。
+
+    读不到（进程不存在/权限不足）返回 None。
+    """
+    try:
+        pid = int(pid)
+    except (TypeError, ValueError):
+        return None
+    if pid <= 0:
+        return None
+    handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+    if not handle:
+        return None
+    try:
+        create = wintypes.FILETIME()
+        exit_t = wintypes.FILETIME()
+        kernel_t = wintypes.FILETIME()
+        user_t = wintypes.FILETIME()
+        if not kernel32.GetProcessTimes(handle, ctypes.byref(create),
+                                        ctypes.byref(exit_t),
+                                        ctypes.byref(kernel_t),
+                                        ctypes.byref(user_t)):
+            return None
+        ft = (create.dwHighDateTime << 32) | create.dwLowDateTime
+        return ft + _FILETIME_TO_DOTNET_TICKS
+    finally:
+        kernel32.CloseHandle(handle)

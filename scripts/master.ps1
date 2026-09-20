@@ -132,15 +132,8 @@ $runMode = "farm"
 
 # ---- 读取 GUI 配置（D:\1\config.json），字段缺失时回退上面的硬编码默认 ----
 # config.json 由「MAA 挂机控制台」GUI 生成；文件不存在时流程与旧版完全一致。
-# 注意 PS 5.1 的 Get-Content -Raw 会按 ANSI 解码导致中文路径乱码，必须显式 UTF-8
-$config = $null
-$configPath = "D:\1\config.json"
-if (Test-Path $configPath) {
-    try {
-        $raw = [System.IO.File]::ReadAllText($configPath, [System.Text.Encoding]::UTF8)
-        $config = $raw | ConvertFrom-Json
-    } catch { $config = $null }
-}
+. (Join-Path $PSScriptRoot "config_lib.ps1")
+$config = Read-AppConfigJson "D:\1\config.json"
 if ($config) {
     $p = $config.paths
     if ($null -ne $p -and $p.adb)          { $adb = [string]$p.adb }

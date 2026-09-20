@@ -15,14 +15,13 @@
 # 兜底：自动输入不可用（特殊字符密码）或登录失败时，转「人工登录」：
 #   提示用户在模拟器窗口手动完成登录，脚本轮询 uid，成功后自动拉取文件。
 # 失败时自动恢复备份的原登录态。
-# 用法：capture_account.ps1 -Server official -Slot official_1 -Username xxx -Password xxx [-Label 官服1]
+# 用法：capture_account.ps1 -Server official -Slot official_1 -Label 官服1
+#       账号密码只经环境变量 MAA_CAPTURE_USERNAME / MAA_CAPTURE_PASSWORD 传入
 # 退出码：0 成功；1 失败
 # ============================================================
 param(
     [string]$Server = "official",
     [string]$Slot = "",
-    [string]$Username = "",
-    [string]$Password = "",
     [string]$Label = "",
     [int]$DialogTimeoutMin = 8,     # 弹窗识别循环上限（分钟）
     [int]$ManualTimeoutMin = 12     # 人工登录等待上限（分钟）
@@ -30,12 +29,16 @@ param(
 $ErrorActionPreference = "Continue"
 $ProgressPreference = "SilentlyContinue"
 
-# 账号密码可经环境变量传入（GUI 侧这样传，避免密码留在命令行上被本机其他进程读到）：
-# 命令行参数优先，为空时回退读环境变量；读完全进程内清掉
-if (-not $Username) { $Username = [Environment]::GetEnvironmentVariable("MAA_CAPTURE_USERNAME") }
-if (-not $Password) { $Password = [Environment]::GetEnvironmentVariable("MAA_CAPTURE_PASSWORD") }
+# 账号密码只经环境变量传入（GUI 侧即如此）：命令行参数在进程存活期内对本机
+# 任意进程可读，v4.1 起不再提供 -Username/-Password 参数路径。读完全进程内清掉。
+$Username = [Environment]::GetEnvironmentVariable("MAA_CAPTURE_USERNAME")
+$Password = [Environment]::GetEnvironmentVariable("MAA_CAPTURE_PASSWORD")
 [Environment]::SetEnvironmentVariable("MAA_CAPTURE_USERNAME", $null)
 [Environment]::SetEnvironmentVariable("MAA_CAPTURE_PASSWORD", $null)
+if (-not $Username -or -not $Password) {
+    Write-Host "ERROR: 缺少账号或密码（应经 MAA_CAPTURE_USERNAME/MAA_CAPTURE_PASSWORD 环境变量传入）"
+    exit 1
+}
 
 $adb = "D:\软件\MuMu模拟器\MuMuPlayer\nx_main\adb.exe"
 $device = "127.0.0.1:16384"
@@ -46,17 +49,14 @@ $debugDir = "D:\1\scripts\debug"
 . (Join-Path $scriptDir "login_device_lib.ps1")
 
 # ---- 读取 GUI 配置（D:\1\config.json），字段缺失时回退上面的硬编码默认 ----
-$configPath = "D:\1\config.json"
-if (Test-Path $configPath) {
-    try {
-        $raw = [System.IO.File]::ReadAllText($configPath, [System.Text.Encoding]::UTF8)
-        $cfg = $raw | ConvertFrom-Json
-        if ($null -ne $cfg.paths -and $cfg.paths.adb)    { $adb = [string]$cfg.paths.adb }
-        if ($null -ne $cfg.paths -and $cfg.paths.device) { $device = [string]$cfg.paths.device }
-        if ($null -ne $cfg.paths -and $cfg.paths.cli)    { $cli = [string]$cfg.paths.cli }
-        if ($null -ne $cfg.paths -and $cfg.paths.script_dir) { $scriptDir = [string]$cfg.paths.script_dir }
-        if ($null -ne $cfg.paths -and $cfg.paths.script_dir) { $debugDir = Join-Path ([string]$cfg.paths.script_dir) "debug" }
-    } catch {}
+. (Join-Path $PSScriptRoot "config_lib.ps1")
+$config = Read-AppConfigJson "D:\1\config.json"
+if ($config) {
+    if ($null -ne $config.paths -and $config.paths.adb)    { $adb = [string]$config.paths.adb }
+    if ($null -ne $config.paths -and $config.paths.device) { $device = [string]$config.paths.device }
+    if ($null -ne $config.paths -and $config.paths.cli)    { $cli = [string]$config.paths.cli }
+    if ($null -ne $config.paths -and $config.paths.script_dir) { $scriptDir = [string]$config.paths.script_dir }
+    if ($null -ne $config.paths -and $config.paths.script_dir) { $debugDir = Join-Path ([string]$config.paths.script_dir) "debug" }
 }
 $accountsDir = Join-Path $scriptDir "accounts"
 
@@ -116,28 +116,8 @@ if (-not $vp) { Write-Output "ERROR: 识别进程（vision.py）启动失败，�
 
 if (-not (Test-Path $debugDir)) { New-Item -ItemType Directory $debugDir -Force | Out-Null }
 
-# input text 可靠字符集（其余字符会让整串丢失，见实测）
-$SAFE_CHARS = '^[A-Za-z0-9@.\!\#\$&\*\(\)\- ]+$'
-
-function Type-Field($x, $y, $text) {
-    # 可靠输入序列：点字段聚焦 → 收键盘 → 再点一次重新聚焦 → 输入。
-    # 实测：收键盘后直接 input text，首字符会被吞（首个按键用于重新聚焦）；
-    # 收键盘后补一次点击再输入，字符串完整落框（两次实测通过）。
-    Invoke-Tap $x $y
-    Start-Sleep 2
-    & $adb -s $device shell "input keyevent 4" 2>$null | Out-Null
-    Start-Sleep 1
-    Invoke-Tap $x $y
-    Start-Sleep 2
-    & $adb -s $device shell ("input text '" + ($text -replace "'","") + "'") 2>$null | Out-Null
-    Start-Sleep 1
-}
-
-# Invoke-Tap / Get-DeviceUid / Get-PlayerPrefsName 共用实现在 login_device_lib.ps1
-#（此前本地重复定义遮蔽了库版本，v2 删除；Type-Field 仅捕获流程使用，保留在此）
-
-# Invoke-Tap / Get-DeviceUid / Get-PlayerPrefsName 共用实现在 login_device_lib.ps1
-#（此前本地重复定义遮蔽了库版本，v2 删除）；Type-Field 仅捕获流程使用，保留在此
+# input text 可靠字符集（$SAFE_CHARS）与登录表单录入函数（Type-Field）
+# 共用实现在 login_device_lib.ps1（v4.1 从两份逐字拷贝收敛）
 
 function Write-FileRemote($localPath, $remotePath, $mode) {
     # 推送到设备并修正 owner/权限/上下文

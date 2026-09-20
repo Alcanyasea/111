@@ -8,14 +8,11 @@ $packageOfficial = "com.hypergryph.arknights"
 $packageBilibili = "com.hypergryph.arknights.bilibili"
 
 # ---- 读取 GUI 配置（D:\1\config.json）覆盖 adb / device，缺失时用上面的默认值 ----
-$configPath = "D:\1\config.json"
-if (Test-Path $configPath) {
-    try {
-        $raw = [System.IO.File]::ReadAllText($configPath, [System.Text.Encoding]::UTF8)
-        $cfg = $raw | ConvertFrom-Json
-        if ($null -ne $cfg.paths -and $cfg.paths.adb)    { $adb = [string]$cfg.paths.adb }
-        if ($null -ne $cfg.paths -and $cfg.paths.device) { $device = [string]$cfg.paths.device }
-    } catch {}
+. (Join-Path $PSScriptRoot "config_lib.ps1")
+$config = Read-AppConfigJson "D:\1\config.json"
+if ($config) {
+    if ($null -ne $config.paths -and $config.paths.adb)    { $adb = [string]$config.paths.adb }
+    if ($null -ne $config.paths -and $config.paths.device) { $device = [string]$config.paths.device }
 }
 
 if (-not (Test-Path $debugDir)) { New-Item -ItemType Directory $debugDir -Force | Out-Null }

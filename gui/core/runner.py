@@ -34,17 +34,26 @@ def _run(args, timeout=15):
         return -1, b"", b""
 
 
-def lock_pid():
-    """master.lock 里的 PID；文件缺失/损坏返回 None。
+def lock_details():
+    """master.lock 的 (PID, 启动时间Ticks)；文件缺失/损坏返回 (None, None)。
 
-    兼容两种格式：旧版纯 PID，新版 "PID|进程启动时间Ticks"
-    （master.ps1 v4.1 起写入，锁校验自身比对 StartTime 防 PID 复用；
-    GUI 侧仍按进程名判定，口径不变）。
+    兼容两种格式：旧版纯 PID，新版 "PID|进程启动时间Ticks"（master.ps1 v4.1
+    起写入）。带启动时间时校验比对，PID 被系统复用给别的 pwsh 进程也不会
+    再把锁误判成「挂机在跑」。
     """
     try:
-        return int(LOCK_FILE.read_text(encoding="ascii").strip().split("|")[0])
-    except (OSError, ValueError):
-        return None
+        parts = LOCK_FILE.read_text(encoding="ascii").strip().split("|")
+        pid = int(parts[0])
+        ticks = int(parts[1]) if len(parts) > 1 else None
+        return pid, ticks
+    except (OSError, ValueError, IndexError):
+        return None, None
+
+
+def lock_pid():
+    """master.lock 里的 PID；文件缺失/损坏返回 None。"""
+    pid, _ticks = lock_details()
+    return pid
 
 
 def _pid_name(pid):
@@ -53,25 +62,33 @@ def _pid_name(pid):
     return name.lower() if name else None
 
 
-def _pid_is_master(pid):
-    """PID 是否是活着的 powershell（与 master.ps1 的自检口径一致）。"""
-    return _pid_name(pid) in MASTER_PROC_NAMES
+def _pid_is_master(pid, ticks=None):
+    """PID 是否是活着的 master：powershell 系进程，且启动时间与锁记录一致。
+
+    锁带启动时间（新版格式）时必须比对；启动时间读不到（权限差异）时退回
+    仅进程名判断（与旧版口径一致，宁可保守）。"""
+    if _pid_name(pid) not in MASTER_PROC_NAMES:
+        return False
+    if ticks is None:
+        return True
+    st = proc.process_start_ticks(pid)
+    return True if st is None else (st == ticks)
 
 
 def is_running():
     """master.ps1 是否在运行：锁文件存在且 PID 是活着的 powershell。"""
-    pid = lock_pid()
+    pid, ticks = lock_details()
     if pid is None:
         return False
-    return _pid_is_master(pid)
+    return _pid_is_master(pid, ticks)
 
 
 def stale_lock():
     """锁文件存在但不是活着的 powershell（中断残留/PID 复用），返回该 PID。"""
-    pid = lock_pid()
+    pid, ticks = lock_details()
     if pid is None:
         return None
-    return None if _pid_is_master(pid) else pid
+    return None if _pid_is_master(pid, ticks) else pid
 
 
 def clear_stale_lock():
@@ -80,12 +97,12 @@ def clear_stale_lock():
     判定与删除之间 master.ps1 可能刚把陈旧锁换成自己的新锁（抢锁序列：
     读旧锁 → 删 → 写新锁），所以删除前重读一次内容，仍是不活的旧 PID 才删。
     """
-    pid = stale_lock()
-    if pid is None:
+    pid, ticks = lock_details()
+    if pid is None or _pid_is_master(pid, ticks):
         return None
     try:
-        # 重读比对 PID 部分（新版锁内容为 "PID|启动时间Ticks"，仍属同一把陈旧锁才删）
-        if LOCK_FILE.read_text(encoding="ascii").strip().split("|")[0] != str(pid):
+        content = LOCK_FILE.read_text(encoding="ascii").strip().split("|")[0]
+        if content != str(pid):
             return None
         LOCK_FILE.unlink()
     except OSError:
@@ -156,17 +173,25 @@ def start_switch_fast(cfg, slot):
 def stop():
     """停止正在运行的挂机流程。
 
-    1) taskkill 进程树杀掉 master.ps1（杀前复核 PID 仍是 powershell，
-       防止 PID 被复用后误杀无关进程）
-    2) 杀掉 MAA（master.ps1 的 Run-MAA 结束时会自己杀，强杀时 MAA 会残留）
-    3) shutdown /a 取消可能已排定的自动关机（手动停止时不关机）
+    1) taskkill /T /F 杀 master.ps1 进程树（MAA 由 master 拉起，同树一并
+       终结；杀前复核锁里的 PID+启动时间，防止 PID 复用后误杀无关进程）
+    2) 确认挂机确实在跑时才额外按镜像名兜底杀 MAA.exe（MAA 更新自动重启
+       等场景可能脱离 master 进程树）——挂机没在跑时绝不碰 MAA，用户自己
+       打开的 MAA 窗口不受影响
+    3) shutdown /a 仅在停止前挂机锁确实被活着的 master 持有时调用：
+       挂机没在跑就不碰关机计划（避免取消用户自己排定的关机）
     4) 清理残留锁文件（master.ps1 正常结束会自删，强杀后必残留）
     """
-    pid = lock_pid()
-    if pid is not None and _pid_is_master(pid):
+    pid, ticks = lock_details()
+    was_running = pid is not None and _pid_is_master(pid, ticks)
+    if was_running:
         _run(["taskkill", "/PID", str(pid), "/T", "/F"])
-    _run(["taskkill", "/IM", "MAA.exe", "/F"])
-    _run(["shutdown", "/a"])
+        # 兜底杀脱离 master 进程树的 MAA（更新自动重启等场景）。仅在挂机确实
+        # 在跑时才按镜像名兜底：挂机没跑时绝不碰 MAA——用户自己打开的 MAA
+        # 窗口、以及用户自己排定的关机（下面的 shutdown /a 同理）都不受影响
+        if proc.process_running("MAA.exe"):
+            _run(["taskkill", "/IM", "MAA.exe", "/F"])
+        _run(["shutdown", "/a"])
     try:
         LOCK_FILE.unlink()
     except OSError:

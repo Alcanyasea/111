@@ -180,7 +180,8 @@ D:\1\
 │   ├── slot_switch.ps1            # 槽位切号（停游戏→推登录数据→重启游戏→校验uid，非点击）
 │   ├── login_check.ps1            # 官服登录校验（token预检+屏幕确认+自动登录+刷新槽位）
 │   ├── login_check_bilibili.ps1   # B服登录校验（开屏剧情跳过+观察窗放行；登录界面快速失败）
-│   ├── login_device_lib.ps1       # 登录校验共用设备/槽位函数（点击/uid/槽位刷新/安装器检测）
+│   ├── login_device_lib.ps1       # 登录校验共用设备/槽位函数（点击/uid/槽位刷新/安装器检测/表单录入）
+│   ├── config_lib.ps1             # config.json 统一读取（全部 PS 脚本共用）
 │   ├── vision_lib.ps1             # MAA 同款识别封装（常驻 vision.py + gzip 截图）
 │   ├── vision\                    # 识别模块（vision.py + MAA 模板 + PaddleOCR ONNX 模型）
 │   ├── capture_account.ps1        # 账号捕获（清登录态→过弹窗→输入账号密码→拉取槽位数据）
@@ -202,8 +203,10 @@ D:\1\
 │   └── fight_stage.py             # 运行前把账号候选关卡写入 MAA 第二个 FightTask
 ├── plugins\fiammetta\             # 菲亚梅塔心情恢复插件（精确基建关闭时走常规模式）
 │   └── fiammetta.py               # 运行前把精确基建里的菲亚梅塔设置写进 MAA 基建任务
+├── plugins\common.py              # 插件公共工具（config 读取/账号定位/MAA 目录/原子写/日志）
 ├── plugins\notify\                # 通知推送插件（发送逻辑全项目仅此一份）
 │   └── notify.py                  # Server酱 / PushPlus / 企业微信机器人；master.ps1 与 GUI 测试共用
+├── tests\                         # 单元测试（unittest 标准库零依赖；python -m unittest discover -s tests）
 ├── gui\
 │   ├── main.py                    # GUI 入口（--smoke 自检模式）
 │   ├── config.py                  # config.json 读写与默认值

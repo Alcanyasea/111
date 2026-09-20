@@ -64,6 +64,15 @@ Write-Ok "程序文件复制完成"
 
 # 3) fix hardcoded paths when installing to a non-default directory
 if ($target -ne $defaultTarget) {
+    # 目标路径会被逐字写进脚本内容（替换默认路径字样）。含引号/美元符/括号等
+    # 字符时会改坏代码（字符串提前闭合、被当表达式解析），先拒绝并说明。
+    if ([regex]::IsMatch($target, '[\"''`$;(){}%!<>*?]') -or
+        $target -match '[.\s]$' -or $target -match '^[A-Za-z]:$') {
+        Write-Warn "安装目录含有无法安全改写脚本的特殊字符（引号/美元符/括号/结尾空格或点等），中止安装。"
+        Write-Warn "请换一个仅含字母、数字、横线、下划线、空格与中文的安装目录后重试。"
+        Read-Host "按回车退出"
+        exit 1
+    }
     Write-Step "修正脚本中的硬编码路径..."
     Get-ChildItem $target -Recurse -File -ErrorAction SilentlyContinue |
         Where-Object {
@@ -79,6 +88,37 @@ if ($target -ne $defaultTarget) {
                 }
             } catch {}
         }
+
+    # 替换后语法自检：万一替换撞上代码里的字符串/正则上下文把文件改坏，
+    # 在这里拦下并中止安装，别等用户运行时才炸
+    Write-Step "校验改写后的脚本语法..."
+    $bad = @()
+    $py = Join-Path $target "gui\runtime\python.exe"
+    if (-not (Test-Path $py)) { $py = Join-Path $target "gui\.venv\Scripts\python.exe" }
+    Get-ChildItem $target -Recurse -File -Filter *.py -ErrorAction SilentlyContinue |
+        Where-Object { $_.FullName -notmatch '\\gui\\(runtime|\.venv)\\' } |
+        ForEach-Object {
+            if (Test-Path $py) {
+                & $py -m py_compile $_.FullName 2>$null
+                if ($LASTEXITCODE -ne 0) { $bad += $_.FullName }
+            }
+        }
+    Get-ChildItem $target -Recurse -File -Filter *.ps1 -ErrorAction SilentlyContinue |
+        Where-Object { $_.FullName -notmatch '\\gui\\(runtime|\.venv)\\' } |
+        ForEach-Object {
+            $errs = $null
+            $null = [System.Management.Automation.Language.Parser]::ParseFile(
+                $_.FullName, [ref]$null, [ref]$errs)
+            if ($errs) { $bad += $_.FullName }
+        }
+    if ($bad) {
+        Write-Warn "以下文件改写后语法校验失败（请截图反馈）："
+        $bad | ForEach-Object { Write-Warn ("  " + $_) }
+        Write-Warn "已中止安装，请换安装目录或联系开发者。"
+        Read-Host "按回车退出"
+        exit 1
+    }
+    Write-Ok "脚本语法校验通过"
 }
 
 # 4) Python 运行环境：优先使用安装包内置的 gui\runtime
@@ -149,7 +189,9 @@ if (-not (Test-Path $cfgPath)) {
             $cfg.paths.maa_bilibili_dir = Split-Path -Parent $maaBili
             Write-Ok ("检测到 MAA（B服）：" + $maaBili)
         }
-        $json = $cfg | ConvertTo-Json -Depth 10
+        # Depth 100：accounts[].base_schedule.batches[].manufacture[].operators
+        # 这类深层结构将来再加一层就会被 Depth 10 静默截断（丢配置不报错）
+        $json = $cfg | ConvertTo-Json -Depth 100
         [System.IO.File]::WriteAllText($cfgPath, $json, (New-Object System.Text.UTF8Encoding($false)))
         Write-Ok "config.json 已生成"
     } catch {
@@ -175,17 +217,29 @@ try {
     Write-Warn "创建桌面快捷方式失败：$($_.Exception.Message)"
 }
 
-# 7) scheduled tasks (optional)
+# 7) scheduled task (optional) — 与 GUI 控制台同一个任务名、同一套动作定义：
+#    pwsh 绝对路径 + master.ps1。不走启动挂机.bat（bat 结尾的 pause 会让计划
+#    任务进程在挂机结束后永不退出），任务名/触发也与 GUI 保持一致便于管理
 $ans = Read-Host "是否创建计划任务（每天 04:00 / 16:00 自动挂机，需管理员权限）？[Y/N]"
 if ($ans -match '^[Yy]') {
     try {
-        & schtasks /Create /F /TN "MAA_明日方舟自动挂机" /TR "`"$target\启动挂机.bat`"" /SC DAILY /ST 04:00 | Out-Null
-        & schtasks /Create /F /TN "MAA_明日方舟自动挂机_下午" /TR "`"$target\启动挂机.bat`"" /SC DAILY /ST 16:00 | Out-Null
-        Write-Ok "计划任务创建完成"
+        $pwshExe = @(
+            "$env:ProgramFiles\PowerShell\7\pwsh.exe",
+            "$env:LOCALAPPDATA\Microsoft\WindowsApps\pwsh.exe"
+        ) | Where-Object { Test-Path $_ } | Select-Object -First 1
+        if (-not $pwshExe) { throw "未找到 PowerShell 7（pwsh），请先安装 PowerShell 7" }
+        $action = New-ScheduledTaskAction -Execute $pwshExe `
+            -Argument "-NoProfile -ExecutionPolicy Bypass -WindowStyle Minimized -File `"$target\scripts\master.ps1`""
+        $triggers = @(
+            New-ScheduledTaskTrigger -Daily -At 04:00
+            New-ScheduledTaskTrigger -Daily -At 16:00
+        )
+        Register-ScheduledTask -TaskName "MAA_明日方舟自动挂机" -Action $action `
+            -Trigger $triggers -Force | Out-Null
+        Write-Ok "计划任务创建完成（单任务含两个触发时间，与控制台「班次计划」共用）"
     } catch {
-        Write-Warn "计划任务创建失败（需要管理员权限）。可手动执行："
-        Write-Warn "schtasks /Create /F /TN MAA_明日方舟自动挂机 /TR $target\启动挂机.bat /SC DAILY /ST 04:00"
-        Write-Warn "schtasks /Create /F /TN MAA_明日方舟自动挂机_下午 /TR $target\启动挂机.bat /SC DAILY /ST 16:00"
+        Write-Warn "计划任务创建失败（需管理员权限 + PowerShell 7）：$($_.Exception.Message)"
+        Write-Warn "可稍后打开控制台「仪表盘 → 班次计划」一键创建/同步计划任务"
     }
 }
 

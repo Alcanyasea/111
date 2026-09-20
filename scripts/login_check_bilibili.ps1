@@ -50,15 +50,12 @@ $device = "127.0.0.1:16384"
 $scriptDir = "D:\1\scripts"
 
 # ---- 读取 GUI 配置（D:\1\config.json），字段缺失时回退上面的硬编码默认 ----
-$configPath = "D:\1\config.json"
-if (Test-Path $configPath) {
-    try {
-        $raw = [System.IO.File]::ReadAllText($configPath, [System.Text.Encoding]::UTF8)
-        $cfg = $raw | ConvertFrom-Json
-        if ($null -ne $cfg.paths -and $cfg.paths.adb)    { $adb = [string]$cfg.paths.adb }
-        if ($null -ne $cfg.paths -and $cfg.paths.device) { $device = [string]$cfg.paths.device }
-        if ($null -ne $cfg.paths -and $cfg.paths.script_dir) { $scriptDir = [string]$cfg.paths.script_dir }
-    } catch {}
+. (Join-Path $PSScriptRoot "config_lib.ps1")
+$config = Read-AppConfigJson "D:\1\config.json"
+if ($config) {
+    if ($null -ne $config.paths -and $config.paths.adb)    { $adb = [string]$config.paths.adb }
+    if ($null -ne $config.paths -and $config.paths.device) { $device = [string]$config.paths.device }
+    if ($null -ne $config.paths -and $config.paths.script_dir) { $scriptDir = [string]$config.paths.script_dir }
 }
 $debugDir = Join-Path $scriptDir "debug"
 $accountsDir = Join-Path $scriptDir "accounts"

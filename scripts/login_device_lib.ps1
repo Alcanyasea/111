@@ -159,3 +159,25 @@ function Update-SlotData([bool]$ExpectVoiceKeys) {
     LogLine ("[slot] 槽位数据已刷新（uid={0}）" -f $devUid)
     return $true
 }
+
+# ============================================================
+# 登录表单录入（login_check.ps1 与 capture_account.ps1 共用，v4.1 从两份
+# 逐字拷贝收敛到这里；依赖调用方作用域的 $adb / $device 与库内 Invoke-Tap）
+# ============================================================
+
+# input text 可靠字符集（其余字符会让整串丢失，见实测）
+$SAFE_CHARS = '^[A-Za-z0-9@.\!\#\$&\*\(\)\- ]+$'
+
+function Type-Field($x, $y, $text) {
+    # 可靠输入序列：点字段聚焦 → 收键盘 → 再点一次重新聚焦 → 输入。
+    # 实测：收键盘后直接 input text，首字符会被吞（首个按键用于重新聚焦）；
+    # 收键盘后补一次点击再输入，字符串完整落框。
+    Invoke-Tap $x $y
+    Start-Sleep 2
+    & $adb -s $device shell "input keyevent 4" 2>$null | Out-Null
+    Start-Sleep 1
+    Invoke-Tap $x $y
+    Start-Sleep 2
+    & $adb -s $device shell ("input text '" + ($text -replace "'","") + "'") 2>$null | Out-Null
+    Start-Sleep 1
+}

@@ -20,19 +20,16 @@
 # ============================================================
 Add-Type -AssemblyName System.IO.Compression 2>$null
 
+# config.json 统一读取（config_lib.ps1）
+. (Join-Path $PSScriptRoot "config_lib.ps1")
+
 $script:VisionPythonPath = $null
 
 function Get-VisionPython {
     if ($script:VisionPythonPath) { return $script:VisionPythonPath }
     $py = "D:\1\gui\.venv\Scripts\python.exe"
-    $configPath = "D:\1\config.json"
-    if (Test-Path $configPath) {
-        try {
-            $raw = [System.IO.File]::ReadAllText($configPath, [System.Text.Encoding]::UTF8)
-            $cfg = $raw | ConvertFrom-Json
-            if ($null -ne $cfg.paths -and $cfg.paths.python) { $py = [string]$cfg.paths.python }
-        } catch {}
-    }
+    $cfg = Read-AppConfigJson "D:\1\config.json"
+    if ($null -ne $cfg -and $null -ne $cfg.paths -and $cfg.paths.python) { $py = [string]$cfg.paths.python }
     $script:VisionPythonPath = $py
     return $py
 }

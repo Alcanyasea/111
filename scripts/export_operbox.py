@@ -18,7 +18,6 @@
 # 退出码：0 全部成功；1 有账号失败
 # ============================================================
 import argparse
-import ctypes
 import json
 import os
 import pathlib
@@ -36,60 +35,43 @@ DEBUG_DIR = BASE / "debug" / "operbox"
 LOG_PATH = BASE / "operbox_export.log"
 MASTER_LOCK = BASE / "master.lock"
 
+# 进程检查复用 gui/core/proc.py 的 Toolhelp 快照（此前是第三份 ctypes 拷贝）
+sys.path.insert(0, str(ROOT / "gui"))
+from core import proc as _proc
+
 SERVER_TO_CLIENT = {"official": "Official", "bilibili": "Bilibili"}
 
-# ---- 进程检查（ctypes Toolhelp，与 gui/core/proc.py 同机制，不派生子进程）----
-_TH32CS_SNAPPROCESS = 0x00000002
-
-
-class _ProcessEntry32W(ctypes.Structure):
-    _fields_ = [
-        ("dwSize", ctypes.c_ulong),
-        ("cntUsage", ctypes.c_ulong),
-        ("th32ProcessID", ctypes.c_ulong),
-        ("th32DefaultHeapID", ctypes.POINTER(ctypes.c_ulong)),
-        ("th32ModuleID", ctypes.c_ulong),
-        ("cntThreads", ctypes.c_ulong),
-        ("th32ParentProcessID", ctypes.c_ulong),
-        ("pcPriClassBase", ctypes.c_long),
-        ("dwFlags", ctypes.c_ulong),
-        ("szExeFile", ctypes.c_wchar * 260),
-    ]
-
-
+# ---- 进程检查（复用 gui/core/proc.py 的 Toolhelp 快照，不派生子进程；
+#      此前是第三份逐字 ctypes 拷贝）----
 def _snap_processes():
     """[(pid, exe名小写), ...]；快照失败返回 None（按检查不过处理，宁可不跑）。"""
-    k32 = ctypes.WinDLL("kernel32", use_last_error=True)
-    snap = k32.CreateToolhelp32Snapshot(_TH32CS_SNAPPROCESS, 0)
-    invalid = ctypes.c_void_p(-1).value
-    if not snap or snap == invalid:
+    procs = _proc.snapshot()
+    if procs is None:
         return None
-    out = []
-    entry = _ProcessEntry32W()
-    entry.dwSize = ctypes.sizeof(_ProcessEntry32W)
-    ok = k32.Process32FirstW(snap, ctypes.byref(entry))
-    while ok:
-        out.append((entry.th32ProcessID, str(entry.szExeFile).lower()))
-        ok = k32.Process32NextW(snap, ctypes.byref(entry))
-    k32.CloseHandle(snap)
-    return out
+    return [(p, name) for p, _ppid, name in procs]
 
 
 def master_running():
     """master.ps1（挂机）是否在运行：锁文件里的 PID 是活着的 powershell。
 
-    兼容两种锁格式：旧版纯 PID，新版 "PID|进程启动时间Ticks"（master.ps1 v4.1 起）。
+    兼容两种锁格式：旧版纯 PID，新版 "PID|进程启动时间Ticks"（master.ps1
+    v4.1 起，带启动时间时比对校验，防 PID 被复用后误判挂机在跑）。
     """
     try:
-        pid = int(MASTER_LOCK.read_text(encoding="ascii").strip().split("|")[0])
-    except (OSError, ValueError):
+        parts = MASTER_LOCK.read_text(encoding="ascii").strip().split("|")
+        pid = int(parts[0])
+        ticks = int(parts[1]) if len(parts) > 1 else None
+    except (OSError, ValueError, IndexError):
         return False
     procs = _snap_processes()
     if procs is None:
         return True   # 查不到进程表时宁可误判在跑，不与挂机抢模拟器
     for p, name in procs:
         if p == pid and name in ("powershell.exe", "pwsh.exe"):
-            return True
+            if ticks is None:
+                return True
+            st = _proc.process_start_ticks(pid)
+            return True if st is None else (st == ticks)
     return False
 
 
