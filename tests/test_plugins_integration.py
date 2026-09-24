@@ -40,7 +40,7 @@ class PluginsIntegrationTest(unittest.TestCase):
             "Configurations": {"Default": {"TaskQueue": [
                 {"$type": "StartUpTask", "IsEnable": True},
                 {"$type": "RecruitTask", "IsEnable": True},
-                {"$type": "InfrastTask", "Mode": "Rotation"},
+                {"$type": "InfrastTask", "Mode": "Rotation", "DormThreshold": 42},
                 {"$type": "InfrastTask", "Mode": "Rotation"},  # 旧版双任务残留
                 {"$type": "FightTask", "IsEnable": True},
                 {"$type": "FightTask", "IsEnable": True, "StagePlan": []},
@@ -146,7 +146,31 @@ class PluginsIntegrationTest(unittest.TestCase):
                          "apply", "--config", str(self.cfg_path),
                          "--account", "a1", "--server", "official")
         self.assertEqual(code, 0, out)
-        self.assertEqual(self._gui_new().get("Current"), "收菜")
+        gn = self._gui_new()
+        self.assertEqual(gn.get("Current"), "收菜")
+        scheme = gn["Configurations"]["收菜"]
+        task = next(t for t in scheme["TaskQueue"]
+                    if t.get("$type") == "InfrastTask")
+        # 收菜目标设施：制造/贸易收产物订单 + 宿舍自动换休；其余设施不进
+        enabled = {r["Room"] for r in task["RoomList"] if r.get("IsEnabled", True)}
+        self.assertEqual(enabled, {"Mfg", "Trade", "Dorm"})
+        # 宿舍行为参数跟随 Default（farm 方案）
+        self.assertEqual(task.get("DormThreshold"), 42)
+        self.assertEqual(task.get("DormFilterNotStationed"), True)
+        # 计划文件：生产房间全 skip；4 间宿舍留空 + autofill（MAA 按心情换休）
+        doc = json.loads(Path(task["Filename"]).read_text(encoding="utf-8"))
+        rooms = doc["plans"][0]["rooms"]
+        for prod in ("manufacture", "trading"):
+            for room in rooms[prod]:
+                self.assertTrue(room["skip"])
+                self.assertFalse(room["autofill"])
+        dorms = rooms["dormitory"]
+        self.assertEqual(len(dorms), 4)
+        for dorm in dorms:
+            self.assertIs(dorm["autofill"], True)
+            self.assertIs(dorm["sort"], False)
+            self.assertIs(dorm["skip"], False)
+            self.assertEqual(dorm["operators"], [])
         code, out = _run(PLUGIN_DIR / "infrast_collect" / "infrast_collect.py",
                          "restore", "--config", str(self.cfg_path))
         self.assertEqual(code, 0, out)

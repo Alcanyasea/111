@@ -103,10 +103,45 @@ def default_base_schedule(layout="333", batches=None):
     }
 
 
+_MAA_DIR_RE = re.compile(r"MAA-v(\d+(?:\.\d+)*)-win-x64")
+
+
+def detect_maa_official_dir(base=r"D:\软件\MAA"):
+    """探测 base 下版本号最新的 MAA-v*-win-x64 目录（须含 MAA.exe）。
+
+    MAA 版本更新是原地升级、目录名不变（见 core/maa_update.py 模块说明），
+    目录名里的版本号只在首次安装时真实，因此默认值不能钉死具体版本——全新
+    装机时装的是当时的最新版，写死旧版本号会指向不存在的目录。找不到返回
+    None（调用方回退历史目录名占位，仅保持旧行为不变）。
+    """
+    try:
+        entries = sorted(Path(base).iterdir())
+    except OSError:
+        return None
+    best, best_ver = None, None
+    for d in entries:
+        m = _MAA_DIR_RE.fullmatch(d.name)
+        if not m or not d.is_dir() or not (d / "MAA.exe").is_file():
+            continue
+        try:
+            ver = tuple(int(x) for x in m.group(1).split("."))
+        except ValueError:
+            continue
+        # 元组按位比较：(6,11) < (6,11,1)、(6,9) < (6,11)，位数不同也正确
+        if best_ver is None or ver > best_ver:
+            best, best_ver = d, ver
+    return str(best) if best else None
+
+
+# 官服 MAA 目录默认值：探测 D:\软件\MAA 下的 MAA-v*-win-x64 取版本号最新；
+# 探测不到（MAA 未装/装在别处）回退历史目录名占位。config.json 里的
+# paths.maa_official 永远优先，这里只决定「无配置文件」时的默认值
+_maa_dir_default = detect_maa_official_dir() or r"D:\软件\MAA\MAA-v6.11.1-win-x64"
+
 DEFAULTS = {
     "paths": {
-        "maa_official": r"D:\软件\MAA\MAA-v6.11.1-win-x64\MAA.exe",
-        "maa_official_dir": r"D:\软件\MAA\MAA-v6.11.1-win-x64",
+        "maa_official": str(Path(_maa_dir_default) / "MAA.exe"),
+        "maa_official_dir": _maa_dir_default,
         "maa_bilibili": r"D:\软件\MAA（b）\MAA.exe",
         "maa_bilibili_dir": r"D:\软件\MAA（b）",
         "adb": r"D:\软件\MuMu模拟器\MuMuPlayer\nx_main\adb.exe",
@@ -151,6 +186,10 @@ DEFAULTS = {
             {"time": "04:00", "enabled": True, "shutdown": True, "accounts": []},
             {"time": "16:00", "enabled": True, "shutdown": False, "accounts": []},
         ],
+        # 基建收菜的每日定时（独立计划任务 MAA_基建收菜，跑 master.ps1
+        # -InfrastCollect）：每项 {"time", "enabled", "shutdown"}；空 = 未启用
+        # 定时收菜（与 times 不同，不需要兜底默认时间）
+        "collect_times": [],
     },
     "maa_update": {
         "use_vpn": True,   # 更新前启动 Clash、全部结束后关闭（更新前已开着则复用）
@@ -164,7 +203,8 @@ DEFAULTS = {
         "last_run": "",        # 上次清理时间 "YYYY-MM-DD HH:MM"，空 = 从未清理
     },
     "notify": {
-        "enabled": False,      # 挂机结束后推送到手机（只推失败：每个失败账号一条，成功不推）
+        "enabled": False,      # 挂机结束后推送到手机（只推失败：每个失败账号一条）
+        "on_success": False,   # 成功也推送（全部号成功发一条极简汇总；默认关闭）
         "provider": "serverchan",  # serverchan / pushplus / wecom
         "key": "",             # SendKey / PushPlus token / 企业微信 webhook key
     },
@@ -253,11 +293,32 @@ def _migrate_accounts(cfg):
                             }
 
 
+def _norm_collect_times(sched):
+    """规范化 schedule.collect_times（基建收菜定时）。
+
+    每项 {"time": "HH:MM", "enabled": bool, "shutdown": bool}（shutdown =
+    该时间点收菜结束后自动关机，与挂机班次的关机开关同义）；无效条目剔除，
+    缺失/非列表 → []（收菜定时默认关闭，不像 times 那样回退默认时间——
+    没有就是没启用）。
+    """
+    items = sched.get("collect_times")
+    collects = []
+    for it in items if isinstance(items, list) else []:
+        if not isinstance(it, dict):
+            continue
+        t = str(it.get("time", "")).strip()
+        if re.fullmatch(r"([01]\d|2[0-3]):[0-5]\d", t):
+            collects.append({"time": t, "enabled": bool(it.get("enabled", True)),
+                             "shutdown": bool(it.get("shutdown", False))})
+    sched["collect_times"] = collects
+
+
 def _migrate_schedule(cfg):
     """旧版 schedule.morning/evening → schedule.times 列表，并规范化每项字段。
 
-    每项：{"time": "HH:MM", "enabled": bool, "shutdown": bool}。
+    times 每项：{"time": "HH:MM", "enabled": bool, "shutdown": bool}。
     shutdown 从旧 behavior.morning_shutdown / evening_shutdown 迁移。
+    collect_times（基建收菜定时）一并规范化，缺失 → []。
     """
     sched = cfg.get("schedule")
     if not isinstance(sched, dict):
@@ -283,6 +344,7 @@ def _migrate_schedule(cfg):
         sched["times"] = old
         sched.pop("morning", None)
         sched.pop("evening", None)
+        _norm_collect_times(sched)
         return
 
     # 新格式：规范化 times 列表（accounts = 班次账号 id 列表，空/缺失 = 全部）
@@ -306,6 +368,7 @@ def _migrate_schedule(cfg):
     sched["times"] = times
     sched.pop("morning", None)
     sched.pop("evening", None)
+    _norm_collect_times(sched)
 
 def load() -> dict:
     """读取配置；文件缺失/损坏/字段缺失时用默认值补齐。

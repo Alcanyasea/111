@@ -1,0 +1,90 @@
+# Python virtual environment
+gui/.venv/
+
+# Local Claude workspace data
+.claude/
+.scratch/
+
+# Local AI agent convention files (not distributed)
+AGENTS.md
+
+# Local configuration (contains credentials)
+config.json
+config.json.bak
+
+# Game account data (contains login tokens/UIDs)
+scripts/accounts/
+scripts/_t*.*
+
+# Runtime logs and debug output
+scripts/debug/
+scripts/master_log.txt
+scripts/maa_done.signal
+scripts/operbox_export.log
+
+# Operator roster exports (generated data)
+exports/
+
+# Corrupted-config backups (config.load 生成)
+config.json.corrupt-*
+
+# Python caches
+__pycache__/
+*.pyc
+
+# Runtime lock file
+scripts/master.lock
+gui/console.lock
+scripts/master.lock.tmp
+scripts/switch_output.tmp
+
+# Generated base schedule plan files
+plugins/base_schedule/plans/
+
+# Installer build cache and output
+build/tools/
+build/dist/
+
+# Local tool cache
+.codely-cli/
+.skill-sources/
+
+# Generated collect plan (infrast_collect 插件每次 apply 重新生成)
+plugins/infrast_collect/collect_plan.json
+
+# Run history records (generated data, one JSON per batch)
+scripts/run_history/
+
+# Heartbeat watchdog residue
+scripts/login_heartbeat.tmp
+
+# ===== ↑ 以上同步自 .gitignore（「从 .gitignore 同步」只重写以上部分）=====
+.git/
+.hg/
+.svn/
+node_modules/
+bower_components/
+jspm_packages/
+site-packages/
+venv/
+coverage/
+htmlcov/
+lcov-report/
+cmakefiles/
+cmake-build-*/
+bazel-*/
+pods/
+deriveddata/
+storybook-static/
+playwright-report/
+test-results/
+allure-results/
+allure-report/
+cdk.out/
+*.egg-info/
+*.dist-info/
+eggs/
+pip-wheel-metadata/
+wheels/
+# ----- ↑ 以上为 ZCode 默认排除规则（自定义规则请写在本行下方，不会被同步/恢复改动）-----
+# 自定义规则写在下方（本行提示可删除）

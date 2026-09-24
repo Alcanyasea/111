@@ -537,6 +537,244 @@ class ScheduleCard(Card):
             new_edit.selectAll()
 
 
+class CollectScheduleCard(Card):
+    """收菜计划：基建收菜的每日定时（独立计划任务 MAA_基建收菜）。
+
+    到点由任务计划程序直跑 master.ps1 -InfrastCollect：为全部已启用账号收
+    产物/订单 + 宿舍自动换休，与页头「基建收菜」按钮同一管线。每项可单独
+    设「关机」：该时间点收菜结束后 60 秒自动关机（master.ps1 按最近一个已到
+    的启用收菜时间点判定，与挂机班次的关机开关互不相干）；手动点按钮收菜
+    带 -NoShutdown 永不关机。GUI 关闭后照常触发。
+    """
+
+    def __init__(self, cfg):
+        super().__init__("收菜计划")
+        self.cfg = cfg
+        self._row_widgets = []
+        self._edits = {}
+        self._apply_worker = None   # 计划任务同步的后台线程（改完行立即生效）
+
+        # 列标题：与下方每行控件同宽对齐（68 时间 / 75 启用 / 75 关机 / 56 操作）
+        head = QHBoxLayout()
+        head.setSpacing(6)
+        for text, w in (("时间", 68), ("启用", 75), ("关机", 75), ("操作", 56)):
+            hlab = _label(text, size="12px", color="TEXT_3")
+            hlab.setFixedWidth(w)
+            head.addWidget(hlab)
+        head.addStretch(1)
+        self.vbox.addLayout(head)
+        self.vbox.addSpacing(4)
+
+        self.rows_host = QWidget()
+        self.rows_layout = QVBoxLayout(self.rows_host)
+        self.rows_layout.setContentsMargins(0, 0, 0, 0)
+        self.rows_layout.setSpacing(10)
+        self.vbox.addWidget(self.rows_host)
+        self.vbox.addSpacing(8)
+
+        self.next_val = _label("—")
+        self.next_val.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        self.vbox.addWidget(kv_row("下次运行", self.next_val))
+        self.vbox.addSpacing(4)
+        self.task_val = _label("—")
+        self.task_val.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        self.vbox.addWidget(kv_row("计划任务", self.task_val))
+        self.vbox.addSpacing(8)
+
+        bar = QHBoxLayout()
+        bar.setSpacing(10)
+        self.add_btn = style_button(PushButton("添加时间"))
+        self.add_btn.setToolTip(
+            "新增一个收菜时间点（HH:MM），到点自动收一轮基建。\n"
+            "建议按基建产出周期隔 6~8 小时设置；新时间立即写入计划任务。")
+        self.add_btn.clicked.connect(self._on_add)
+        bar.addWidget(self.add_btn)
+        hint = _label("到点自动为全部启用账号收菜（不换班、不跑理智）；"
+                      "与挂机共用互斥锁，与班次同时触发时只有先到的一个会运行",
+                      size="12px", color="TEXT_3")
+        bar.addWidget(hint)
+        bar.addStretch(1)
+        self.vbox.addLayout(bar)
+
+        self.refresh_from_cfg()
+
+    # ---------- 行构建 ----------
+
+    def _entries(self):
+        """schedule.collect_times 列表（不存在则创建）。"""
+        sched = self.cfg.setdefault("schedule", {})
+        times = sched.get("collect_times")
+        if not isinstance(times, list):
+            times = []
+            sched["collect_times"] = times
+        return times
+
+    def _clear_rows(self):
+        for w in self._row_widgets:
+            self.rows_layout.removeWidget(w)
+            w.deleteLater()
+        self._row_widgets = []
+        self._edits = {}
+
+    def _make_row(self, entry):
+        row_widget = inset_row()   # iOS 设置列表式内嵌行：深半档底色 + 6px 圆角
+        row = QHBoxLayout(row_widget)
+        row.setContentsMargins(10, 7, 10, 7)
+        row.setSpacing(8)
+
+        edit = LineEdit()
+        edit.setFixedWidth(68)
+        edit.setClearButtonEnabled(False)
+        edit.setText(entry["time"])
+        edit.setToolTip("收菜时间，HH:MM")
+        sw = set_switch_checked_gray(SwitchButton(), "启用")
+        sw.setFixedWidth(75)
+        sw.setChecked(bool(entry.get("enabled", True)))
+        sw.setToolTip(
+            "开启：该时间点写入收菜计划任务，到点自动收菜。\n"
+            "关闭：该时间点不触发（保留在列表，随时可重新打开）。\n"
+            "全部关闭时不创建收菜计划任务。")
+        shutdown_sw = set_switch_checked_gray(SwitchButton(), "关机")
+        shutdown_sw.setFixedWidth(75)
+        shutdown_sw.setChecked(bool(entry.get("shutdown", False)))
+        shutdown_sw.setToolTip(
+            "开启：该时间点定时收菜结束后 60 秒自动关机（无需确认）。\n"
+            "失败也关机：失败通知先推送到手机，发完即关机。\n"
+            "手动点「基建收菜」按钮不受影响，永不关机。")
+        del_btn = style_button(PushButton("删除"), "danger", small=True)
+        del_btn.setFixedWidth(56)
+        del_btn.setToolTip("删除该时间点，收菜计划任务中的对应触发立即移除。")
+        # 整体替换 style_button 的样式（保持原有覆盖行为），配方绑定随主题重套
+        theme.bind(del_btn,
+                   lambda: "PushButton { color: %s; border: 1px solid #9aa1ab; }"
+                           % theme.ERR)
+
+        row.addWidget(edit)
+        row.addWidget(sw)
+        row.addWidget(shutdown_sw)
+        row.addWidget(del_btn)
+        row.addStretch(1)
+        self.rows_layout.addWidget(row_widget)
+        self._row_widgets.append(row_widget)
+        self._edits[id(entry)] = edit
+
+        edit.editingFinished.connect(lambda e=entry, ed=edit: self._on_time(e, ed))
+        sw.checkedChanged.connect(lambda c, e=entry: self._on_enabled(e, c))
+        shutdown_sw.checkedChanged.connect(
+            lambda c, e=entry: self._on_shutdown(e, c))
+        del_btn.clicked.connect(lambda _=False, e=entry: self._on_delete(e))
+        return edit
+
+    def refresh_from_cfg(self):
+        """从 cfg 重建时间行（不改动文件）。"""
+        self._clear_rows()
+        for entry in self._entries():
+            self._make_row(entry)
+
+    # ---------- 交互 ----------
+
+    def _sort_entries(self):
+        self._entries().sort(key=lambda e: e.get("time", ""))
+
+    def _apply(self):
+        appconfig.save(self.cfg)
+        # 计划任务同步（Register/Set-ScheduledTask）会卡 1~40 秒，必须后台跑；
+        # 上一次同步还没完时配置已落盘，由它按最新配置重试即可
+        if self._apply_worker is not None and self._apply_worker.isRunning():
+            return
+        self.add_btn.setEnabled(False)
+        self._apply_worker = poller.SchedulerApplyWorker(self.cfg, self, collect=True)
+        self._apply_worker.done.connect(self._on_apply_done)
+        self._apply_worker.start()
+
+    def _on_apply_done(self, ok, msg, info):
+        self.add_btn.setEnabled(True)
+        if info is not None:
+            self.refresh_scheduler(info)
+        if ok:
+            InfoBar.success("已更新收菜计划任务", "", parent=self.window(),
+                            position=InfoBarPosition.TOP_RIGHT, duration=2500)
+        else:
+            InfoBar.warning("配置已保存，但收菜计划任务未更新", msg,
+                            parent=self.window(), position=InfoBarPosition.TOP_RIGHT,
+                            duration=6000)
+
+    def refresh_scheduler(self, info):
+        self.next_val.setText(scheduler.next_run_text(info))
+        if not info.get("exists"):
+            self.task_val.setText("未创建")
+        elif not info.get("enabled"):
+            self.task_val.setText("已禁用")
+        else:
+            self.task_val.setText("1 个任务 · %d 个触发 ✓" % len(info.get("times", [])))
+
+    def _on_time(self, entry, edit):
+        text = edit.text().strip()
+        if not TIME_RE.match(text):
+            InfoBar.warning("时间格式应为 HH:MM",
+                            "已还原为 %s" % entry["time"],
+                            parent=self.window(), position=InfoBarPosition.TOP_RIGHT,
+                            duration=3000)
+            edit.blockSignals(True)
+            edit.setText(entry["time"])
+            edit.blockSignals(False)
+            return
+        if text == entry["time"]:
+            return
+        if any(e is not entry and e.get("time") == text for e in self._entries()):
+            InfoBar.warning("时间重复", "已还原为 %s" % entry["time"],
+                            parent=self.window(), position=InfoBarPosition.TOP_RIGHT,
+                            duration=3000)
+            edit.blockSignals(True)
+            edit.setText(entry["time"])
+            edit.blockSignals(False)
+            return
+        entry["time"] = text
+        self._sort_entries()
+        self._apply()
+        self.refresh_from_cfg()
+
+    def _on_enabled(self, entry, checked):
+        entry["enabled"] = bool(checked)
+        self._apply()  # 触发列表变化，需同步计划任务
+        self.refresh_from_cfg()
+
+    def _on_shutdown(self, entry, checked):
+        """某时间点「关机」开关：立即保存（关机不入任务触发，无需同步计划任务）。"""
+        entry["shutdown"] = bool(checked)
+        appconfig.save(self.cfg)
+        self.refresh_from_cfg()
+
+    def _on_delete(self, entry):
+        times = self._entries()
+        if entry in times:
+            times.remove(entry)
+        self._apply()
+        self.refresh_from_cfg()
+
+    def _on_add(self):
+        times = self._entries()
+        used = {e.get("time") for e in times}
+        default = None
+        for mins in range(8 * 60, 8 * 60 + 24 * 60, 30):
+            hh, mm = divmod(mins % 1440, 60)
+            cand = "%02d:%02d" % (hh, mm)
+            if cand not in used:
+                default = cand
+                break
+        if default is None:
+            default = "08:00"
+        entry = {"time": default, "enabled": True, "shutdown": False}
+        times.append(entry)
+        self._sort_entries()
+        self._apply()
+        self.refresh_from_cfg()
+        new_edit = self._edits.get(id(entry))
+        if new_edit is not None:
+            new_edit.setFocus()
+            new_edit.selectAll()
+
+
 class LastRunStrip(Card):
     """上次运行汇总：并入账号卡片区（账号各卡片展示各自结果，
     这里保留全局的总耗时 / 模拟器关闭情况，以及逐号结果圆点 + 通过率）。"""
@@ -843,6 +1081,10 @@ class DashboardPage(ScrollArea):
 
         self.schedule_card = ScheduleCard(cfg)
         root.addWidget(self.schedule_card)
+
+        # 收菜计划：基建收菜的每日定时（独立计划任务，与班次计划分开维护）
+        self.collect_card = CollectScheduleCard(cfg)
+        root.addWidget(self.collect_card)
 
         # 底部：连接状态 + MAA 更新 合并为一张 1×2 卡片
         self.status_card = StatusCard()

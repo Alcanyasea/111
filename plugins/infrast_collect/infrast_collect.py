@@ -1,12 +1,19 @@
 # -*- coding: utf-8 -*-
-r"""基建收菜插件：独立「收菜」配置方案 + 切 Current 指针，只收产物不换班。
+r"""基建收菜插件：独立「收菜」配置方案 + 切 Current 指针，收产物不换班。
 
 由 master.ps1 -InfrastCollect 在启动每个账号的 MAA 前调用（替代常规的
 基建/理智/菲亚梅塔三个插件）。原理（MAA 基建排班协议的官方语义）：
 - 房间条目 skip=true 时「仅跳过换干员操作，其他如使用无人机、线索交流
   等仍会正常进行」——即进房间收取产物/订单，但完全不动干员；
-- 计划里不含宿舍/会客室等设施，配合 RoomList 只勾制造站（Mfg）与
-  贸易站（Trade），MAA 只进这两类设施；
+- RoomList 只勾制造站（Mfg）、贸易站（Trade）与宿舍（Dorm），MAA 只进
+  这三类设施；
+- 宿舍进驻（2026-09-22 起）：计划带 4 间宿舍、operators 留空 + autofill。
+  MAA 宿舍任务（InfrastDormTask）对这种条目先清空当前选择、再按心情
+  排序把最疲惫的空闲干员换进宿舍（DormFilterNotStationed 只从未进驻
+  干员里选，不会抽走在岗干员破坏生产；DormTrustEnabled 顺带蹭信赖），
+  满心情的干员换出休整池。不指定具体干员，与 farm 精确基建不冲突——
+  下一轮换班会整体重排。生产房间全部 skip，疲惫的在岗干员不会被抽走，
+  生产进度不受影响；
 - 计划级 drones 关闭（纯收菜，不用无人机加速生产）；
 - 停用理智作战 / 招募 / 信用 / 领奖任务，只留开始唤醒 + 基建。
 
@@ -43,8 +50,11 @@ from common import (atomic_json_write as _atomic_json_write, find_account,
 DISABLE_TASKS = ("RecruitTask", "FightTask", "MallTask", "AwardTask")
 # 其余非必需任务一并压掉，保证「收菜」方案自包含且形态恒定
 IDLE_TASKS = ("RoguelikeTask", "ReclamationTask")
-# 收菜目标设施
-COLLECT_ROOMS = ("Mfg", "Trade")
+# 收菜目标设施（RoomList 勾选）：制造/贸易收产物与订单 + 宿舍自动换休
+COLLECT_ROOMS = ("Mfg", "Trade", "Dorm")
+# 宿舍行为参数：apply 时从 Default（farm 方案）的基建任务同步，
+# 收菜方案创建时复制过一份，用户之后改了 Default 也不至于用旧值
+DORM_TASK_PARAMS = ("DormThreshold", "DormTrustEnabled", "DormFilterNotStationed")
 COLLECT_SCHEME = "收菜"
 FARM_SCHEME = "Default"
 
@@ -62,15 +72,24 @@ def write_collect_plan():
 
     制造站 3 间 + 贸易站 3 间全部 skip=true、operators 留空：进房间只收
     产物/订单，不进干员选择界面；product 字段按协议惯例给出（skip 生效
-    时不会被使用，不会改变房间产物线）。plan 级 drones 关闭。
+    时不会被使用，不会改变房间产物线）。宿舍 4 间留空 + autofill=true、
+    sort=false：MAA 清空当前选择后按心情自动换疲惫干员进宿舍（语义见
+    base_schedule._dorm 注释：sort=true 的「清空→按序重选」路径在宿舍
+    实测会失败留空位，宿舍必须 sort=false）。计划必须包含全部 4 间宿舍
+    ——生产设施走 skip 路径不碰人，宿舍是收菜流程里唯一动干员的房间，
+    少一间就会漏换休。plan 级 drones 关闭。
     """
     def room(product):
         return {"skip": True, "operators": [], "sort": False,
                 "autofill": False, "product": product}
 
+    def dorm():
+        return {"skip": False, "operators": [], "sort": False, "autofill": True}
+
     plan = {
         "title": "基建收菜（不换班）",
-        "description": "所有生产房间 skip：只收取制造站产物与贸易站订单，不更换干员",
+        "description": "生产房间全 skip：只收取制造站产物与贸易站订单，不更换干员；"
+                       "宿舍留空自动换休：疲惫干员进驻、满心情换出",
         "plans": [
             {
                 "name": "收菜",
@@ -78,6 +97,7 @@ def write_collect_plan():
                 "rooms": {
                     "manufacture": [room("Pure Gold")] * 3,
                     "trading": [room("LMD")] * 3,
+                    "dormitory": [dorm() for _ in range(4)],
                 },
                 "drones": {"room": "trading", "index": 1, "enable": False,
                            "order": "pre"},
@@ -147,6 +167,16 @@ def apply_collect(maa_dir):
     task["Filename"] = str(plan_path)
     task["PlanSelect"] = 0
 
+    # 宿舍行为参数跟随 Default：心情阈值/蹭信赖/未进驻过滤以 farm 方案为准
+    base_queue = base.get("TaskQueue")
+    if isinstance(base_queue, list):
+        base_task = next((t for t in base_queue if isinstance(t, dict)
+                          and t.get("$type") == "InfrastTask"), None)
+        if isinstance(base_task, dict):
+            for key in DORM_TASK_PARAMS:
+                if key in base_task:
+                    task[key] = base_task[key]
+
     rooms = task.get("RoomList")
     if not isinstance(rooms, list):
         rooms = []
@@ -193,7 +223,7 @@ def apply_collect(maa_dir):
         _atomic_json_write(gui_json, gj)
 
     note = "已创建「收菜」方案" if created else "「收菜」方案已就绪"
-    return True, "%s并已切换（全 skip 不换班·仅制造/贸易，计划 %s）" % (
+    return True, "%s并已切换（生产房间全 skip 不换班·宿舍自动换休，计划 %s）" % (
         note, plan_path.name)
 
 

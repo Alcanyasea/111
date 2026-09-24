@@ -190,7 +190,8 @@ class SettingsPage(ScrollArea):
         self.notify_card = Card("通知推送")
         notify_hint = BodyLabel(
             "按账号逐步骤检查（切号 → 登录校验 → 任务自检 → MAA）："
-            "某个步骤失败的账号单独推送一条，标题含账号名与失败步骤；成功不推送。"
+            "某个步骤失败的账号单独推送一条，标题含账号名与失败步骤；"
+            "成功默认不推送，可开「成功也推送」收每轮极简汇总。"
             "无人值守（自动关机）场景下，失败不再只有本机弹窗。")
         notify_hint.setWordWrap(True)
         theme.bind(notify_hint, lambda: "color: %s; font-size: 12px;" % theme.TEXT_3)
@@ -211,13 +212,16 @@ class SettingsPage(ScrollArea):
         key_row.addWidget(_row_label("推送密钥"))
         key_row.addWidget(self.notify_key, 1)
         self.notify_card.vbox.addLayout(key_row)
+        self.notify_success_sw = set_switch_checked_gray(SwitchButton())
+        self._card_row(self.notify_card, "成功也推送", self.notify_success_sw,
+                       "开启后全部账号成功也发一条极简汇总（班次 + 每号用时）")
         self.notify_card.vbox.addSpacing(10)
         test_row = QHBoxLayout()
         test_row.setSpacing(10)
         self.notify_test_btn = style_button(PushButton("发送测试"))
         self.notify_test_btn.setToolTip(
             "用上方当前填写的渠道与密钥发一条测试消息。\n"
-            "测试成功会自动保存这组通知设置（渠道/密钥/开关），不必再点「保存配置」。\n"
+            "测试成功会自动保存这组通知设置（渠道/密钥/开关/成功开关），不必再点「保存配置」。\n"
             "Server酱填 SendKey；PushPlus 填 token；企业微信机器人填 webhook 地址或 key。")
         self.notify_test_btn.clicked.connect(self.on_notify_test)
         test_row.addWidget(_row_label("测试"))
@@ -315,6 +319,7 @@ class SettingsPage(ScrollArea):
             notify.PROVIDERS.index(n["provider"])
             if n.get("provider") in notify.PROVIDERS else 0)
         self.notify_key.setText(str(n.get("key") or ""))
+        self.notify_success_sw.setChecked(bool(n.get("on_success", False)))
 
     def _refresh_clean_hint(self):
         self.clean_hint.setText(cleanup.last_run_text(self.cfg))
@@ -353,8 +358,9 @@ class SettingsPage(ScrollArea):
         n["enabled"] = self.notify_sw.isChecked()
         n["provider"] = notify.PROVIDERS[self.notify_provider.currentIndex()]
         n["key"] = self.notify_key.text().strip()
-        # on_success 已废弃（成功不再推送）：保存时顺手从旧配置里清掉
-        n.pop("on_success", None)
+        # v4.3 恢复成功推送（master.ps1 成功汇总推送读此开关）；曾于 v2.0.0
+        # 废除过，保存时顺手清理旧值的逻辑随之删除
+        n["on_success"] = self.notify_success_sw.isChecked()
 
         try:
             appconfig.save(self.cfg)
@@ -435,7 +441,7 @@ class SettingsPage(ScrollArea):
             n["enabled"] = self.notify_sw.isChecked()
             n["provider"] = notify.PROVIDERS[self.notify_provider.currentIndex()]
             n["key"] = self.notify_key.text().strip()
-            n.pop("on_success", None)
+            n["on_success"] = self.notify_success_sw.isChecked()
             saved_note = "· 通知设置已自动保存"
             try:
                 appconfig.save(self.cfg)

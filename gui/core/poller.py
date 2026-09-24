@@ -10,9 +10,10 @@ from core import adb, scheduler
 
 
 class SchedulerPoller(QThread):
-    """后台查询计划任务状态，每 30 秒一次（启动后立即查一次）。"""
+    """后台查询计划任务状态（挂机 + 收菜两个任务），每 30 秒一次（启动后立即查一次）。"""
 
-    result = Signal(object)
+    result = Signal(object)          # 挂机任务（MAA_明日方舟自动挂机）
+    collect_result = Signal(object)  # 收菜任务（MAA_基建收菜）
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -23,12 +24,14 @@ class SchedulerPoller(QThread):
 
     def run(self):
         self.result.emit(scheduler.query())
+        self.collect_result.emit(scheduler.query_collect())
         while not self._stop_flag:
             for _ in range(60):  # 60 × 0.5s = 30s
                 if self._stop_flag:
                     return
                 self.msleep(500)
             self.result.emit(scheduler.query())
+            self.collect_result.emit(scheduler.query_collect())
 
 
 class AdbPoller(QThread):
@@ -58,18 +61,23 @@ class SchedulerApplyWorker(QThread):
 
     Register/Set-ScheduledTask 典型 1~3 秒、卡住可到 40 秒，不能在界面线程
     同步跑——否则每改一次班次「点击没反应」。查询结果 apply 失败时为 None，
-    由后台 SchedulerPoller 周期刷新兜底。
+    由后台 SchedulerPoller 周期刷新兜底。collect=True 同步收菜任务而非挂机任务。
     """
 
     done = Signal(bool, str, object)
 
-    def __init__(self, cfg, parent=None):
+    def __init__(self, cfg, parent=None, collect=False):
         super().__init__(parent)
         self.cfg = cfg
+        self.collect = collect
 
     def run(self):
-        ok, msg = scheduler.apply(self.cfg)
-        info = scheduler.query() if ok else None
+        apply_fn = scheduler.apply_collect if self.collect else scheduler.apply
+        ok, msg = apply_fn(self.cfg)
+        info = None
+        if ok:
+            info = (scheduler.query_collect() if self.collect
+                    else scheduler.query())
         self.done.emit(ok, msg, info)
 
 

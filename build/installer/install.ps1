@@ -45,7 +45,15 @@ function Find-MaaExes {
         $exes += @(Get-ChildItem -Path $d.FullName -Recurse -Depth 3 -Filter "MAA.exe" `
             -File -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName)
     }
-    return @($exes | Sort-Object -Unique)
+    # 按所在目录名的版本号降序（取 First 即最新版）：纯字符串排序会把
+    # MAA-v6.11 排在 MAA-v6.9 前，多版本并存时挑到旧版；版本段解析不了
+    # （目录名不带版本号，如手动改名的 B服 目录）按 0.0 排到末尾不挡道
+    return @($exes | Sort-Object -Unique -Property {
+            $name = Split-Path -Leaf (Split-Path -Parent $_)
+            if ($name -match '^MAA-v(\d+(?:\.\d+)*)') {
+                try { [version]$Matches[1] } catch { [version]'0.0' }
+            } else { [version]'0.0' }
+        } -Descending)
 }
 
 # 1) install directory
@@ -180,13 +188,20 @@ if (-not (Test-Path $cfgPath)) {
         else { Write-Warn "未检测到 MuMu ADB，请稍后在「运行设置」页填写" }
         if ($cli) { $cfg.paths.cli = $cli; Write-Ok ("检测到 MuMu CLI：" + $cli) }
         if ($maaOfficial) {
-            $cfg.paths.maa_official = $maaOfficial
-            $cfg.paths.maa_official_dir = Split-Path -Parent $maaOfficial
+            # 示例配置不预置官服 MAA 键（默认值自动探测，不钉死版本号），
+            # PSCustomObject 对不存在的属性直接赋值会抛异常——用 Add-Member
+            # -Force：键缺失则新增、已存在则覆盖
+            $cfg.paths | Add-Member -Force -NotePropertyName maa_official `
+                -NotePropertyValue $maaOfficial
+            $cfg.paths | Add-Member -Force -NotePropertyName maa_official_dir `
+                -NotePropertyValue (Split-Path -Parent $maaOfficial)
             Write-Ok ("检测到 MAA（官服）：" + $maaOfficial)
         } else { Write-Warn "未检测到官服 MAA，请稍后在「运行设置」页填写" }
         if ($maaBili) {
-            $cfg.paths.maa_bilibili = $maaBili
-            $cfg.paths.maa_bilibili_dir = Split-Path -Parent $maaBili
+            $cfg.paths | Add-Member -Force -NotePropertyName maa_bilibili `
+                -NotePropertyValue $maaBili
+            $cfg.paths | Add-Member -Force -NotePropertyName maa_bilibili_dir `
+                -NotePropertyValue (Split-Path -Parent $maaBili)
             Write-Ok ("检测到 MAA（B服）：" + $maaBili)
         }
         # Depth 100：accounts[].base_schedule.batches[].manufacture[].operators

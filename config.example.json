@@ -1,7 +1,5 @@
 {
     "paths": {
-        "maa_official": "D:\\软件\\MAA\\MAA-v6.11.1-win-x64\\MAA.exe",
-        "maa_official_dir": "D:\\软件\\MAA\\MAA-v6.11.1-win-x64",
         "maa_bilibili": "D:\\软件\\MAA（b）\\MAA.exe",
         "maa_bilibili_dir": "D:\\软件\\MAA（b）",
         "adb": "D:\\软件\\MuMu模拟器\\MuMuPlayer\\nx_main\\adb.exe",
@@ -69,7 +67,8 @@
                 "shutdown": false,
                 "accounts": []
             }
-        ]
+        ],
+        "collect_times": []
     },
     "notify": {
         "enabled": false,

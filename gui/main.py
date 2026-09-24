@@ -288,6 +288,7 @@ class MainWindow(FluentWindow):
         self.poller = poller.SchedulerPoller(self)
         self.poller.result.connect(self._on_task_info)
         self.poller.result.connect(self.dash.schedule_card.refresh_scheduler)
+        self.poller.collect_result.connect(self.dash.collect_card.refresh_scheduler)
         self.adb_poller = poller.AdbPoller(self.cfg, self)
         self.adb_poller.result.connect(self.dash.set_adb_state)
         self.poller.start()
@@ -540,7 +541,7 @@ class MainWindow(FluentWindow):
         self.refresh_status()
 
     def on_collect(self):
-        """基建收菜：逐个已启用账号只收制造站/贸易站，不碰班次计划。"""
+        """基建收菜：逐个已启用账号收制造站/贸易站产物并自动换休宿舍，不碰班次计划。"""
         if runner.is_running():
             return
         if self.dash.update_running():
