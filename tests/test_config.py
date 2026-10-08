@@ -133,22 +133,22 @@ class AppearancePaletteTest(unittest.TestCase):
         appconfig.CONFIG_PATH = self._old
 
     def test_default_neutral(self):
-        self.assertEqual(appconfig.load()["appearance"]["palette"], "neutral")
+        self.assertEqual(appconfig.load()["appearance"]["palette"], "github")
 
     def test_invalid_palette_falls_back(self):
         appconfig.CONFIG_PATH.write_text(json.dumps({
             "appearance": {"theme": "dark", "palette": "不存在的配色"},
         }), encoding="utf-8")
         cfg = appconfig.load()
-        self.assertEqual(cfg["appearance"]["palette"], "neutral")
+        self.assertEqual(cfg["appearance"]["palette"], "github")
         self.assertEqual(cfg["appearance"]["theme"], "dark")   # 主题不受影响
 
     def test_valid_palette_kept_and_roundtrip(self):
         appconfig.CONFIG_PATH.write_text(json.dumps({
-            "appearance": {"theme": "dark", "palette": "sand"},
+            "appearance": {"theme": "dark", "palette": "nord"},
         }), encoding="utf-8")
         cfg = appconfig.load()
-        self.assertEqual(cfg["appearance"]["palette"], "sand")
+        self.assertEqual(cfg["appearance"]["palette"], "nord")
         appconfig.save(cfg)
         self.assertEqual(appconfig.load()["appearance"], cfg["appearance"])
 

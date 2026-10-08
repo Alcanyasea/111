@@ -144,202 +144,214 @@ SIDEBAR_BG = "#20262e"
 
 # ---- 配色方案（背景色调 × 明暗主题 的二维系统） ----
 #
-# 每个方案只声明「色相敏感层」的覆盖：背景/卡片/文字/强调/主按钮/徽章/通知条
-# 与状态色；黑白透明度类的结构令牌（分隔线、ghost 按钮底、滚动条、发丝描边）
-# 全部沿用 neutral 明暗模板，在任何色调下都协调。neutral 的覆盖为空 = 现有
-# 暖雾灰 / 暮色灰原样。
-#
-# 状态色约定与 neutral 一致：整套去饱和（同一色相的深浅两档），ALERT 红
-# 是全局唯一的彩色提醒，不随配色变。
+# 五套配色全部取自知名风格系统的官方色板（千万人检验过的审美）：
+#   github      GitHub Primer —— 清爽极简，开发者最熟悉的灰白蓝绿
+#   catppuccin  Catppuccin Latte/Frappé —— 奶油底柔彩，社区宠儿
+#   everforest  Everforest Light/Medium —— 柔和森林绿，护眼暖米底
+#   nord        Nord Snow Storm/Polar Night —— 冷冽蓝灰，Aurora 四色点缀
+#   tokyonight  Tokyo Night Day/Night —— 深夜蓝紫与霓虹语义色
+# 每个方案只声明「色相敏感层」的覆盖：背景/卡片/文字/强调/主按钮/徽章/
+# 通知条与语义状态色（成功绿/运行蓝/等待黄/失败红 随主题自带的色板走）；
+# 黑白透明度类的结构令牌（分隔线、ghost 按钮底、滚动条、发丝描边）沿用
+# neutral 明暗模板。ALERT 警示红保持全局唯一「必须人工处理」提醒不随配色变。
 
 _PALETTES = {
-    "neutral": {
-        "label": "暖雾灰 · 暮色灰",
-        "light": {},
-        "dark": {},
-    },
-    "sand": {
-        "label": "暖沙 · 陶土",
+    "github": {
+        "label": "清爽极简 · GitHub",
         "light": {
-            "BG": "#f1e9da", "CARD": "#fdf9f1", "ROW_INSET": "#f5efe2",
-            "BORDER": "#e7ddc9",
-            "TEXT": "#38312a", "TEXT_2": "#7a6d5c", "TEXT_3": "#ab9f8c",
-            "ACCENT": "#9c7440", "SWITCH_ON": "#9c7440",
-            "SWITCH_ON_DARK": "#c9b697",
-            "OK": "#4a3f2e", "OK_TINT": "#f0ead9",
-            "RUN": "#8a6f4b", "RUN_TINT": "#f2ebdb",
-            "WAIT": "#7a6d5c", "WAIT_TINT": "#f4eee1",
-            "ERR": "#45372b", "ERR_TINT": "#f0e9de",
-            "PRIMARY_BG": "#9c7440", "PRIMARY_FG": "#ffffff",
-            "PRIMARY_HOVER": "#ad8552", "PRIMARY_PRESSED": "#86613a",
-            "PRIMARY_DISABLED_BG": "rgba(156, 116, 64, 0.35)",
+            "BG": "#f6f8fa", "CARD": "#ffffff", "ROW_INSET": "#f6f8fa",
+            "BORDER": "#d1d9e0",
+            "TEXT": "#1f2328", "TEXT_2": "#59636e", "TEXT_3": "#818b98",
+            "ACCENT": "#0969da", "SWITCH_ON": "#0969da",
+            "SWITCH_ON_DARK": "#a5cdf1",
+            "OK": "#1a7f37", "OK_TINT": "#dafbe1",
+            "RUN": "#0969da", "RUN_TINT": "#ddf4ff",
+            "WAIT": "#9a6700", "WAIT_TINT": "#fff8c5",
+            "ERR": "#d1242f", "ERR_TINT": "#ffebe9",
+            "PRIMARY_BG": "#1f883d", "PRIMARY_FG": "#ffffff",
+            "PRIMARY_HOVER": "#2da44e", "PRIMARY_PRESSED": "#1b6f37",
+            "PRIMARY_DISABLED_BG": "rgba(31, 136, 61, 0.35)",
             "PRIMARY_DISABLED_FG": "rgba(255, 255, 255, 0.75)",
-            "BADGE_TOP": "#b08d4f", "BADGE_BOTTOM": "#5e4526",
-            "INFOBAR_BG": "#f5efe3",
+            "BADGE_TOP": "#4a7bc4", "BADGE_BOTTOM": "#1c3f77",
+            "INFOBAR_BG": "#fbfcfd",
         },
         "dark": {
-            "BG": "#221d15", "CARD": "#332b20", "ROW_INSET": "#2a241b",
-            "BORDER": "#473c2c",
-            "TEXT": "#ede4d3", "TEXT_2": "#b8ab95", "TEXT_3": "#857968",
-            "ACCENT": "#d4b276", "SWITCH_ON": "#d4b276",
-            "SWITCH_ON_DARK": "#6b5836",
-            "OK": "#d6c9ae", "OK_TINT": "#3a3225",
-            "RUN": "#cdbd9d", "RUN_TINT": "#3f3728",
-            "WAIT": "#b8ab95", "WAIT_TINT": "#373021",
-            "ERR": "#f5efe2", "ERR_TINT": "#41382a",
-            "PRIMARY_BG": "#d4b276", "PRIMARY_FG": "#221d15",
-            "PRIMARY_HOVER": "#e0c189", "PRIMARY_PRESSED": "#bd9a5e",
-            "PRIMARY_DISABLED_BG": "rgba(212, 178, 118, 0.25)",
-            "PRIMARY_DISABLED_FG": "rgba(34, 29, 21, 0.55)",
-            "BADGE_TOP": "#9a7f4a", "BADGE_BOTTOM": "#4b3a20",
-            "INFOBAR_BG": "#3f372a",
+            "BG": "#0d1117", "CARD": "#161b22", "ROW_INSET": "#10151c",
+            "BORDER": "#30363d",
+            "TEXT": "#e6edf3", "TEXT_2": "#9198a1", "TEXT_3": "#6e7681",
+            "ACCENT": "#2f81f7", "SWITCH_ON": "#2f81f7",
+            "SWITCH_ON_DARK": "#1f6feb",
+            "OK": "#3fb950", "OK_TINT": "#0e2b1d",
+            "RUN": "#4493f8", "RUN_TINT": "#102a42",
+            "WAIT": "#d29922", "WAIT_TINT": "#2d2410",
+            "ERR": "#f85149", "ERR_TINT": "#3c1614",
+            "PRIMARY_BG": "#238636", "PRIMARY_FG": "#ffffff",
+            "PRIMARY_HOVER": "#2ea043", "PRIMARY_PRESSED": "#1f6b2e",
+            "PRIMARY_DISABLED_BG": "rgba(35, 134, 54, 0.35)",
+            "PRIMARY_DISABLED_FG": "rgba(255, 255, 255, 0.75)",
+            "BADGE_TOP": "#388bfd", "BADGE_BOTTOM": "#1158c7",
+            "INFOBAR_BG": "#1c2431",
         },
     },
-    "moss": {
-        "label": "青瓷 · 苔绿",
+    "catppuccin": {
+        "label": "奶油柔彩 · Catppuccin",
         "light": {
-            "BG": "#e6ece3", "CARD": "#f8fbf6", "ROW_INSET": "#edf2ea",
-            "BORDER": "#d4dfd0",
-            "TEXT": "#2b332b", "TEXT_2": "#64725f", "TEXT_3": "#9aa793",
-            "ACCENT": "#3f7d52", "SWITCH_ON": "#3f7d52",
-            "SWITCH_ON_DARK": "#a3c2a5",
-            "OK": "#38453a", "OK_TINT": "#e9efe5",
-            "RUN": "#4e7257", "RUN_TINT": "#eaf0e6",
-            "WAIT": "#64725f", "WAIT_TINT": "#eef2ea",
-            "ERR": "#2e3d30", "ERR_TINT": "#e9efe4",
-            "PRIMARY_BG": "#3f7d52", "PRIMARY_FG": "#ffffff",
-            "PRIMARY_HOVER": "#4f9163", "PRIMARY_PRESSED": "#346844",
-            "PRIMARY_DISABLED_BG": "rgba(63, 125, 82, 0.35)",
+            "BG": "#e6e9ef", "CARD": "#eff1f5", "ROW_INSET": "#dce0e8",
+            "BORDER": "#ccd0da",
+            "TEXT": "#4c4f69", "TEXT_2": "#6c6f85", "TEXT_3": "#9ca0b0",
+            "ACCENT": "#1e66f5", "SWITCH_ON": "#1e66f5",
+            "SWITCH_ON_DARK": "#7287fd",
+            "OK": "#40a02b", "OK_TINT": "#e6f0e2",
+            "RUN": "#1e66f5", "RUN_TINT": "#e3e9fb",
+            "WAIT": "#df8e1d", "WAIT_TINT": "#f5ecd9",
+            "ERR": "#d20f39", "ERR_TINT": "#f6dfe3",
+            "PRIMARY_BG": "#1e66f5", "PRIMARY_FG": "#ffffff",
+            "PRIMARY_HOVER": "#4a7df7", "PRIMARY_PRESSED": "#154cc4",
+            "PRIMARY_DISABLED_BG": "rgba(30, 102, 245, 0.35)",
             "PRIMARY_DISABLED_FG": "rgba(255, 255, 255, 0.75)",
-            "BADGE_TOP": "#63916d", "BADGE_BOTTOM": "#27402c",
-            "INFOBAR_BG": "#ebf1e7",
+            "BADGE_TOP": "#7287fd", "BADGE_BOTTOM": "#3a49c0",
+            "INFOBAR_BG": "#e9ecf2",
         },
         "dark": {
-            "BG": "#161e17", "CARD": "#202b21", "ROW_INSET": "#1a231b",
-            "BORDER": "#324234",
-            "TEXT": "#e2ebe1", "TEXT_2": "#a4b3a2", "TEXT_3": "#778678",
-            "ACCENT": "#90cf9c", "SWITCH_ON": "#90cf9c",
-            "SWITCH_ON_DARK": "#46604a",
-            "OK": "#c3d4c1", "OK_TINT": "#2b382c",
-            "RUN": "#b4c9b1", "RUN_TINT": "#313f31",
-            "WAIT": "#a4b3a2", "WAIT_TINT": "#2c372c",
-            "ERR": "#eef4ea", "ERR_TINT": "#364536",
-            "PRIMARY_BG": "#90cf9c", "PRIMARY_FG": "#16201a",
-            "PRIMARY_HOVER": "#a3dbae", "PRIMARY_PRESSED": "#79b585",
-            "PRIMARY_DISABLED_BG": "rgba(144, 207, 156, 0.25)",
-            "PRIMARY_DISABLED_FG": "rgba(22, 32, 26, 0.55)",
-            "BADGE_TOP": "#548a5d", "BADGE_BOTTOM": "#243826",
-            "INFOBAR_BG": "#303f31",
+            "BG": "#292c3c", "CARD": "#303446", "ROW_INSET": "#232634",
+            "BORDER": "#414559",
+            "TEXT": "#c6d0f5", "TEXT_2": "#a5adce", "TEXT_3": "#737994",
+            "ACCENT": "#8caaee", "SWITCH_ON": "#8caaee",
+            "SWITCH_ON_DARK": "#454c75",
+            "OK": "#a6d189", "OK_TINT": "#33402c",
+            "RUN": "#8caaee", "RUN_TINT": "#2f3a55",
+            "WAIT": "#e5c890", "WAIT_TINT": "#413b27",
+            "ERR": "#e78284", "ERR_TINT": "#472d33",
+            "PRIMARY_BG": "#8caaee", "PRIMARY_FG": "#232634",
+            "PRIMARY_HOVER": "#9fb5f1", "PRIMARY_PRESSED": "#7899e4",
+            "PRIMARY_DISABLED_BG": "rgba(140, 170, 238, 0.25)",
+            "PRIMARY_DISABLED_FG": "rgba(35, 38, 52, 0.55)",
+            "BADGE_TOP": "#7986e3", "BADGE_BOTTOM": "#3b4585",
+            "INFOBAR_BG": "#414559",
         },
     },
-    "mist": {
-        "label": "雾蓝 · 藏青",
+    "everforest": {
+        "label": "森林绿意 · Everforest",
         "light": {
-            "BG": "#e7ecf2", "CARD": "#f9fbfe", "ROW_INSET": "#edf1f7",
-            "BORDER": "#d5dee9",
-            "TEXT": "#29323d", "TEXT_2": "#64707f", "TEXT_3": "#9aa6b4",
-            "ACCENT": "#3e6fa8", "SWITCH_ON": "#3e6fa8",
-            "SWITCH_ON_DARK": "#a4bdd6",
-            "OK": "#37434f", "OK_TINT": "#e9eef5",
-            "RUN": "#4a6a8f", "RUN_TINT": "#e9eef4",
-            "WAIT": "#64707f", "WAIT_TINT": "#eef1f6",
-            "ERR": "#2c3844", "ERR_TINT": "#e9edf3",
-            "PRIMARY_BG": "#3e6fa8", "PRIMARY_FG": "#ffffff",
-            "PRIMARY_HOVER": "#4f81ba", "PRIMARY_PRESSED": "#355d8d",
-            "PRIMARY_DISABLED_BG": "rgba(62, 111, 168, 0.35)",
-            "PRIMARY_DISABLED_FG": "rgba(255, 255, 255, 0.75)",
-            "BADGE_TOP": "#5c85b3", "BADGE_BOTTOM": "#263a52",
-            "INFOBAR_BG": "#ecf0f6",
+            "BG": "#efebd4", "CARD": "#fdf6e3", "ROW_INSET": "#f4f0d9",
+            "BORDER": "#e4ddc4",
+            "TEXT": "#5c6a72", "TEXT_2": "#7a8478", "TEXT_3": "#a6b0a0",
+            "ACCENT": "#8da101", "SWITCH_ON": "#8da101",
+            "SWITCH_ON_DARK": "#d5cd8a",
+            "OK": "#8da101", "OK_TINT": "#ecf0d3",
+            "RUN": "#35a77c", "RUN_TINT": "#ddf0e9",
+            "WAIT": "#dfa000", "WAIT_TINT": "#f7eed7",
+            "ERR": "#f85552", "ERR_TINT": "#fbe3dc",
+            "PRIMARY_BG": "#8da101", "PRIMARY_FG": "#fdf6e3",
+            "PRIMARY_HOVER": "#9cae1b", "PRIMARY_PRESSED": "#7a8c0c",
+            "PRIMARY_DISABLED_BG": "rgba(141, 161, 1, 0.35)",
+            "PRIMARY_DISABLED_FG": "rgba(253, 246, 227, 0.75)",
+            "BADGE_TOP": "#a7b04a", "BADGE_BOTTOM": "#6b7327",
+            "INFOBAR_BG": "#f4f0d9",
         },
         "dark": {
-            "BG": "#151a21", "CARD": "#1f2731", "ROW_INSET": "#1a2029",
-            "BORDER": "#333e4e",
-            "TEXT": "#e3e9f1", "TEXT_2": "#a7b3c3", "TEXT_3": "#77839a",
-            "ACCENT": "#8cbde8", "SWITCH_ON": "#8cbde8",
-            "SWITCH_ON_DARK": "#43607f",
-            "OK": "#c2d0e0", "OK_TINT": "#2a3440",
-            "RUN": "#b3c3d5", "RUN_TINT": "#313d4b",
-            "WAIT": "#a7b3c3", "WAIT_TINT": "#2c3641",
-            "ERR": "#edf2f8", "ERR_TINT": "#35404e",
-            "PRIMARY_BG": "#8cbde8", "PRIMARY_FG": "#141a21",
-            "PRIMARY_HOVER": "#a1cbec", "PRIMARY_PRESSED": "#76a8d4",
-            "PRIMARY_DISABLED_BG": "rgba(140, 189, 232, 0.25)",
-            "PRIMARY_DISABLED_FG": "rgba(20, 26, 33, 0.55)",
-            "BADGE_TOP": "#56779c", "BADGE_BOTTOM": "#24334a",
-            "INFOBAR_BG": "#2d3947",
+            "BG": "#2d353b", "CARD": "#343f44", "ROW_INSET": "#313c42",
+            "BORDER": "#475258",
+            "TEXT": "#d3c6aa", "TEXT_2": "#9da9a0", "TEXT_3": "#7a8478",
+            "ACCENT": "#a7c080", "SWITCH_ON": "#a7c080",
+            "SWITCH_ON_DARK": "#4b5a32",
+            "OK": "#a7c080", "OK_TINT": "#333d2c",
+            "RUN": "#83c092", "RUN_TINT": "#2b3d39",
+            "WAIT": "#dbbc7f", "WAIT_TINT": "#3f3926",
+            "ERR": "#e67e80", "ERR_TINT": "#46302e",
+            "PRIMARY_BG": "#a7c080", "PRIMARY_FG": "#2d353b",
+            "PRIMARY_HOVER": "#b3cc8e", "PRIMARY_PRESSED": "#93ad6f",
+            "PRIMARY_DISABLED_BG": "rgba(167, 192, 128, 0.25)",
+            "PRIMARY_DISABLED_FG": "rgba(45, 53, 59, 0.55)",
+            "BADGE_TOP": "#7f9a55", "BADGE_BOTTOM": "#45532c",
+            "INFOBAR_BG": "#3d484d",
         },
     },
-    "plum": {
-        "label": "藕荷 · 绛紫",
+    "nord": {
+        "label": "冷冽蓝灰 · Nord",
         "light": {
-            "BG": "#ece8ef", "CARD": "#fbf8fd", "ROW_INSET": "#f1edf4",
-            "BORDER": "#ded7e5",
-            "TEXT": "#322d3a", "TEXT_2": "#6f6679", "TEXT_3": "#a49aae",
-            "ACCENT": "#7a5c9e", "SWITCH_ON": "#7a5c9e",
-            "SWITCH_ON_DARK": "#b3a0c8",
-            "OK": "#443c4e", "OK_TINT": "#efeaf4",
-            "RUN": "#6f5a88", "RUN_TINT": "#eee9f3",
-            "WAIT": "#6f6679", "WAIT_TINT": "#f2eef5",
-            "ERR": "#3b3344", "ERR_TINT": "#eee9f2",
-            "PRIMARY_BG": "#7a5c9e", "PRIMARY_FG": "#ffffff",
-            "PRIMARY_HOVER": "#8b6db2", "PRIMARY_PRESSED": "#664d84",
-            "PRIMARY_DISABLED_BG": "rgba(122, 92, 158, 0.35)",
+            "BG": "#e5e9f0", "CARD": "#eceff4", "ROW_INSET": "#dde3ed",
+            "BORDER": "#d8dee9",
+            "TEXT": "#2e3440", "TEXT_2": "#4c566a", "TEXT_3": "#8f9cb3",
+            "ACCENT": "#5e81ac", "SWITCH_ON": "#5e81ac",
+            "SWITCH_ON_DARK": "#b6c6dd",
+            "OK": "#4f7a44", "OK_TINT": "#e7efe3",
+            "RUN": "#5e81ac", "RUN_TINT": "#e4ebf3",
+            "WAIT": "#9d7c17", "WAIT_TINT": "#f2ecd9",
+            "ERR": "#ad4a54", "ERR_TINT": "#f3e2e3",
+            "PRIMARY_BG": "#5e81ac", "PRIMARY_FG": "#ffffff",
+            "PRIMARY_HOVER": "#6f91b8", "PRIMARY_PRESSED": "#4f7097",
+            "PRIMARY_DISABLED_BG": "rgba(94, 129, 172, 0.35)",
             "PRIMARY_DISABLED_FG": "rgba(255, 255, 255, 0.75)",
-            "BADGE_TOP": "#9177b0", "BADGE_BOTTOM": "#3d2f52",
-            "INFOBAR_BG": "#f0ebf5",
+            "BADGE_TOP": "#7b93ba", "BADGE_BOTTOM": "#3a4d68",
+            "INFOBAR_BG": "#e9edf4",
         },
         "dark": {
-            "BG": "#1c1822", "CARD": "#282232", "ROW_INSET": "#211c28",
-            "BORDER": "#3a3244",
-            "TEXT": "#e9e4f0", "TEXT_2": "#afa6bd", "TEXT_3": "#827a90",
-            "ACCENT": "#bfa3de", "SWITCH_ON": "#bfa3de",
-            "SWITCH_ON_DARK": "#57466d",
-            "OK": "#d2c8de", "OK_TINT": "#322b3c",
-            "RUN": "#c4b8d3", "RUN_TINT": "#3a3246",
-            "WAIT": "#afa6bd", "WAIT_TINT": "#342d3e",
-            "ERR": "#f3eef8", "ERR_TINT": "#3e3549",
-            "PRIMARY_BG": "#bfa3de", "PRIMARY_FG": "#1c1822",
-            "PRIMARY_HOVER": "#ccb4e6", "PRIMARY_PRESSED": "#aa8fc9",
-            "PRIMARY_DISABLED_BG": "rgba(191, 163, 222, 0.25)",
-            "PRIMARY_DISABLED_FG": "rgba(28, 24, 34, 0.55)",
-            "BADGE_TOP": "#776191", "BADGE_BOTTOM": "#322847",
-            "INFOBAR_BG": "#393044",
+            "BG": "#2e3440", "CARD": "#3b4252", "ROW_INSET": "#333a47",
+            "BORDER": "#434c5e",
+            "TEXT": "#eceff4", "TEXT_2": "#d8dee9", "TEXT_3": "#7b88a1",
+            "ACCENT": "#88c0d0", "SWITCH_ON": "#88c0d0",
+            "SWITCH_ON_DARK": "#3f5b66",
+            "OK": "#a3be8c", "OK_TINT": "#333b30",
+            "RUN": "#81a1c1", "RUN_TINT": "#2c3a49",
+            "WAIT": "#ebcb8b", "WAIT_TINT": "#403b28",
+            "ERR": "#bf616a", "ERR_TINT": "#43303a",
+            "PRIMARY_BG": "#88c0d0", "PRIMARY_FG": "#2e3440",
+            "PRIMARY_HOVER": "#94cbdc", "PRIMARY_PRESSED": "#76aec0",
+            "PRIMARY_DISABLED_BG": "rgba(136, 192, 208, 0.25)",
+            "PRIMARY_DISABLED_FG": "rgba(46, 52, 64, 0.55)",
+            "BADGE_TOP": "#6d93b8", "BADGE_BOTTOM": "#3b5269",
+            "INFOBAR_BG": "#404a5c",
+        },
+    },
+    "tokyonight": {
+        "label": "东京夜话 · Tokyo Night",
+        "light": {
+            "BG": "#e1e2e7", "CARD": "#e9eaf2", "ROW_INSET": "#d8dce6",
+            "BORDER": "#c4c8da",
+            "TEXT": "#3760bf", "TEXT_2": "#6172b0", "TEXT_3": "#a8aecb",
+            "ACCENT": "#2e7de9", "SWITCH_ON": "#2e7de9",
+            "SWITCH_ON_DARK": "#b3c4f2",
+            "OK": "#387068", "OK_TINT": "#dceae6",
+            "RUN": "#2e7de9", "RUN_TINT": "#dde8fa",
+            "WAIT": "#8c6c3e", "WAIT_TINT": "#ece5d3",
+            "ERR": "#c43e5c", "ERR_TINT": "#f5dee4",
+            "PRIMARY_BG": "#2e7de9", "PRIMARY_FG": "#ffffff",
+            "PRIMARY_HOVER": "#3a86f0", "PRIMARY_PRESSED": "#2568c4",
+            "PRIMARY_DISABLED_BG": "rgba(46, 125, 233, 0.35)",
+            "PRIMARY_DISABLED_FG": "rgba(255, 255, 255, 0.75)",
+            "BADGE_TOP": "#5b7fd4", "BADGE_BOTTOM": "#2c4a8f",
+            "INFOBAR_BG": "#e6e8ef",
+        },
+        "dark": {
+            "BG": "#1a1b26", "CARD": "#24283b", "ROW_INSET": "#1f2335",
+            "BORDER": "#2f334d",
+            "TEXT": "#c0caf5", "TEXT_2": "#a9b1d6", "TEXT_3": "#565f89",
+            "ACCENT": "#7aa2f7", "SWITCH_ON": "#7aa2f7",
+            "SWITCH_ON_DARK": "#292e42",
+            "OK": "#9ece6a", "OK_TINT": "#273427",
+            "RUN": "#7aa2f7", "RUN_TINT": "#232c47",
+            "WAIT": "#e0af68", "WAIT_TINT": "#3a3423",
+            "ERR": "#f7768e", "ERR_TINT": "#43273a",
+            "PRIMARY_BG": "#7aa2f7", "PRIMARY_FG": "#1a1b26",
+            "PRIMARY_HOVER": "#89b4fa", "PRIMARY_PRESSED": "#6b90dd",
+            "PRIMARY_DISABLED_BG": "rgba(122, 162, 247, 0.25)",
+            "PRIMARY_DISABLED_FG": "rgba(26, 27, 38, 0.55)",
+            "BADGE_TOP": "#5d6fb0", "BADGE_BOTTOM": "#2d3354",
+            "INFOBAR_BG": "#292e42",
         },
     },
 }
 
 # 配色方案的合法名与下拉顺序
 PALETTES = tuple(_PALETTES)
-DEFAULT_PALETTE = "neutral"
+DEFAULT_PALETTE = "github"
 
-# ---- 语义功能色（全部配色共用，部件级彩色点缀） ----
-# 成功=绿 / 运行=蓝 / 等待=琥珀 / 失败=红。这些色最后覆盖进每套调色板：
-# 仪表盘状态点、耗时数字、结果圆点、Pill 徽章随之呈现真正的功能色彩，
-# 不再整版单色。明亮档深字浅底、暗夜档亮字深底，PILL_FAIL_FG 随之取对比色。
-_SEMANTIC = {
-    "light": {
-        "OK": "#2f7d46", "OK_TINT": "#e6f3ea",
-        "RUN": "#2f6cb0", "RUN_TINT": "#e7f0fa",
-        "WAIT": "#a8730f", "WAIT_TINT": "#faf0da",
-        "ERR": "#b23b32", "ERR_TINT": "#fbeae8",
-        "PILL_FAIL_FG": "#ffffff",
-    },
-    "dark": {
-        "OK": "#7fd18f", "OK_TINT": "#24382b",
-        "RUN": "#82b8ec", "RUN_TINT": "#23344a",
-        "WAIT": "#e3b95f", "WAIT_TINT": "#3d3220",
-        "ERR": "#f0968c", "ERR_TINT": "#452b28",
-        "PILL_FAIL_FG": "#2a1512",
-    },
-}
-
-# 一次写入明暗两套变色的接口用（窗口背景 / 通知条底色 / 滚动条滑块）
-BG_LIGHT = _LIGHT["BG"]
-BG_DARK = _DARK["BG"]
-INFOBAR_BG_LIGHT = _LIGHT["INFOBAR_BG"]
-INFOBAR_BG_DARK = _DARK["INFOBAR_BG"]
-SCROLL_HANDLE_LIGHT = _LIGHT["SCROLL_HANDLE_COLOR"]
-SCROLL_HANDLE_DARK = _DARK["SCROLL_HANDLE_COLOR"]
+# 一次写入明暗两套变色的接口用（窗口背景 / 通知条底色 / 滚动条滑块）：
+# BG_LIGHT 等四个在 apply() 里随配色方案刷新；滚动条滑块是黑白透明度、
+# 各配色通用，保持常量即可。
+SCROLL_HANDLE_LIGHT = (0, 0, 0, 46)
+SCROLL_HANDLE_DARK = (255, 255, 255, 62)
 
 # ---- 即时换肤：样式配方登记 ----
 
@@ -355,7 +367,6 @@ def _merged(mode, palette_name):
     pal = _PALETTES.get(palette_name) or _PALETTES[DEFAULT_PALETTE]
     overrides = pal["dark"] if mode == "dark" else pal["light"]
     merged = {**base, **overrides}
-    merged.update(_SEMANTIC[mode])   # 语义功能色最后覆盖（部件级彩色）
     return merged
 
 
