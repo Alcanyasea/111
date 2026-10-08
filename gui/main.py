@@ -12,6 +12,7 @@ import os
 import sys
 import time
 from datetime import datetime
+from pathlib import Path
 
 from PySide6.QtCore import (QEasingCurve, QPoint, QParallelAnimationGroup,
                             QPropertyAnimation, Qt, QTimer)
@@ -801,6 +802,17 @@ def main():
     # 标记里的原值快照自动复原，事件写入 master_log（日志页可见）
     try:
         maa_update.recover_all(_win.cfg)
+    except Exception:
+        pass
+    # 当天首次启动把配置滚动备份一份（config.json.bak，只留最近一份完好
+    # 完整记录；凌晨计划任务路径由插件读配置时触发同一函数）。完整性校验、
+    # 原子替换都在 backup_daily 里，任何异常都不阻塞启动
+    try:
+        _plugins_dir = Path(__file__).resolve().parents[1] / "plugins"
+        if str(_plugins_dir) not in sys.path:
+            sys.path.insert(0, str(_plugins_dir))
+        from common import backup_daily
+        backup_daily(appconfig.CONFIG_PATH)
     except Exception:
         pass
     if appconfig.LAST_LOAD_WARNING:

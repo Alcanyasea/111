@@ -27,8 +27,11 @@ $script:VisionPythonPath = $null
 
 function Get-VisionPython {
     if ($script:VisionPythonPath) { return $script:VisionPythonPath }
-    $py = "D:\1\gui\.venv\Scripts\python.exe"
-    $cfg = Read-AppConfigJson "D:\1\config.json"
+    # 插件运行时：优先 GUI 虚拟环境，其次安装包内置运行时
+    $root = Split-Path -Parent $PSScriptRoot
+    $py = Join-Path $root "gui\.venv\Scripts\python.exe"
+    if (-not (Test-Path $py)) { $py = Join-Path $root "gui\runtime\python.exe" }
+    $cfg = Read-AppConfigJson (Join-Path $root "config.json")
     if ($null -ne $cfg -and $null -ne $cfg.paths -and $cfg.paths.python) { $py = [string]$cfg.paths.python }
     $script:VisionPythonPath = $py
     return $py

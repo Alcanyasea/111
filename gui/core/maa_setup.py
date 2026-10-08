@@ -92,7 +92,8 @@ def apply_server_config(cfg, server):
     paths = cfg.get("paths") or {}
     adb = str(paths.get("adb", ""))
     device = str(paths.get("device", "127.0.0.1:16384"))
-    signal = str(Path(paths.get("script_dir", r"D:\1\scripts")) / "signal_done.bat")
+    default_scripts = Path(__file__).resolve().parents[2] / "scripts"
+    signal = str(Path(paths.get("script_dir") or default_scripts) / "signal_done.bat")
 
     try:
         data = _read_json(gui_new)

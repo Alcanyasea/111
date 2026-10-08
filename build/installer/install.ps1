@@ -152,6 +152,22 @@ if (Test-Path $runtimePyw) {
     }
 }
 
+# 4.5) 便携版 PowerShell 7：安装包内置 gui\runtime\pwsh.zip 时解压备用
+#      （计划任务 / GUI / master 后台子进程都优先用它，目标机器无需安装 PowerShell 7）
+$pwsZip = Join-Path $target "gui\runtime\pwsh.zip"
+$pwsDir = Join-Path $target "gui\runtime\pwsh"
+if ((Test-Path $pwsZip) -and -not (Test-Path (Join-Path $pwsDir "pwsh.exe"))) {
+    Write-Step "解压内置便携版 PowerShell 7..."
+    try {
+        Expand-Archive -Path $pwsZip -DestinationPath $pwsDir -Force
+        Remove-Item $pwsZip -Force -ErrorAction SilentlyContinue
+        Write-Ok "便携版 PowerShell 7 就绪（gui\runtime\pwsh）"
+    } catch {
+        Write-Warn "便携版 PowerShell 解压失败：$($_.Exception.Message)"
+        Write-Warn "将回退使用系统安装的 PowerShell 7（如有）"
+    }
+}
+
 # 5) config.json generation + path auto-detection
 $cfgPath = Join-Path $target "config.json"
 if (-not (Test-Path $cfgPath)) {
@@ -239,10 +255,11 @@ $ans = Read-Host "是否创建计划任务（每天 04:00 / 16:00 自动挂机�
 if ($ans -match '^[Yy]') {
     try {
         $pwshExe = @(
+            (Join-Path $target "gui\runtime\pwsh\pwsh.exe"),
             "$env:ProgramFiles\PowerShell\7\pwsh.exe",
             "$env:LOCALAPPDATA\Microsoft\WindowsApps\pwsh.exe"
         ) | Where-Object { Test-Path $_ } | Select-Object -First 1
-        if (-not $pwshExe) { throw "未找到 PowerShell 7（pwsh），请先安装 PowerShell 7" }
+        if (-not $pwshExe) { throw "未找到 PowerShell 7（pwsh）：安装包未内置便携版且本机未安装 PowerShell 7" }
         $action = New-ScheduledTaskAction -Execute $pwshExe `
             -Argument "-NoProfile -ExecutionPolicy Bypass -WindowStyle Minimized -File `"$target\scripts\master.ps1`""
         $triggers = @(

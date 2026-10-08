@@ -27,8 +27,8 @@ import sys
 import time
 from datetime import datetime
 
-BASE = pathlib.Path(__file__).resolve().parent          # D:\1\scripts
-ROOT = BASE.parent                                       # D:\1
+BASE = pathlib.Path(__file__).resolve().parent          # scripts 目录
+ROOT = BASE.parent                                       # 项目根
 CONFIG_PATH = ROOT / "config.json"
 DEFAULT_OUT_DIR = ROOT / "exports"
 DEBUG_DIR = BASE / "debug" / "operbox"

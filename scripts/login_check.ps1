@@ -55,13 +55,13 @@ $ProgressPreference = "SilentlyContinue"
 
 $adb = "D:\软件\MuMu模拟器\MuMuPlayer\nx_main\adb.exe"
 $device = "127.0.0.1:16384"
-$scriptDir = "D:\1\scripts"
+$scriptDir = $PSScriptRoot
 
-# ---- 读取 GUI 配置（D:\1\config.json），字段缺失时回退上面的硬编码默认 ----
+# ---- 读取 GUI 配置（项目根 config.json），字段缺失时回退上面的默认值 ----
 $Username = ""
 $Password = ""
 . (Join-Path $PSScriptRoot "config_lib.ps1")
-$config = Read-AppConfigJson "D:\1\config.json"
+$config = Read-AppConfigJson (Join-Path (Split-Path -Parent $PSScriptRoot) "config.json")
 if ($config) {
     if ($null -ne $config.paths -and $config.paths.adb)    { $adb = [string]$config.paths.adb }
     if ($null -ne $config.paths -and $config.paths.device) { $device = [string]$config.paths.device }

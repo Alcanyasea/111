@@ -11,7 +11,7 @@ from pathlib import Path
 
 from core.util import CREATE_NO_WINDOW, decode_console
 
-PLUGIN = Path(r"D:\1\plugins\notify\notify.py")
+PLUGIN = Path(__file__).resolve().parents[2] / "plugins" / "notify" / "notify.py"
 
 # 推送渠道：下拉框顺序即此元组顺序（settings 页共用）
 PROVIDERS = ("serverchan", "pushplus", "wecom")

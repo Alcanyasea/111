@@ -1,8 +1,10 @@
 # -*- coding: utf-8 -*-
-r"""统一配置：D:\1\config.json
+r"""统一配置：项目根目录下的 config.json
 
 GUI 与 PowerShell 脚本（master.ps1 / slot_switch.ps1 等）共享这份配置。
-脚本顶部尝试读取，读不到（文件缺失或字段缺失）时回退到各自的硬编码默认值。
+脚本顶部尝试读取，读不到（文件缺失或字段缺失）时回退到各自的默认值。
+路径一律从模块位置向项目根推导（本文件位于 <根>\gui\），项目挪目录/
+装到别的盘后仍然指向自己的 config.json，不再写死盘符。
 """
 import json
 import os
@@ -12,7 +14,8 @@ from copy import deepcopy
 from datetime import datetime
 from pathlib import Path
 
-CONFIG_PATH = Path(r"D:\1\config.json")
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+CONFIG_PATH = PROJECT_ROOT / "config.json"
 
 # 最近一次 load() 的警告（配置损坏已备份等），由主窗口启动时弹出提示
 LAST_LOAD_WARNING = ""
@@ -147,8 +150,8 @@ DEFAULTS = {
         "adb": r"D:\软件\MuMu模拟器\MuMuPlayer\nx_main\adb.exe",
         "cli": r"D:\软件\MuMu模拟器\MuMuPlayer\nx_main\mumu-cli.exe",
         "device": "127.0.0.1:16384",
-        "script_dir": r"D:\1\scripts",
-        "log_file": r"D:\1\scripts\master_log.txt",
+        "script_dir": str(PROJECT_ROOT / "scripts"),
+        "log_file": str(PROJECT_ROOT / "scripts" / "master_log.txt"),
     },
     "timeouts": {
         "maa_min": 3,             # MAA 无战斗/任务进展判超时（分钟）；正常挂机不限制总时长
@@ -158,18 +161,22 @@ DEFAULTS = {
     "accounts": [
         # 账号数组（顺序即运行顺序）。slot = scripts\accounts\<slot> 登录数据目录
         # 旧版 {official1: bool, ...} 对象形式由 _migrate_accounts() 自动迁移
+        # base_schedule_presets = 该账号专属的基建排班预设（账号之间不互通）
         {"id": "official1", "label": "官服 1", "server": "official",
          "enabled": True, "slot": "official_1",
          "username": "", "password": "",
-         "base_schedule": default_base_schedule()},
+         "base_schedule": default_base_schedule(),
+         "base_schedule_presets": []},
         {"id": "official2", "label": "官服 2", "server": "official",
          "enabled": True, "slot": "official_2",
          "username": "", "password": "",
-         "base_schedule": default_base_schedule()},
+         "base_schedule": default_base_schedule(),
+         "base_schedule_presets": []},
         {"id": "bilibili", "label": "B 服", "server": "bilibili",
          "enabled": True, "slot": "bilibili_1",
          "username": "", "password": "",
-         "base_schedule": default_base_schedule()},
+         "base_schedule": default_base_schedule(),
+         "base_schedule_presets": []},
     ],
     "behavior": {
         "close_emulator": True,   # 完成后关模拟器
@@ -267,6 +274,8 @@ def _migrate_accounts(cfg):
                     plan = []
                 a["second_fight_plan"] = plan
             a.setdefault("second_fight_use_optional", True)
+            # 该账号专属的基建排班预设（账号之间不互通）；缺失 → []
+            a.setdefault("base_schedule_presets", [])
             # 干员资料导出已改为账号详情里的「导出干员资料」按钮（逐号即时导出），
             # 旧版账号级 export_enabled 开关字段就此移除
             a.pop("export_enabled", None)
@@ -370,6 +379,44 @@ def _migrate_schedule(cfg):
     sched.pop("evening", None)
     _norm_collect_times(sched)
 
+def _migrate_global_presets(cfg):
+    """初版把基建排班预设存在配置顶层、所有账号共享；现为每个账号独立（不互通）。
+
+    旧顶层列表复制为每个账号的独立副本（之后各改各的互不影响），顶层键删除。
+    只在账号还没有自己的预设时复制，避免覆盖已有数据。
+    """
+    legacy = cfg.pop("base_schedule_presets", None)
+    if not (isinstance(legacy, list) and legacy):
+        return
+    for a in cfg.get("accounts") or []:
+        if isinstance(a, dict) and not a.get("base_schedule_presets"):
+            a["base_schedule_presets"] = deepcopy(legacy)
+
+
+def _norm_base_schedule_presets(acc):
+    """规范化单个账号的 base_schedule_presets（该账号专属的基建排班预设）。
+
+    每项 {"name": 预设名, "schedule": {...}}；无效条目（空名/非对象）剔除、
+    重名保留首个（下拉里同名会歧义）、schedule 非对象置空 dict（应用时按
+    当前账号批次补齐）。缺失/非列表 → []。
+    """
+    items = acc.get("base_schedule_presets")
+    out, seen = [], set()
+    for it in items if isinstance(items, list) else []:
+        if not isinstance(it, dict):
+            continue
+        name = str(it.get("name") or "").strip()
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        sched = it.get("schedule")
+        out.append({
+            "name": name,
+            "schedule": deepcopy(sched) if isinstance(sched, dict) else {},
+        })
+    acc["base_schedule_presets"] = out
+
+
 def load() -> dict:
     """读取配置；文件缺失/损坏/字段缺失时用默认值补齐。
 
@@ -400,6 +447,10 @@ def load() -> dict:
             pass  # 读取失败（占用等）不阻塞 GUI 启动，保留原文件
     _migrate_accounts(cfg)
     _migrate_schedule(cfg)
+    _migrate_global_presets(cfg)
+    for a in cfg.get("accounts") or []:
+        if isinstance(a, dict):
+            _norm_base_schedule_presets(a)
     return cfg
 
 

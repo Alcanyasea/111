@@ -121,5 +121,86 @@ class CollectTimesMigrationTest(unittest.TestCase):
         self.assertEqual(appconfig.load()["schedule"], cfg["schedule"])
 
 
+class BaseSchedulePresetsTest(unittest.TestCase):
+    """账号级 base_schedule_presets（基建排班预设，账号之间不互通）。"""
+
+    def setUp(self):
+        self.root = Path(tempfile.mkdtemp())
+        self._old = appconfig.CONFIG_PATH
+        appconfig.CONFIG_PATH = self.root / "config.json"
+
+    def tearDown(self):
+        appconfig.CONFIG_PATH = self._old
+
+    def test_default_empty_per_account(self):
+        for acc in appconfig.load()["accounts"]:
+            self.assertEqual(acc["base_schedule_presets"], [])
+
+    def test_invalid_entries_dropped_and_dedup(self):
+        appconfig.CONFIG_PATH.write_text(json.dumps({
+            "accounts": [
+                {"id": "a", "base_schedule_presets": [
+                    {"name": "日常", "schedule": {"layout": "333"}},
+                    {"name": "日常", "schedule": {"layout": "243"}},  # 重名 → 保留首个
+                    {"name": "", "schedule": {}},      # 空名 → 剔除
+                    {"name": "   "},                   # 纯空白名/无 schedule → 剔除
+                    "junk",                            # 非对象 → 剔除
+                    {"schedule": {"layout": "333"}},   # 缺名 → 剔除
+                ]},
+                {"id": "b", "base_schedule_presets": [
+                    {"name": "日常", "schedule": {"layout": "243"}},
+                ]},
+            ],
+        }), encoding="utf-8")
+        cfg = appconfig.load()
+        self.assertEqual(cfg["accounts"][0]["base_schedule_presets"],
+                         [{"name": "日常", "schedule": {"layout": "333"}}])
+        # 账号之间不互通：b 的同名预设内容独立，不受 a 规范化影响
+        self.assertEqual(cfg["accounts"][1]["base_schedule_presets"],
+                         [{"name": "日常", "schedule": {"layout": "243"}}])
+        appconfig.save(cfg)
+        self.assertEqual(
+            appconfig.load()["accounts"][0]["base_schedule_presets"],
+            cfg["accounts"][0]["base_schedule_presets"])
+
+    def test_non_dict_schedule_reset_to_empty(self):
+        # schedule 坏成标量：名字保留（用户可重新覆盖保存），schedule 置空
+        appconfig.CONFIG_PATH.write_text(json.dumps({
+            "accounts": [{"id": "a", "base_schedule_presets":
+                          [{"name": "坏预设", "schedule": 123}]}],
+        }), encoding="utf-8")
+        cfg = appconfig.load()
+        self.assertEqual(cfg["accounts"][0]["base_schedule_presets"],
+                         [{"name": "坏预设", "schedule": {}}])
+
+    def test_legacy_global_presets_copied_to_every_account(self):
+        """旧版顶层全局共享预设 → 每账号一份独立副本，顶层键删除。"""
+        legacy = [{"name": "搓玉", "schedule": {"layout": "243"}}]
+        appconfig.CONFIG_PATH.write_text(json.dumps({
+            "base_schedule_presets": legacy,
+            "accounts": [{"id": "a"}, {"id": "b"}],
+        }), encoding="utf-8")
+        cfg = appconfig.load()
+        self.assertNotIn("base_schedule_presets", cfg)
+        self.assertEqual(cfg["accounts"][0]["base_schedule_presets"], legacy)
+        self.assertEqual(cfg["accounts"][1]["base_schedule_presets"], legacy)
+        # 独立副本：改 a 的预设不影响 b
+        cfg["accounts"][0]["base_schedule_presets"] = []
+        appconfig.save(cfg)
+        cfg = appconfig.load()
+        self.assertEqual(cfg["accounts"][0]["base_schedule_presets"], [])
+        self.assertEqual(cfg["accounts"][1]["base_schedule_presets"], legacy)
+
+    def test_legacy_global_presets_not_over_account_own(self):
+        # 账号已有自己的预设时不覆盖（迁移只补缺失）
+        own = [{"name": "自己存的", "schedule": {}}]
+        appconfig.CONFIG_PATH.write_text(json.dumps({
+            "base_schedule_presets": [{"name": "旧全局", "schedule": {}}],
+            "accounts": [{"id": "a", "base_schedule_presets": own}],
+        }), encoding="utf-8")
+        cfg = appconfig.load()
+        self.assertEqual(cfg["accounts"][0]["base_schedule_presets"], own)
+
+
 if __name__ == "__main__":
     unittest.main()

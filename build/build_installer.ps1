@@ -24,6 +24,12 @@ param(
     [string]$OutputDir = "",
     [string]$SevenZip = "",
     [string]$PythonHome = "",
+    # 便携版 PowerShell 7（win-x64 zip）：内置后目标机器无需安装 pwsh。
+    # -PwshZip 指定本地 zip；缺省时找 build\tools 缓存，再没有就按
+    # -PwshVersion 从 GitHub 下载（失败仅警告、继续构建不内置）。
+    [string]$PwshZip = "",
+    [string]$PwshVersion = "7.4.6",
+    [switch]$NoPwsh,
     [switch]$SkipBootstrap
 )
 $ErrorActionPreference = "Stop"
@@ -149,7 +155,7 @@ New-Item -ItemType Directory -Path $staging -Force | Out-Null
 Write-Step "收集项目文件（排除 .git/.venv/config.json/账号数据/运行残留）..."
 robocopy $RepoRoot $staging /E /NFL /NDL /NJH /NJS /NP `
     /XD .git .venv __pycache__ accounts debug plans dist tools .claude exports `
-    /XF config.json config.json.bak master_log.txt master.lock maa_done.signal `
+    /XF config.json config.json.bak config.json.daily.bak config.json.lost-* master_log.txt master.lock maa_done.signal `
         switch_output.tmp _shot.png _shot.py *.pyc AGENTS.md .gitignore | Out-Null
 if ($LASTEXITCODE -ge 8) { throw "robocopy 失败（exit=$LASTEXITCODE）" }
 
@@ -170,6 +176,34 @@ if ($LASTEXITCODE -ne 0) {
     throw "内置 Python 缺少 GUI 依赖（PySide6 / qfluentwidgets）。请先执行 python -m pip install -r gui\requirements.txt`n$importOut"
 }
 Write-Ok "Python 运行环境已内置且 GUI 依赖可导入"
+
+# ---------- 内置便携版 PowerShell 7（可选：目标机器免装 pwsh） ----------
+$pwsZipDst = Join-Path $staging "gui\runtime\pwsh.zip"
+if (-not $NoPwsh) {
+    $pwsZip = $PwshZip
+    if (-not $pwsZip -or -not (Test-Path $pwsZip)) {
+        $cached = Get-ChildItem $toolsDir -Filter "PowerShell-*-win-x64.zip" -ErrorAction SilentlyContinue |
+            Sort-Object Name -Descending | Select-Object -First 1
+        if ($cached) { $pwsZip = $cached.FullName }
+    }
+    if (-not $pwsZip -or -not (Test-Path $pwsZip)) {
+        $pwsUrl = "https://github.com/PowerShell/PowerShell/releases/download/v$PwshVersion/PowerShell-$PwshVersion-win-x64.zip"
+        $pwsZip = Join-Path $toolsDir ("PowerShell-$PwshVersion-win-x64.zip")
+        try {
+            Write-Step "下载便携版 PowerShell $PwshVersion（github.com，约 70MB，可 -PwshZip 指定本地 zip）..."
+            Invoke-WebRequest -Uri $pwsUrl -OutFile $pwsZip -UseBasicParsing -TimeoutSec 600
+        } catch {
+            Write-Warn "便携版 PowerShell 下载失败：$($_.Exception.Message)"
+            Write-Warn "继续构建（本次不内置 pwsh）；目标机器需自装 PowerShell 7，或备好 zip 用 -PwshZip 重试"
+            $pwsZip = $null
+        }
+    }
+    if ($pwsZip -and (Test-Path $pwsZip)) {
+        Write-Step "内置便携版 PowerShell（gui\runtime\pwsh.zip）..."
+        Copy-Item $pwsZip $pwsZipDst -Force
+        Write-Ok "便携版 PowerShell 已内置（安装时自动解压）"
+    }
+}
 
 # 注入安装脚本（版本号占位符替换）
 $installSrc = Join-Path $PSScriptRoot "installer"

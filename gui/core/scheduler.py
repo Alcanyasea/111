@@ -13,33 +13,19 @@
 错误，由界面弹 InfoBar 提示）；查询无需管理员。
 """
 import json
-import os
 import re
 from datetime import datetime
 from pathlib import Path
 
-from core.util import decode_console, run as _run
+from core.util import decode_console, pwsh_exe, run as _run
 
 TASK_NAME = "MAA_明日方舟自动挂机"
 COLLECT_TASK_NAME = "MAA_基建收菜"
-
-# 计划任务必须用 pwsh 绝对路径：任务计划程序不按用户 PATH 解析裸 pwsh.exe，
-# 商店版（MSIX）的执行别名直接 0x80070002 起不来；MSI 版 Program Files 优先。
-_PWSH_CANDIDATES = (
-    r"C:\Program Files\PowerShell\7\pwsh.exe",
-    os.path.expandvars(r"%LOCALAPPDATA%\Microsoft\WindowsApps\pwsh.exe"),
-)
 
 # master.ps1 路径按本文件位置推导（gui\core\scheduler.py → 项目根\scripts），
 # 不再写死 D:\1：项目挪目录/装到别的盘后计划任务仍指向正确脚本
 MASTER_PS1 = str(Path(__file__).resolve().parents[2] / "scripts" / "master.ps1")
 
-
-def pwsh_exe():
-    for p in _PWSH_CANDIDATES:
-        if os.path.isfile(p):
-            return p
-    return "pwsh.exe"
 
 _PS_DATE_RE = re.compile(r"/Date\((\d+)\)/")
 _HHMM_RE = re.compile(r"T(\d{2}:\d{2})")

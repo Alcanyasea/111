@@ -132,7 +132,8 @@ class HistoryPage(QWidget):
     # ---------- 数据 ----------
 
     def _history_dir(self):
-        script_dir = (self.cfg.get("paths") or {}).get("script_dir") or r"D:\1\scripts"
+        default_scripts = Path(__file__).resolve().parents[2] / "scripts"
+        script_dir = (self.cfg.get("paths") or {}).get("script_dir") or default_scripts
         return Path(script_dir) / "run_history"
 
     def _load(self):

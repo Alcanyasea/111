@@ -23,7 +23,7 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 
-DEFAULT_CONFIG = Path(r"D:\1\config.json")
+DEFAULT_CONFIG = Path(__file__).resolve().parents[2] / "config.json"
 TIMEOUT = 15          # 单次 HTTP 超时（秒）：推送慢不该拖住收尾流程
 PROVIDERS = ("serverchan", "pushplus", "wecom")
 

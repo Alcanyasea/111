@@ -409,7 +409,7 @@ Clear-CacheData
 if ((Get-Date).Hour -ge 12) {
     Clear-UnnecessaryData
 } else {
-    $debugDir = "D:\1\scripts\debug"
+    $debugDir = Join-Path $scriptDir "debug"
     if (Test-Path $debugDir) {
         try {
             Remove-Item "$debugDir\*.png" -Force -ErrorAction SilentlyContinue

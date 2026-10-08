@@ -23,11 +23,11 @@ $ProgressPreference = "SilentlyContinue"
 
 $adb = "D:\软件\MuMu模拟器\MuMuPlayer\nx_main\adb.exe"
 $device = "127.0.0.1:16384"
-$scriptDir = "D:\1\scripts"
-$logFile = "D:\1\scripts\master_log.txt"
+$scriptDir = $PSScriptRoot
+$logFile = Join-Path $scriptDir "master_log.txt"
 
 . (Join-Path $PSScriptRoot "config_lib.ps1")
-$config = Read-AppConfigJson "D:\1\config.json"
+$config = Read-AppConfigJson (Join-Path (Split-Path -Parent $PSScriptRoot) "config.json")
 if ($config) {
     if ($null -ne $config.paths -and $config.paths.adb)        { $adb = [string]$config.paths.adb }
     if ($null -ne $config.paths -and $config.paths.device)     { $device = [string]$config.paths.device }

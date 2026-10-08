@@ -4,9 +4,7 @@
         "maa_bilibili_dir": "D:\\软件\\MAA（b）",
         "adb": "D:\\软件\\MuMu模拟器\\MuMuPlayer\\nx_main\\adb.exe",
         "cli": "D:\\软件\\MuMu模拟器\\MuMuPlayer\\nx_main\\mumu-cli.exe",
-        "device": "127.0.0.1:16384",
-        "script_dir": "D:\\1\\scripts",
-        "log_file": "D:\\1\\scripts\\master_log.txt"
+        "device": "127.0.0.1:16384"
     },
     "timeouts": {
         "maa_min": 3,

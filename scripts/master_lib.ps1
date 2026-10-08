@@ -15,7 +15,7 @@
 # 在挂机运行中读取锁内容做诊断显示，不破坏现有读方；但写打开仍互斥。
 # 锁内容仍写 "PID|进程启动时间(UTC Ticks)"（ASCII，v4.1 格式不变），只作诊断，
 # 不参与本脚本的判活。
-$lockFile = "D:\1\scripts\master.lock"
+$lockFile = Join-Path $PSScriptRoot "master.lock"
 $script:lockFs = $null
 $myStartTicks = (Get-Process -Id $PID).StartTime.ToUniversalTime().Ticks
 try {
@@ -29,7 +29,7 @@ try {
     try { $lockContent = [System.IO.File]::ReadAllText($lockFile).Trim() } catch { }
     Write-Host "Another instance is already running (or lock unavailable: $lockContent). Exiting."
     try {
-        Add-Content -Path "D:\1\scripts\master_log.txt" -Value ("[{0}] Another instance is already running (lock: {1}), exit." -f (Get-Date -Format "yyyy-MM-dd HH:mm:ss"), $lockContent) -ErrorAction SilentlyContinue
+        Add-Content -Path (Join-Path $PSScriptRoot "master_log.txt") -Value ("[{0}] Another instance is already running (lock: {1}), exit." -f (Get-Date -Format "yyyy-MM-dd HH:mm:ss"), $lockContent) -ErrorAction SilentlyContinue
     } catch { }
     exit 0
 }
@@ -71,9 +71,10 @@ foreach ($probeDir in (Get-ChildItem "D:\软件\MAA" -Directory -ErrorAction Sil
 $maaOfficial = Join-Path $maaOfficialDir "MAA.exe"
 $maaBilibili = "D:\软件\MAA（b）\MAA.exe"
 $maaBilibiliDir = "D:\软件\MAA（b）"
-$signalFile = "D:\1\scripts\maa_done.signal"
-$logFile = "D:\1\scripts\master_log.txt"
-$scriptDir = "D:\1\scripts"
+$scriptDir = $PSScriptRoot
+$root = Split-Path -Parent $scriptDir   # 项目根（gui/plugins/config.json 所在）
+$signalFile = Join-Path $scriptDir "maa_done.signal"
+$logFile = Join-Path $scriptDir "master_log.txt"
 # MAA 无进展判超时（秒）：该账号这段时间内没有任何战斗/任务推进才放弃；
 # 正常打关（一直有进战斗/结算心跳）不再受单号总时长限制。
 $maaStallTimeoutSec = 180
@@ -86,27 +87,29 @@ $mumuLaunchTimeoutSec = 120
 # 安装器检测），不再单独跑 game_update_wait.ps1（每号省 ~50 秒探测窗）。
 # behavior.wait_game_update / timeouts.game_update_min 保留读取但不再单独使用，
 # 更新等待上限由 login_check 的 hardDeadline（2 小时）兜底。
-$venvPython = "D:\1\gui\.venv\Scripts\python.exe"
-$baseSchedulePy = "D:\1\plugins\base_schedule\base_schedule.py"
-$fightStagePy = "D:\1\plugins\fight_stage\fight_stage.py"
-$farmGuardPy = "D:\1\plugins\farm_guard\farm_guard.py"
-$fiammettaPy = "D:\1\plugins\fiammetta\fiammetta.py"
-$infrastCollectPy = "D:\1\plugins\infrast_collect\infrast_collect.py"
-$notifyPy = "D:\1\plugins\notify\notify.py"
-$runHistoryDir = "D:\1\scripts\run_history"
+# 插件运行时：优先 GUI 虚拟环境，其次安装包内置运行时
+$venvPython = Join-Path $root "gui\.venv\Scripts\python.exe"
+if (-not (Test-Path $venvPython)) { $venvPython = Join-Path $root "gui\runtime\python.exe" }
+$baseSchedulePy = Join-Path $root "plugins\base_schedule\base_schedule.py"
+$fightStagePy = Join-Path $root "plugins\fight_stage\fight_stage.py"
+$farmGuardPy = Join-Path $root "plugins\farm_guard\farm_guard.py"
+$fiammettaPy = Join-Path $root "plugins\fiammetta\fiammetta.py"
+$infrastCollectPy = Join-Path $root "plugins\infrast_collect\infrast_collect.py"
+$notifyPy = Join-Path $root "plugins\notify\notify.py"
+$runHistoryDir = Join-Path $scriptDir "run_history"
 # 本轮运行历史元数据（Save-RunHistory 使用；MAIN 里按模式改写 $runMode）
 $runStartTs = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
 $runStamp = Get-Date -Format "yyyyMMdd_HHmmss"
 $runMode = "farm"
 
-# ---- 读取 GUI 配置（D:\1\config.json），字段缺失时回退上面的硬编码默认 ----
+# ---- 读取 GUI 配置（项目根 config.json），字段缺失时回退上面的默认值 ----
 # config.json 由「MAA 挂机控制台」GUI 生成；文件不存在时流程与旧版完全一致。
 . (Join-Path $PSScriptRoot "config_lib.ps1")
-$config = Read-AppConfigJson "D:\1\config.json"
+$config = Read-AppConfigJson (Join-Path $root "config.json")
 # 插件/通知统一经 --config 传入的配置路径：必须显式定义——未定义的变量求值
 # 为 $null，pwsh 7 会把参数数组里的 $null 元素直接丢弃，子进程 argparse 收到
 # 「--config --account」报 expected one argument（exit 2），farm 全线误判自检失败
-$configPath = "D:\1\config.json"
+$configPath = Join-Path $root "config.json"
 if ($config) {
     $p = $config.paths
     if ($null -ne $p -and $p.adb)          { $adb = [string]$p.adb }
@@ -232,7 +235,7 @@ function Clear-UnnecessaryData {
         Remove-Item (Join-Path $scriptDir $name) -Force -ErrorAction SilentlyContinue
     }
     # 4) 旧配置备份
-    Remove-Item "D:\1\config.json.bak" -Force -ErrorAction SilentlyContinue
+    Remove-Item (Join-Path $root "config.json.bak") -Force -ErrorAction SilentlyContinue
     # 5) master_log.txt 超限截断（>1MB 保留尾部 512KB 并对齐行首；此刻无活动日志句柄，安全）
     $logPath = Join-Path $scriptDir "master_log.txt"
     if (Test-Path $logPath) {
@@ -265,14 +268,14 @@ function Clear-CacheData {
     # Python 字节码缓存（__pycache__）与生成的基建计划文件：
     # 都是运行前自动重建的临时产物，默认每次运行顺手清掉，避免本地残留。
     # 只清项目代码目录，不碰 .venv（虚拟环境属运行环境）。
-    foreach ($root in @("D:\1\gui\core", "D:\1\gui\pages", "D:\1\plugins")) {
-        if (Test-Path $root) {
-            Get-ChildItem $root -Directory -Recurse -Filter "__pycache__" -ErrorAction SilentlyContinue |
+    foreach ($cacheDir in @((Join-Path $root "gui\core"), (Join-Path $root "gui\pages"), (Join-Path $root "plugins"))) {
+        if (Test-Path $cacheDir) {
+            Get-ChildItem $cacheDir -Directory -Recurse -Filter "__pycache__" -ErrorAction SilentlyContinue |
                 Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
         }
     }
-    Remove-Item "D:\1\gui\__pycache__" -Recurse -Force -ErrorAction SilentlyContinue
-    $plansDir = "D:\1\plugins\base_schedule\plans"
+    Remove-Item (Join-Path $root "gui\__pycache__") -Recurse -Force -ErrorAction SilentlyContinue
+    $plansDir = Join-Path $root "plugins\base_schedule\plans"
     if (Test-Path $plansDir) {
         Get-ChildItem $plansDir -File -Filter "*.json" -ErrorAction SilentlyContinue |
             Remove-Item -Force -ErrorAction SilentlyContinue

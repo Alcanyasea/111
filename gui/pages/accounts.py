@@ -30,7 +30,7 @@ import config as appconfig
 import theme
 from core import runner, token_check
 from core.poller import FuncWorker
-from core.util import CREATE_NO_WINDOW, decode_console
+from core.util import CREATE_NO_WINDOW, decode_console, pwsh_exe
 from pages.stage_plan_dialog import show_stage_plan_dialog
 from widgets import (Card, IconBadge, Pill, _label_transparent,
                      set_switch_checked_gray, style_button,
@@ -316,7 +316,7 @@ class CaptureDialog(QDialog):
 
         script = Path(self.cfg["paths"]["script_dir"]) / "capture_account.ps1"
         args = [
-            "pwsh", "-NoProfile", "-ExecutionPolicy", "Bypass",
+            pwsh_exe(), "-NoProfile", "-ExecutionPolicy", "Bypass",
             "-File", str(script),
             "-Server", server, "-Slot", self._slot, "-Label", label,
         ]

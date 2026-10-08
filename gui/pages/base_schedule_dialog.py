@@ -18,7 +18,8 @@ from PySide6.QtWidgets import (QDialog, QFileDialog, QGridLayout, QHBoxLayout,
                                QWidget)
 
 from qfluentwidgets import (BodyLabel, ComboBox, InfoBar, InfoBarPosition,
-                            LineEdit, MessageBox, PrimaryPushButton, PushButton,
+                            LineEdit, MessageBox, MessageBoxBase,
+                            PrimaryPushButton, PushButton, SubtitleLabel,
                             SwitchButton)
 
 import config as appconfig
@@ -26,7 +27,7 @@ import theme
 from widgets import (Card, set_switch_checked_gray, style_button,
                      style_primary_button, style_scroll_area)
 
-PLUGIN_DIR = Path(r"D:\1\plugins\base_schedule")
+PLUGIN_DIR = Path(__file__).resolve().parents[2] / "plugins" / "base_schedule"
 if str(PLUGIN_DIR) not in sys.path:
     sys.path.insert(0, str(PLUGIN_DIR))
 import base_schedule as bsplugin
@@ -61,6 +62,42 @@ def _safe_filename(text):
     return name or "排班"
 
 
+class _PresetNameBox(MessageBoxBase):
+    """「保存为预设」的名称输入弹窗（qfluentwidgets MessageBoxBase）。"""
+
+    def __init__(self, parent, default="", acc_label=""):
+        super().__init__(parent)
+        self.viewLayout.addWidget(SubtitleLabel("保存为预设"))
+        tip = BodyLabel("预设保存整套排班（布局、无人机、各批次干员与菲亚梅塔），"
+                        "只属于账号「%s」，其他账号看不到（不互通）。" % acc_label)
+        tip.setWordWrap(True)
+        theme.bind(tip, lambda: "color: %s; font-size: 12px;" % theme.TEXT_2)
+        self.viewLayout.addWidget(tip)
+        self.name_edit = LineEdit()
+        self.name_edit.setPlaceholderText("预设名称，如「333 日常」")
+        self.name_edit.setClearButtonEnabled(True)
+        self.name_edit.setText(default)
+        self.viewLayout.addWidget(self.name_edit)
+        self.name_hint = BodyLabel("")
+        self.name_hint.setWordWrap(True)
+        self.name_hint.hide()
+        self.viewLayout.addWidget(self.name_hint)
+        self.yesButton.setText("保存")
+        self.cancelButton.setText("取消")
+        self.widget.setMinimumWidth(420)
+
+    def validate(self):
+        name = self.name_edit.text().strip()
+        if name:
+            self.name_hint.hide()
+            return True
+        self.name_hint.setText("预设名称不能为空，请填写后再保存。")
+        theme.bind(self.name_hint,
+                   lambda: "color: %s; font-size: 12px;" % theme.ERR)
+        self.name_hint.show()
+        return False
+
+
 class BaseScheduleDialog(QDialog):
     def __init__(self, cfg, acc, parent=None):
         super().__init__(parent)
@@ -84,6 +121,38 @@ class BaseScheduleDialog(QDialog):
         root = QVBoxLayout(self)
         root.setContentsMargins(22, 18, 22, 16)
         root.setSpacing(12)
+
+        preset_row = QHBoxLayout()
+        preset_row.setSpacing(10)
+        preset_row.addWidget(BodyLabel("预设:"))
+        self.preset_combo = ComboBox()
+        self.preset_combo.setMinimumWidth(230)
+        self.preset_combo.setToolTip(
+            "选择一个预设——仅选中，不改动当前排班内容；"
+            "点「应用」才会把它的整套排班填入当前弹窗。")
+        self.preset_combo.currentIndexChanged.connect(self._on_preset_selected)
+        preset_row.addWidget(self.preset_combo)
+        self.preset_apply_btn = style_button(PushButton("应用"))
+        self.preset_apply_btn.setToolTip(
+            "把选中的预设（布局、无人机、菲亚梅塔与各批次干员）填入当前弹窗，"
+            "覆盖未保存的修改（不影响已保存的配置）；"
+            "填入后仍需点「保存并生成计划」才生效。")
+        self.preset_apply_btn.setEnabled(False)
+        self.preset_apply_btn.clicked.connect(self._on_preset_apply)
+        preset_row.addWidget(self.preset_apply_btn)
+        self.preset_save_btn = style_button(PushButton("保存为预设"))
+        self.preset_save_btn.setToolTip(
+            "把当前弹窗里的整套排班（布局、无人机、菲亚梅塔与各批次干员）"
+            "保存为命名预设，供以后一键填入。\n预设只属于当前账号，"
+            "其他账号的基建排班里看不到它（不互通）。")
+        self.preset_save_btn.clicked.connect(self._on_preset_save)
+        preset_row.addWidget(self.preset_save_btn)
+        self.preset_del_btn = style_button(PushButton("删除预设"))
+        self.preset_del_btn.setToolTip("删除当前选中的预设。")
+        self.preset_del_btn.clicked.connect(self._on_preset_delete)
+        preset_row.addWidget(self.preset_del_btn)
+        preset_row.addStretch(1)
+        root.addLayout(preset_row)
 
         top = QHBoxLayout()
         top.setSpacing(10)
@@ -204,6 +273,7 @@ class BaseScheduleDialog(QDialog):
 
         self.cancel_btn.clicked.connect(self.reject)
         self.save_btn.clicked.connect(self._on_save)
+        self._refresh_presets()
         self._refresh_hint()
 
     # ---------- 界面构建 ----------
@@ -360,6 +430,189 @@ class BaseScheduleDialog(QDialog):
             self._fia_batch = self.batches[index]
             self._load_fiammetta(self._fia_batch)
 
+    # ---------- 预设 ----------
+
+    def _presets(self):
+        """当前账号自己的预设列表（load() 已规范化；防御式兜底空列表）。"""
+        items = self.acc.get("base_schedule_presets")
+        return items if isinstance(items, list) else []
+
+    def _find_preset(self, name):
+        for p in self._presets():
+            if isinstance(p, dict) and p.get("name") == name:
+                return p
+        return None
+
+    def _refresh_presets(self, select_name=None):
+        """重填预设下拉；select_name 指定选中项，默认回到占位项。"""
+        self.preset_combo.blockSignals(True)
+        self.preset_combo.clear()
+        presets = self._presets()
+        placeholder = "无预设（先点「保存为预设」）" if not presets else "选择预设…"
+        self.preset_combo.addItem(placeholder, userData=None)
+        for p in presets:
+            self.preset_combo.addItem(p["name"], userData=p["name"])
+        idx = 0
+        if select_name is not None:
+            found = self.preset_combo.findData(select_name)
+            if found > 0:
+                idx = found
+        self.preset_combo.setCurrentIndex(idx)
+        self.preset_combo.blockSignals(False)
+        # 选中≠应用：选中后「应用 / 删除」可用，当前排班内容不受影响
+        self.preset_apply_btn.setEnabled(idx > 0)
+        self.preset_del_btn.setEnabled(idx > 0)
+
+    def _on_preset_selected(self, index):
+        # 只切换选中项（可预览 / 删除），不应用、不弹框、不改当前内容
+        self.preset_apply_btn.setEnabled(index > 0)
+        self.preset_del_btn.setEnabled(index > 0)
+
+    def _on_preset_apply(self):
+        name = self.preset_combo.currentData()
+        if not name:
+            return
+        preset = self._find_preset(name)
+        if preset is None:
+            self._refresh_presets()
+            return
+        box = MessageBox(
+            "应用预设「%s」？" % name,
+            "将把预设里的布局、无人机、菲亚梅塔与各批次干员填入当前弹窗，覆盖"
+            "未保存的修改（不影响已保存的配置）。\n填入后仍需点"
+            "「保存并生成计划」才会写入配置并生效。",
+            self.window())
+        box.yesButton.setText("应用")
+        box.cancelButton.setText("取消")
+        if not box.exec():
+            return
+        self._apply_preset(preset)
+
+    def _apply_preset(self, preset):
+        """把预设的排班填入当前弹窗（不写配置；批次按名字匹配）。"""
+        ps = preset.get("schedule") if isinstance(preset, dict) else None
+        if not isinstance(ps, dict):
+            return
+        # 与导入同流程：先把当前界面读回 self.data（预设未覆盖到的批次保留现状）
+        for b in self.batches:
+            self._capture(b)
+        self._capture_fiammetta(self._fia_batch)
+
+        layout = ps.get("layout")
+        if layout in ("333",):
+            self.layout_name = "333"
+        elif layout in ("423", "243"):
+            self.layout_name = "243"
+        self.layout_combo.blockSignals(True)
+        self.layout_combo.setCurrentIndex(0 if self.layout_name == "333" else 1)
+        self.layout_combo.blockSignals(False)
+
+        pb = ps.get("batches") if isinstance(ps.get("batches"), dict) else {}
+        merged, matched = {}, []
+        for b in self.batches:
+            if b in pb:
+                merged[b] = copy.deepcopy(pb[b])
+                matched.append(b)
+            else:
+                merged[b] = self.data[b]
+        drones = ps.get("drones") if isinstance(ps.get("drones"), dict) else {}
+        norm = bsplugin.normalize(
+            {"layout": self.layout_name, "drones": drones, "batches": merged},
+            self.batches)
+        self.data = norm["batches"]
+
+        if drones:
+            self._set_drones_widgets(drones)
+
+        self._rebuild_pages()
+        self._refresh_drones_index()
+        self._load_fiammetta(self._fia_batch)
+        self._refresh_hint()
+
+        lines = ["已填入预设「%s」（%s 布局）。" % (preset.get("name", ""),
+                                               self.layout_name)]
+        if matched:
+            lines.append("覆盖批次：" + "、".join(matched))
+        kept = [b for b in self.batches if b not in matched]
+        if kept:
+            lines.append("保留当前内容（预设里没有该批次）：" + "、".join(kept))
+        lines.append("尚未写入配置——点「保存并生成计划」后生效。")
+        box = MessageBox("预设已填入", "\n".join(lines), self.window())
+        box.yesButton.setText("知道了")
+        box.cancelButton.hide()
+        box.exec()
+
+    def _on_preset_save(self):
+        name_box = _PresetNameBox(self.window(),
+                                  acc_label=self.acc.get("label", ""))
+        if not name_box.exec():
+            return
+        name = name_box.name_edit.text().strip()
+        if self._find_preset(name) is not None:
+            box = MessageBox(
+                "已存在同名预设",
+                "预设「%s」已存在，保存将覆盖它的内容。" % name,
+                self.window())
+            box.yesButton.setText("覆盖")
+            box.cancelButton.setText("取消")
+            if not box.exec():
+                return
+        bs = self._collect_bs()
+        schedule = {
+            "layout": bs["layout"],
+            "drones": copy.deepcopy(bs["drones"]),
+            "batches": copy.deepcopy(bs["batches"]),
+        }
+        presets = self._presets()
+        for p in presets:
+            if isinstance(p, dict) and p.get("name") == name:
+                p["schedule"] = schedule
+                break
+        else:
+            presets.append({"name": name, "schedule": schedule})
+        self.acc["base_schedule_presets"] = presets
+        try:
+            appconfig.save(self.cfg)
+        except OSError as exc:
+            box = MessageBox("预设保存失败", str(exc), self.window())
+            box.yesButton.setText("知道了")
+            box.cancelButton.hide()
+            box.exec()
+            return
+        self._refresh_presets(select_name=name)
+        InfoBar.success(
+            "预设已保存",
+            "预设「%s」已保存到账号「%s」，仅该账号可用（不与其他账号互通）。"
+            % (name, self.acc.get("label", "")),
+            parent=self, position=InfoBarPosition.TOP, duration=4000)
+
+    def _on_preset_delete(self):
+        name = self.preset_combo.currentData()
+        if not name:
+            return
+        box = MessageBox(
+            "删除预设「%s」？" % name,
+            "删除后无法恢复；已应用到该账号的排班不受影响，其他账号的预设也不受影响。",
+            self.window())
+        box.yesButton.setText("删除")
+        box.cancelButton.setText("取消")
+        if not box.exec():
+            return
+        self.acc["base_schedule_presets"] = [
+            p for p in self._presets()
+            if not (isinstance(p, dict) and p.get("name") == name)]
+        try:
+            appconfig.save(self.cfg)
+        except OSError as exc:
+            box = MessageBox("预设删除失败", str(exc), self.window())
+            box.yesButton.setText("知道了")
+            box.cancelButton.hide()
+            box.exec()
+            return
+        self._refresh_presets()
+        InfoBar.success("预设已删除", "预设「%s」已删除。" % name,
+                        parent=self, position=InfoBarPosition.TOP, duration=4000)
+
     def _on_import(self):
         """导入一图流/MAA 自定义基建 JSON：识别后填入当前账号各批次（不自动保存）。"""
         start = Path.home() / "Desktop"
@@ -450,21 +703,25 @@ class BaseScheduleDialog(QDialog):
         由 _load_fiammetta() 显示当前批次的值。
         """
         drones = result.get("drones")
-        if drones is not None:
-            idx = self.drones_room_combo.findData(drones.get("room"))
-            if idx >= 0:
-                self.drones_room_combo.setCurrentIndex(idx)
-            self._refresh_drones_index()
-            d_idx = self.drones_index_combo.findData(drones.get("index"))
-            if d_idx >= 0:
-                self.drones_index_combo.setCurrentIndex(d_idx)
-            o_idx = self.drones_order_combo.findData(drones.get("order"))
-            if o_idx >= 0:
-                self.drones_order_combo.setCurrentIndex(o_idx)
-            self.drones_switch.setChecked(True)
+        if isinstance(drones, dict):
+            self._set_drones_widgets(drones)
         elif result.get("drones_explicit"):
             # 文件里明确写了不使用无人机：关掉，而不是沿用旧设置
             self.drones_switch.setChecked(False)
+
+    def _set_drones_widgets(self, drones):
+        """把一份无人机配置填到顶部控件（导入排班文件 / 应用预设共用）。"""
+        idx = self.drones_room_combo.findData(drones.get("room"))
+        if idx >= 0:
+            self.drones_room_combo.setCurrentIndex(idx)
+        self._refresh_drones_index()
+        d_idx = self.drones_index_combo.findData(drones.get("index"))
+        if d_idx >= 0:
+            self.drones_index_combo.setCurrentIndex(d_idx)
+        o_idx = self.drones_order_combo.findData(drones.get("order"))
+        if o_idx >= 0:
+            self.drones_order_combo.setCurrentIndex(o_idx)
+        self.drones_switch.setChecked(True)
 
     def _refresh_drones_index(self, *_):
         """按目标设施与布局刷新无人机站号下拉（制造 3/4 台，贸易 2/3 台）。"""

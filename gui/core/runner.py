@@ -11,10 +11,12 @@ import subprocess
 from pathlib import Path
 
 from core import proc
-from core.util import CREATE_NO_WINDOW
+from core.util import CREATE_NO_WINDOW, pwsh_exe
 
-LOCK_FILE = Path(r"D:\1\scripts\master.lock")
-SCRIPT_DIR = Path(r"D:\1\scripts")
+# 路径从模块位置推导（core\ 上两级 = 项目根），项目挪目录/装别的盘后仍指向自己的脚本
+_PROJECT_ROOT = Path(__file__).resolve().parents[2]
+LOCK_FILE = _PROJECT_ROOT / "scripts" / "master.lock"
+SCRIPT_DIR = _PROJECT_ROOT / "scripts"
 
 # 锁文件里的 PID 必须是 powershell 才算挂机在跑：master.ps1 异常退出后 PID
 # 被无关进程复用时，不能把别的进程误判成挂机（更不能 taskkill 它的进程树）
@@ -115,7 +117,7 @@ def _launch_master(cfg, extra_args):
     global _proc_ref
     master = Path(cfg["paths"]["script_dir"]) / "master.ps1"
     args = [
-        "pwsh", "-NoProfile", "-ExecutionPolicy", "Bypass",
+        pwsh_exe(), "-NoProfile", "-ExecutionPolicy", "Bypass",
         "-File", str(master),
     ] + list(extra_args)
     debug_dir = SCRIPT_DIR / "debug"

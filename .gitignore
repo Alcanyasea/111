@@ -11,6 +11,7 @@ AGENTS.md
 # Local configuration (contains credentials)
 config.json
 config.json.bak
+config.json.daily.bak
 
 # Game account data (contains login tokens/UIDs)
 scripts/accounts/

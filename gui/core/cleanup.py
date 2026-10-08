@@ -22,8 +22,9 @@ from pathlib import Path
 from core import runner
 from core.util import to_int
 
-SCRIPT_DIR = Path(r"D:\1\scripts")
-PROJECT_ROOT = SCRIPT_DIR.parent
+# 路径从模块位置推导（core\ 上两级 = 项目根），项目挪目录后仍指向自己的数据
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+SCRIPT_DIR = PROJECT_ROOT / "scripts"
 DEBUG_DIR = SCRIPT_DIR / "debug"
 LOG_FILE = SCRIPT_DIR / "master_log.txt"
 LOCK_FILE = SCRIPT_DIR / "master.lock"
@@ -41,7 +42,7 @@ LEFTOVERS = ("_t1.xml", "_t2.xml", "_t3.bin")
 # 挂机结束应自删的临时文件（异常中断会残留）
 TMP_FILES = ("switch_output.tmp", "master.lock.tmp", "maa_done.signal")
 # 旧配置备份
-BACKUPS = (r"D:\1\config.json.bak",)
+BACKUPS = (str(PROJECT_ROOT / "config.json.bak"),)
 
 KIND_NAMES = {
     "debug": "调试截屏 / 捕获日志",

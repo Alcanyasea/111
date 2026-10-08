@@ -43,14 +43,14 @@ if (-not $Username -or -not $Password) {
 $adb = "D:\软件\MuMu模拟器\MuMuPlayer\nx_main\adb.exe"
 $device = "127.0.0.1:16384"
 $cli = "D:\软件\MuMu模拟器\MuMuPlayer\nx_main\mumu-cli.exe"
-$scriptDir = "D:\1\scripts"
-$debugDir = "D:\1\scripts\debug"
+$scriptDir = $PSScriptRoot
+$debugDir = Join-Path $scriptDir "debug"
 # 引导已看过标记补写等共用函数（Ensure-GuideViewed 在此库，登录检查两脚本共用同一份）
 . (Join-Path $scriptDir "login_device_lib.ps1")
 
-# ---- 读取 GUI 配置（D:\1\config.json），字段缺失时回退上面的硬编码默认 ----
+# ---- 读取 GUI 配置（项目根 config.json），字段缺失时回退上面的默认值 ----
 . (Join-Path $PSScriptRoot "config_lib.ps1")
-$config = Read-AppConfigJson "D:\1\config.json"
+$config = Read-AppConfigJson (Join-Path (Split-Path -Parent $PSScriptRoot) "config.json")
 if ($config) {
     if ($null -ne $config.paths -and $config.paths.adb)    { $adb = [string]$config.paths.adb }
     if ($null -ne $config.paths -and $config.paths.device) { $device = [string]$config.paths.device }

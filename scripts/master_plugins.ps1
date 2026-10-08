@@ -45,7 +45,9 @@ function Invoke-Plugin($pyPath, $tag, $name, $argList, $missNote) {
 
 # 子脚本统一用 pwsh 绝对路径拉起：计划任务环境不保证按 PATH 解析裸 pwsh.exe
 # （商店版执行别名更解析不到，0x80070002）；本机已换 MSI 版固定在 Program Files。
-$pwshExe = "C:\Program Files\PowerShell\7\pwsh.exe"
+# 后台子进程用 pwsh：安装包内置便携版优先，其次系统安装，最后裸名兜底
+$pwshExe = Join-Path $root "gui\runtime\pwsh\pwsh.exe"
+if (-not (Test-Path $pwshExe)) { $pwshExe = "C:\Program Files\PowerShell\7\pwsh.exe" }
 if (-not (Test-Path $pwshExe)) { $pwshExe = "pwsh" }
 
 function Run-Switch($s) {

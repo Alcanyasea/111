@@ -14,19 +14,92 @@ farm_guard / infrast_collect）里逐字复制、只有日志标签不同——�
 """
 import json
 import os
+import shutil
 from datetime import datetime
 from pathlib import Path
 
-DEFAULT_CONFIG = Path(r"D:\1\config.json")
+DEFAULT_CONFIG = Path(__file__).resolve().parents[1] / "config.json"
 
 
 def load_config(path):
-    """读 config.json；文件缺失/损坏返回 {}（各插件自行判空兜底）。"""
+    """读 config.json；文件缺失/损坏返回 {}（各插件自行判空兜底）。
+
+    读取顺带触发每日滚动备份（backup_daily）：master 的所有插件路径都在
+    这里读配置，凌晨计划任务第一个账号跑起来时即完成当天备份。
+    """
     try:
         with open(path, "r", encoding="utf-8") as f:
-            return json.load(f)
+            cfg = json.load(f)
     except (OSError, json.JSONDecodeError):
-        return {}
+        cfg = {}
+    try:
+        backup_daily(path)
+    except Exception:  # 备份是兜底措施，任何异常都不能影响插件主流程
+        pass
+    return cfg
+
+
+def _config_complete(path):
+    """配置文件是否完整可用（JSON 可解析且含 accounts 列表）。
+
+    校验在原始文件层面做（不经过默认值补齐）：被意外覆盖的残片——比如只剩
+    {"schedule": …}、连 accounts 都没有——在这里被拒之门外，绝不会把坏内容
+    备份上去冲掉最后一份完好记录。
+    """
+    try:
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    return isinstance(data, dict) and isinstance(data.get("accounts"), list)
+
+
+def backup_daily(config_path, log=None):
+    """config.json 的每日滚动备份：永远只保留最近一份完好的完整记录。
+
+    备份文件是 config.json.daily.bak——刻意不叫 config.json.bak：后者在
+    GUI 自动清理（core/cleanup.py BACKUPS）与 master 的数据清理
+    （Clear-UnnecessaryData）里被列为「旧配置备份」垃圾，会定期删除。
+
+    - 每天只备份一次：备份文件的修改日期是今天就跳过。
+      触发点在当天首次运行（凌晨计划任务 / 白天 GUI 启动），所以备份内容
+      通常是昨天一整天的最终状态——当天配置被意外覆盖时用它回滚。
+    - 记录更新时先确认没有损坏：当前配置不完整则不备份（保住既有备份）；
+      既有备份自身损坏（写了一半等）则视为无备份、自动重做。
+    - 新记录原子替换旧记录（临时文件 + os.replace）：落盘瞬间旧记录即被
+      覆盖删除，不存在两份并存，也不会出现写一半的中间态。
+    返回 True 表示本次实际写了备份，False 表示跳过或失败。
+    """
+    path = Path(config_path)
+    bak = path.with_name(path.name + ".daily.bak")
+
+    def _fresh_today():
+        try:
+            return (datetime.fromtimestamp(bak.stat().st_mtime).date()
+                    == datetime.now().date())
+        except OSError:
+            return False
+
+    tmp = None
+    try:
+        if bak.exists() and _config_complete(bak) and _fresh_today():
+            return False   # 今天已备份过
+        if not _config_complete(path):
+            if log:
+                log("config.json 内容不完整，跳过备份（保留既有备份不动）")
+            return False
+        tmp = bak.with_name(bak.name + ".tmp-%d" % os.getpid())
+        shutil.copyfile(path, tmp)
+        os.replace(tmp, bak)
+        return True
+    except OSError as exc:
+        if log:
+            log("备份写入失败：%s（%s）" % (bak.name, exc))
+        try:
+            if tmp is not None and tmp.exists():
+                tmp.unlink()
+        except Exception:
+            pass
+        return False
 
 
 def read_json(path):

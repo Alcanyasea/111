@@ -16,7 +16,7 @@ import sys
 from pathlib import Path
 
 PLUGIN_DIR = Path(__file__).resolve().parent
-DEFAULT_CONFIG = Path(r"D:\1\config.json")
+DEFAULT_CONFIG = Path(__file__).resolve().parents[2] / "config.json"
 
 # 插件公共工具（plugins\common.py）——此前本文件与其它四个插件各复制一份
 sys.path.insert(0, str(PLUGIN_DIR.parent))
