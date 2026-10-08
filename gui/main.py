@@ -207,9 +207,10 @@ class MainWindow(FluentWindow):
         self.cfg = appconfig.load()
         self._task_info = None
 
-        # 主题：明亮（暖雾灰）/ 暗夜（暮色深灰），读自 config.json
-        theme_name = (self.cfg.get("appearance") or {}).get("theme", "light")
-        theme.apply(theme_name)
+        # 主题：明暗（明亮/暗夜）× 配色方案（暖雾灰/暖沙/青瓷/雾蓝/藕荷），读自 config.json
+        appearance = self.cfg.get("appearance") or {}
+        theme.apply(appearance.get("theme", "light"),
+                    appearance.get("palette", theme.DEFAULT_PALETTE))
         setTheme(Theme.DARK if theme.is_dark() else Theme.LIGHT)
         setThemeColor(theme.ACCENT)
         # 控制台整体底色：关掉 Win11 默认 Mica 背景后，窗口（含标题栏/侧栏区域）
@@ -384,19 +385,24 @@ class MainWindow(FluentWindow):
         """后台线程返回的计划任务信息。"""
         self._task_info = info
 
-    def _on_theme_change(self, name):
-        """运行设置页切换外观：保存配置后就地换肤（窗口不重建、不重启）。"""
+    def _on_theme_change(self, name, palette_name=None):
+        """运行设置页切换外观（明暗主题 × 配色方案）：保存配置后就地换肤。"""
         if self.dash.update_running():
             InfoBar.warning("MAA 更新进行中", "请等更新结束后再切换外观",
                             parent=self, position=InfoBarPosition.TOP_RIGHT,
                             duration=4000)
             return False
-        self.cfg.setdefault("appearance", {})["theme"] = name
+        appearance = self.cfg.setdefault("appearance", {})
+        appearance["theme"] = name
+        if palette_name is not None:
+            appearance["palette"] = palette_name
         appconfig.save(self.cfg)
-        QTimer.singleShot(250, lambda: self._switch_theme(name))   # 等下拉框动画走完
+        # 等下拉框动画走完
+        QTimer.singleShot(250, lambda: self._switch_theme(
+            name, palette_name or appearance.get("palette")))
         return True
 
-    def _switch_theme(self, name):
+    def _switch_theme(self, name, palette_name=None):
         """就地换肤：先让 qfluentwidgets 换掉它自己的配色，再重套自定义样式。
 
         顺序很重要：setTheme 会让 qfluentwidgets 对其控件重新套用自带样式
@@ -407,8 +413,9 @@ class MainWindow(FluentWindow):
         数字、RunDirectly 状态、结果圆点、历史摘要）靠页面刷新重新生成。
         """
         setTheme(Theme.DARK if name == "dark" else Theme.LIGHT)
-        setThemeColor(theme.accent_of(name))
-        theme.apply(name)          # 更新调色板 + 重套全部 bind() 配方
+        setThemeColor(theme.accent_of(name, palette_name))
+        theme.apply(name, palette_name or theme.palette_name())
+        self.setCustomBackgroundColor(theme.BG_LIGHT, theme.BG_DARK)
         # qfluentwidgets 卡片（CardWidget 等）的背景色缓存在 backgroundColor
         # 属性里，且只在 themeChanged 时重读——setTheme 那一刻调色板还是旧值，
         # 所以 apply 之后要把这批控件的背景色再刷一次，否则慢一拍

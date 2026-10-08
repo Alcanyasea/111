@@ -142,6 +142,176 @@ _DARK = {
 # 侧边栏（mockup .sidebar，历史遗留保留）
 SIDEBAR_BG = "#20262e"
 
+# ---- 配色方案（背景色调 × 明暗主题 的二维系统） ----
+#
+# 每个方案只声明「色相敏感层」的覆盖：背景/卡片/文字/强调/主按钮/徽章/通知条
+# 与状态色；黑白透明度类的结构令牌（分隔线、ghost 按钮底、滚动条、发丝描边）
+# 全部沿用 neutral 明暗模板，在任何色调下都协调。neutral 的覆盖为空 = 现有
+# 暖雾灰 / 暮色灰原样。
+#
+# 状态色约定与 neutral 一致：整套去饱和（同一色相的深浅两档），ALERT 红
+# 是全局唯一的彩色提醒，不随配色变。
+
+_PALETTES = {
+    "neutral": {
+        "label": "暖雾灰 · 暮色灰",
+        "light": {},
+        "dark": {},
+    },
+    "sand": {
+        "label": "暖沙 · 陶土",
+        "light": {
+            "BG": "#f1e9da", "CARD": "#fdf9f1", "ROW_INSET": "#f5efe2",
+            "BORDER": "#e7ddc9",
+            "TEXT": "#38312a", "TEXT_2": "#7a6d5c", "TEXT_3": "#ab9f8c",
+            "ACCENT": "#8a6f4b", "SWITCH_ON": "#8a6f4b",
+            "SWITCH_ON_DARK": "#c9b697",
+            "OK": "#4a3f2e", "OK_TINT": "#f0ead9",
+            "RUN": "#8a6f4b", "RUN_TINT": "#f2ebdb",
+            "WAIT": "#7a6d5c", "WAIT_TINT": "#f4eee1",
+            "ERR": "#45372b", "ERR_TINT": "#f0e9de",
+            "PRIMARY_BG": "#8a6f4b", "PRIMARY_FG": "#ffffff",
+            "PRIMARY_HOVER": "#9c815c", "PRIMARY_PRESSED": "#755d3d",
+            "PRIMARY_DISABLED_BG": "rgba(138, 111, 75, 0.35)",
+            "PRIMARY_DISABLED_FG": "rgba(255, 255, 255, 0.75)",
+            "BADGE_TOP": "#a3854f", "BADGE_BOTTOM": "#55432a",
+            "INFOBAR_BG": "#f5efe3",
+        },
+        "dark": {
+            "BG": "#221d15", "CARD": "#332b20", "ROW_INSET": "#2a241b",
+            "BORDER": "#473c2c",
+            "TEXT": "#ede4d3", "TEXT_2": "#b8ab95", "TEXT_3": "#857968",
+            "ACCENT": "#c7a874", "SWITCH_ON": "#c7a874",
+            "SWITCH_ON_DARK": "#6b5836",
+            "OK": "#d6c9ae", "OK_TINT": "#3a3225",
+            "RUN": "#cdbd9d", "RUN_TINT": "#3f3728",
+            "WAIT": "#b8ab95", "WAIT_TINT": "#373021",
+            "ERR": "#f5efe2", "ERR_TINT": "#41382a",
+            "PRIMARY_BG": "#c7a874", "PRIMARY_FG": "#221d15",
+            "PRIMARY_HOVER": "#d4b988", "PRIMARY_PRESSED": "#b39562",
+            "PRIMARY_DISABLED_BG": "rgba(199, 168, 116, 0.25)",
+            "PRIMARY_DISABLED_FG": "rgba(34, 29, 21, 0.55)",
+            "BADGE_TOP": "#8f7748", "BADGE_BOTTOM": "#453722",
+            "INFOBAR_BG": "#3f372a",
+        },
+    },
+    "moss": {
+        "label": "青瓷 · 苔绿",
+        "light": {
+            "BG": "#e6ece3", "CARD": "#f8fbf6", "ROW_INSET": "#edf2ea",
+            "BORDER": "#d4dfd0",
+            "TEXT": "#2b332b", "TEXT_2": "#64725f", "TEXT_3": "#9aa793",
+            "ACCENT": "#4e7257", "SWITCH_ON": "#4e7257",
+            "SWITCH_ON_DARK": "#a3c2a5",
+            "OK": "#38453a", "OK_TINT": "#e9efe5",
+            "RUN": "#4e7257", "RUN_TINT": "#eaf0e6",
+            "WAIT": "#64725f", "WAIT_TINT": "#eef2ea",
+            "ERR": "#2e3d30", "ERR_TINT": "#e9efe4",
+            "PRIMARY_BG": "#4e7257", "PRIMARY_FG": "#ffffff",
+            "PRIMARY_HOVER": "#5f8468", "PRIMARY_PRESSED": "#405e47",
+            "PRIMARY_DISABLED_BG": "rgba(78, 114, 87, 0.35)",
+            "PRIMARY_DISABLED_FG": "rgba(255, 255, 255, 0.75)",
+            "BADGE_TOP": "#6f8f6d", "BADGE_BOTTOM": "#31452f",
+            "INFOBAR_BG": "#ebf1e7",
+        },
+        "dark": {
+            "BG": "#161e17", "CARD": "#202b21", "ROW_INSET": "#1a231b",
+            "BORDER": "#324234",
+            "TEXT": "#e2ebe1", "TEXT_2": "#a4b3a2", "TEXT_3": "#778678",
+            "ACCENT": "#8fbb95", "SWITCH_ON": "#8fbb95",
+            "SWITCH_ON_DARK": "#46604a",
+            "OK": "#c3d4c1", "OK_TINT": "#2b382c",
+            "RUN": "#b4c9b1", "RUN_TINT": "#313f31",
+            "WAIT": "#a4b3a2", "WAIT_TINT": "#2c372c",
+            "ERR": "#eef4ea", "ERR_TINT": "#364536",
+            "PRIMARY_BG": "#8fbb95", "PRIMARY_FG": "#16201a",
+            "PRIMARY_HOVER": "#a2cba7", "PRIMARY_PRESSED": "#7aa67f",
+            "PRIMARY_DISABLED_BG": "rgba(143, 187, 149, 0.25)",
+            "PRIMARY_DISABLED_FG": "rgba(22, 32, 26, 0.55)",
+            "BADGE_TOP": "#5b7f5c", "BADGE_BOTTOM": "#2b3f2c",
+            "INFOBAR_BG": "#303f31",
+        },
+    },
+    "mist": {
+        "label": "雾蓝 · 藏青",
+        "light": {
+            "BG": "#e7ecf2", "CARD": "#f9fbfe", "ROW_INSET": "#edf1f7",
+            "BORDER": "#d5dee9",
+            "TEXT": "#29323d", "TEXT_2": "#64707f", "TEXT_3": "#9aa6b4",
+            "ACCENT": "#4a6a8f", "SWITCH_ON": "#4a6a8f",
+            "SWITCH_ON_DARK": "#a4bdd6",
+            "OK": "#37434f", "OK_TINT": "#e9eef5",
+            "RUN": "#4a6a8f", "RUN_TINT": "#e9eef4",
+            "WAIT": "#64707f", "WAIT_TINT": "#eef1f6",
+            "ERR": "#2c3844", "ERR_TINT": "#e9edf3",
+            "PRIMARY_BG": "#4a6a8f", "PRIMARY_FG": "#ffffff",
+            "PRIMARY_HOVER": "#5b7ba1", "PRIMARY_PRESSED": "#3d5a7a",
+            "PRIMARY_DISABLED_BG": "rgba(74, 106, 143, 0.35)",
+            "PRIMARY_DISABLED_FG": "rgba(255, 255, 255, 0.75)",
+            "BADGE_TOP": "#6b85a3", "BADGE_BOTTOM": "#2d3f54",
+            "INFOBAR_BG": "#ecf0f6",
+        },
+        "dark": {
+            "BG": "#151a21", "CARD": "#1f2731", "ROW_INSET": "#1a2029",
+            "BORDER": "#333e4e",
+            "TEXT": "#e3e9f1", "TEXT_2": "#a7b3c3", "TEXT_3": "#77839a",
+            "ACCENT": "#8fb2d9", "SWITCH_ON": "#8fb2d9",
+            "SWITCH_ON_DARK": "#43607f",
+            "OK": "#c2d0e0", "OK_TINT": "#2a3440",
+            "RUN": "#b3c3d5", "RUN_TINT": "#313d4b",
+            "WAIT": "#a7b3c3", "WAIT_TINT": "#2c3641",
+            "ERR": "#edf2f8", "ERR_TINT": "#35404e",
+            "PRIMARY_BG": "#8fb2d9", "PRIMARY_FG": "#141a21",
+            "PRIMARY_HOVER": "#a2c1e2", "PRIMARY_PRESSED": "#7a9dc4",
+            "PRIMARY_DISABLED_BG": "rgba(143, 178, 217, 0.25)",
+            "PRIMARY_DISABLED_FG": "rgba(20, 26, 33, 0.55)",
+            "BADGE_TOP": "#57718f", "BADGE_BOTTOM": "#28364a",
+            "INFOBAR_BG": "#2d3947",
+        },
+    },
+    "plum": {
+        "label": "藕荷 · 绛紫",
+        "light": {
+            "BG": "#ece8ef", "CARD": "#fbf8fd", "ROW_INSET": "#f1edf4",
+            "BORDER": "#ded7e5",
+            "TEXT": "#322d3a", "TEXT_2": "#6f6679", "TEXT_3": "#a49aae",
+            "ACCENT": "#6f5a88", "SWITCH_ON": "#6f5a88",
+            "SWITCH_ON_DARK": "#b3a0c8",
+            "OK": "#443c4e", "OK_TINT": "#efeaf4",
+            "RUN": "#6f5a88", "RUN_TINT": "#eee9f3",
+            "WAIT": "#6f6679", "WAIT_TINT": "#f2eef5",
+            "ERR": "#3b3344", "ERR_TINT": "#eee9f2",
+            "PRIMARY_BG": "#6f5a88", "PRIMARY_FG": "#ffffff",
+            "PRIMARY_HOVER": "#806b9a", "PRIMARY_PRESSED": "#5c4a72",
+            "PRIMARY_DISABLED_BG": "rgba(111, 90, 136, 0.35)",
+            "PRIMARY_DISABLED_FG": "rgba(255, 255, 255, 0.75)",
+            "BADGE_TOP": "#8672a0", "BADGE_BOTTOM": "#3b3050",
+            "INFOBAR_BG": "#f0ebf5",
+        },
+        "dark": {
+            "BG": "#1c1822", "CARD": "#282232", "ROW_INSET": "#211c28",
+            "BORDER": "#3a3244",
+            "TEXT": "#e9e4f0", "TEXT_2": "#afa6bd", "TEXT_3": "#827a90",
+            "ACCENT": "#b49bd0", "SWITCH_ON": "#b49bd0",
+            "SWITCH_ON_DARK": "#57466d",
+            "OK": "#d2c8de", "OK_TINT": "#322b3c",
+            "RUN": "#c4b8d3", "RUN_TINT": "#3a3246",
+            "WAIT": "#afa6bd", "WAIT_TINT": "#342d3e",
+            "ERR": "#f3eef8", "ERR_TINT": "#3e3549",
+            "PRIMARY_BG": "#b49bd0", "PRIMARY_FG": "#1c1822",
+            "PRIMARY_HOVER": "#c2adda", "PRIMARY_PRESSED": "#9d83ba",
+            "PRIMARY_DISABLED_BG": "rgba(180, 155, 208, 0.25)",
+            "PRIMARY_DISABLED_FG": "rgba(28, 24, 34, 0.55)",
+            "BADGE_TOP": "#6f5c86", "BADGE_BOTTOM": "#362c46",
+            "INFOBAR_BG": "#393044",
+        },
+    },
+}
+
+# 配色方案的合法名与下拉顺序
+PALETTES = tuple(_PALETTES)
+DEFAULT_PALETTE = "neutral"
+
 # 一次写入明暗两套变色的接口用（窗口背景 / 通知条底色 / 滚动条滑块）
 BG_LIGHT = _LIGHT["BG"]
 BG_DARK = _DARK["BG"]
@@ -155,15 +325,38 @@ SCROLL_HANDLE_DARK = _DARK["SCROLL_HANDLE_COLOR"]
 # bind() 登记的 widget 弱引用；apply() 末尾统一重套，销毁的顺带清理
 _bound_refs = []
 _current = "light"
+_current_palette = DEFAULT_PALETTE
 
 
-def apply(name):
-    """把指定主题的调色板写入模块级变量，并重套全部绑定样式。name: "light" / "dark"。"""
-    global _current
-    palette_ = _DARK if name == "dark" else _LIGHT
-    for key, value in palette_.items():
+def _merged(mode, palette_name):
+    """指定明暗 × 配色的完整调色板：neutral 模板 + 方案覆盖。"""
+    base = _DARK if mode == "dark" else _LIGHT
+    pal = _PALETTES.get(palette_name) or _PALETTES[DEFAULT_PALETTE]
+    overrides = pal["dark"] if mode == "dark" else pal["light"]
+    return {**base, **overrides}
+
+
+def apply(name, palette_name=DEFAULT_PALETTE):
+    """切换主题并重套全部绑定样式。
+
+    name: "light" / "dark"；palette_name: PALETTES 里的配色方案名
+    （未知值回退默认配色）。末尾同步刷新 BG_LIGHT 等「明暗两套一次写入」
+    常量——它们在 import 时固定，换配色后必须跟着更新，窗口背景与
+    通知条底色才能拿到新色调。
+    """
+    global _current, _current_palette
+    pal = _PALETTES.get(palette_name) or _PALETTES[DEFAULT_PALETTE]
+    palette_name = next(k for k, v in _PALETTES.items() if v is pal)
+    merged = _merged(name, palette_name)
+    for key, value in merged.items():
         globals()[key] = value
     _current = "dark" if name == "dark" else "light"
+    _current_palette = palette_name
+    light, dark = _merged("light", palette_name), _merged("dark", palette_name)
+    globals()["BG_LIGHT"] = light["BG"]
+    globals()["BG_DARK"] = dark["BG"]
+    globals()["INFOBAR_BG_LIGHT"] = light["INFOBAR_BG"]
+    globals()["INFOBAR_BG_DARK"] = dark["INFOBAR_BG"]
     _rebind_all()    # 即时换肤核心：重套所有 bind() 配方（无绑定时空转）
 
 
@@ -213,13 +406,13 @@ def _rebind_all():
 
 
 def palette(name):
-    """指定主题的调色板 dict（供一次写入明暗两套变色的接口取值）。"""
-    return _DARK if name == "dark" else _LIGHT
+    """当前配色下指定明暗的调色板 dict（name: "light" / "dark"）。"""
+    return _merged(name, _current_palette)
 
 
-def accent_of(name):
-    """指定主题的强调色（切换时先于 apply 交给 setThemeColor 用）。"""
-    return palette(name)["ACCENT"]
+def accent_of(name, palette_name=None):
+    """指定主题（可带目标配色）的强调色（切换时先于 apply 交给 setThemeColor 用）。"""
+    return _merged(name, palette_name or _current_palette)["ACCENT"]
 
 
 def is_dark():
@@ -228,6 +421,16 @@ def is_dark():
 
 def theme_name():
     return _current
+
+
+def palette_name():
+    """当前配色方案名（PALETTES 之一）。"""
+    return _current_palette
+
+
+def palette_labels():
+    """[(方案名, 显示名)] 有序列表（设置页下拉直接用）。"""
+    return [(k, _PALETTES[k]["label"]) for k in PALETTES]
 
 
 def font_stack(size, weight="400"):

@@ -216,7 +216,10 @@ DEFAULTS = {
         "key": "",             # SendKey / PushPlus token / 企业微信 webhook key
     },
     "appearance": {
-        "theme": "light",      # 界面主题：light 明亮（暖雾灰）/ dark 暗夜（暮色灰）
+        "theme": "light",      # 界面主题：light 明亮 / dark 暗夜
+        # 配色方案（背景色调，与明暗组合）：neutral 暖雾灰/sand 暖沙/moss 青瓷/
+        # mist 雾蓝/plum 藕荷；非法值由 load() 回退默认
+        "palette": "neutral",
     },
 }
 
@@ -417,6 +420,17 @@ def _norm_base_schedule_presets(acc):
     acc["base_schedule_presets"] = out
 
 
+def _norm_appearance(cfg):
+    """规范化 appearance：配色方案非法（手改/降级）时回退默认暖雾灰。"""
+    import theme
+    appearance = cfg.get("appearance")
+    if not isinstance(appearance, dict):
+        cfg["appearance"] = deepcopy(DEFAULTS["appearance"])
+        return
+    if appearance.get("palette") not in theme.PALETTES:
+        appearance["palette"] = theme.DEFAULT_PALETTE
+
+
 def load() -> dict:
     """读取配置；文件缺失/损坏/字段缺失时用默认值补齐。
 
@@ -451,6 +465,7 @@ def load() -> dict:
     for a in cfg.get("accounts") or []:
         if isinstance(a, dict):
             _norm_base_schedule_presets(a)
+    _norm_appearance(cfg)
     return cfg
 
 

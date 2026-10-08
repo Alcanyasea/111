@@ -121,6 +121,38 @@ class CollectTimesMigrationTest(unittest.TestCase):
         self.assertEqual(appconfig.load()["schedule"], cfg["schedule"])
 
 
+class AppearancePaletteTest(unittest.TestCase):
+    """appearance.palette（配色方案）的默认值与规范化。"""
+
+    def setUp(self):
+        self.root = Path(tempfile.mkdtemp())
+        self._old = appconfig.CONFIG_PATH
+        appconfig.CONFIG_PATH = self.root / "config.json"
+
+    def tearDown(self):
+        appconfig.CONFIG_PATH = self._old
+
+    def test_default_neutral(self):
+        self.assertEqual(appconfig.load()["appearance"]["palette"], "neutral")
+
+    def test_invalid_palette_falls_back(self):
+        appconfig.CONFIG_PATH.write_text(json.dumps({
+            "appearance": {"theme": "dark", "palette": "不存在的配色"},
+        }), encoding="utf-8")
+        cfg = appconfig.load()
+        self.assertEqual(cfg["appearance"]["palette"], "neutral")
+        self.assertEqual(cfg["appearance"]["theme"], "dark")   # 主题不受影响
+
+    def test_valid_palette_kept_and_roundtrip(self):
+        appconfig.CONFIG_PATH.write_text(json.dumps({
+            "appearance": {"theme": "dark", "palette": "sand"},
+        }), encoding="utf-8")
+        cfg = appconfig.load()
+        self.assertEqual(cfg["appearance"]["palette"], "sand")
+        appconfig.save(cfg)
+        self.assertEqual(appconfig.load()["appearance"], cfg["appearance"])
+
+
 class BaseSchedulePresetsTest(unittest.TestCase):
     """账号级 base_schedule_presets（基建排班预设，账号之间不互通）。"""
 

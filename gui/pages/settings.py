@@ -47,14 +47,14 @@ class SettingsPage(ScrollArea):
         root.setContentsMargins(12, 16, 12, 16)
         root.setSpacing(16)
 
-        # ---- 外观（明亮 / 暗夜）----
+        # ---- 外观（明暗主题 × 配色方案）----
         self.appearance_card = Card("外观")
         self.theme_combo = ComboBox()
-        self.theme_combo.addItems(["明亮（暖雾灰）", "暗夜（暮色灰）"])
-        self.theme_combo.setFixedWidth(180)
+        self.theme_combo.addItems(["明亮", "暗夜"])
+        self.theme_combo.setFixedWidth(140)
         self.theme_combo.setCurrentIndex(
             1 if (cfg.get("appearance") or {}).get("theme") == "dark" else 0)
-        self.theme_combo.currentIndexChanged.connect(self._on_theme_index)
+        self.theme_combo.currentIndexChanged.connect(self._on_appearance_changed)
         appear_row = QHBoxLayout()
         appear_row.setSpacing(10)
         appear_row.addWidget(_row_label("界面主题"))
@@ -65,6 +65,27 @@ class SettingsPage(ScrollArea):
         appear_row.addWidget(appear_hint)
         appear_row.addStretch(1)
         self.appearance_card.vbox.addLayout(appear_row)
+
+        # 配色方案（背景色调）：每个方案都有明 / 暗两套，与上面主题组合生效
+        self.palette_combo = ComboBox()
+        self._palette_items = theme.palette_labels()
+        for _name, label in self._palette_items:
+            self.palette_combo.addItem(label, userData=_name)
+        self.palette_combo.setFixedWidth(180)
+        cur = (cfg.get("appearance") or {}).get("palette") or theme.DEFAULT_PALETTE
+        idx = self.palette_combo.findData(cur)
+        self.palette_combo.setCurrentIndex(idx if idx >= 0 else 0)
+        self.palette_combo.currentIndexChanged.connect(self._on_appearance_changed)
+        palette_row = QHBoxLayout()
+        palette_row.setSpacing(10)
+        palette_row.addWidget(_row_label("配色方案"))
+        palette_row.addWidget(self.palette_combo)
+        palette_hint = BodyLabel("背景色调，与「界面主题」明暗两两组合；切换后立即生效")
+        theme.bind(palette_hint, lambda: "font-family: %s; font-size: 12px; color: %s;"
+                   % (theme.FONT_FAMILY, theme.TEXT_3))
+        palette_row.addWidget(palette_hint)
+        palette_row.addStretch(1)
+        self.appearance_card.vbox.addLayout(palette_row)
         self.appearance_card.vbox.addSpacing(10)
         root.addWidget(self.appearance_card)
 
@@ -273,15 +294,24 @@ class SettingsPage(ScrollArea):
 
         self.load_from_cfg()
 
-    def _on_theme_index(self, index):
-        """切换明亮/暗夜：回调成功后由主窗口整窗重建；被拒绝则回退下拉框。"""
-        name = "dark" if index == 1 else "light"
-        if (self.cfg.get("appearance") or {}).get("theme", "light") == name:
-            return
-        if self._on_theme_change is None or not self._on_theme_change(name):
+    def _on_appearance_changed(self, _index=None):
+        """明暗主题或配色方案变化：回调成功后由主窗口就地换肤；被拒绝则回退。"""
+        name = "dark" if self.theme_combo.currentIndex() == 1 else "light"
+        palette_name = self.palette_combo.currentData() or theme.DEFAULT_PALETTE
+        appearance = self.cfg.get("appearance") or {}
+        if (appearance.get("theme", "light") == name
+                and appearance.get("palette", theme.DEFAULT_PALETTE) == palette_name):
+            return   # 组合没变（另一行下拉触发）：不动
+        if self._on_theme_change is None or not self._on_theme_change(name, palette_name):
             self.theme_combo.blockSignals(True)
-            self.theme_combo.setCurrentIndex(0 if name == "dark" else 1)
+            self.palette_combo.blockSignals(True)
+            self.theme_combo.setCurrentIndex(
+                1 if appearance.get("theme", "light") == "dark" else 0)
+            idx = self.palette_combo.findData(
+                appearance.get("palette", theme.DEFAULT_PALETTE))
+            self.palette_combo.setCurrentIndex(idx if idx >= 0 else 0)
             self.theme_combo.blockSignals(False)
+            self.palette_combo.blockSignals(False)
 
     def _card_row(self, card, label, widget, hint=None):
         row = QHBoxLayout()
