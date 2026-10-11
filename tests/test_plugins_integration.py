@@ -101,8 +101,21 @@ class PluginsIntegrationTest(unittest.TestCase):
                          "--server", "official")
         self.assertEqual(code, 0, out)
         fights = [t for t in self._tasks() if t.get("$type") == "FightTask"]
-        self.assertEqual(fights[1].get("StagePlan"), ["1-7", "CE-6"])
+        # 1-7 固定保底：即使配置里写在最前，写入 MAA 时也规范到最后
+        self.assertEqual(fights[1].get("StagePlan"), ["CE-6", "1-7"])
         self.assertIs(fights[1].get("UseOptionalStage"), True)
+
+        # 历史配置没有 1-7：写入时自动在末尾追加保底
+        cfg = json.loads(self.cfg_path.read_text(encoding="utf-8"))
+        cfg["accounts"][0]["second_fight_plan"] = ["CE-6", "LS-6"]
+        self.cfg_path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2),
+                                 encoding="utf-8")
+        code, out = _run(PLUGIN_DIR / "fight_stage" / "fight_stage.py", "apply",
+                         "--config", str(self.cfg_path), "--account", "a1",
+                         "--server", "official")
+        self.assertEqual(code, 0, out)
+        fights = [t for t in self._tasks() if t.get("$type") == "FightTask"]
+        self.assertEqual(fights[1].get("StagePlan"), ["CE-6", "LS-6", "1-7"])
 
     def test_03_fiammetta(self):
         code, out = _run(PLUGIN_DIR / "fiammetta" / "fiammetta.py", "apply",

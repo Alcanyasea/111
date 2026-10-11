@@ -3,6 +3,7 @@
 
 先通过可滚动的下拉选择关卡，添加后每个候选以固定大小的标签显示在卡片里；
 标签可删除、可上移/下移调整顺序，「使用备选关卡」对应 MAA 的 UseAlternateStage。
+1-7 固定为保底关卡，永远排在候选最后（其他关卡未开放或没选其他关卡时兜底）；
 保存后写入 config.json，运行前由 plugins\\fight_stage 原样写回 MAA。
 """
 import json
@@ -44,6 +45,8 @@ PERMANENT_STAGE_OPTIONS = (
 # 顺序与显示名必须与 MAA 源码 AddPermanentStages / ParseActivityStages
 # 及其 zh-cn 本地化一致：显示名（如「龙门币-6/5」），保存的是关卡代号。
 PERMANENT_STAGE_CODES = tuple(value for _, value in PERMANENT_STAGE_OPTIONS)
+# 1-7 固定保底：永远排在候选最后，其他关卡未开放或没选其他关卡时兜底
+FALLBACK_STAGE = "1-7"
 PICKER_PLACEHOLDER = "选择要添加的关卡…"
 _available_cache = {}
 
@@ -262,7 +265,7 @@ class StagePlanDialog(QDialog):
         tb.setSpacing(2)
         tb.addWidget(_label("第二理智作战 · 候选关卡", "15px",
                             "TEXT", "600"))
-        tb.addWidget(_label("先选择关卡，添加后以固定标签显示，第一行最优先",
+        tb.addWidget(_label("新加的关卡排在最前；顺序即尝试顺序，末尾固定保底 1-7",
                             "12px", "TEXT_2"))
         self.source_lab = _label("", "11px", "TEXT_3", transparent=True)
         tb.addWidget(self.source_lab)
@@ -361,8 +364,11 @@ class StagePlanDialog(QDialog):
         plan = self.acc.get("second_fight_plan")
         if isinstance(plan, list) and len(plan) > 0:
             plan = [str(s).strip() for s in plan]
-            return plan, bool(self.acc.get("second_fight_use_optional", True))
-        return maa_second_fight_plan(self.cfg, self.server)
+            use_optional = bool(self.acc.get("second_fight_use_optional", True))
+        else:
+            plan, use_optional = maa_second_fight_plan(self.cfg, self.server)
+        # 1-7 是固定保底，不进用户选择列表（渲染时固定显示在最后）
+        return [s for s in plan if s != FALLBACK_STAGE], use_optional
 
     def _on_pick_stage(self):
         if self.picker.currentText() == PICKER_PLACEHOLDER:
@@ -371,9 +377,13 @@ class StagePlanDialog(QDialog):
         if not isinstance(stage, str):
             stage = self.picker.currentText()
         stage = str(stage)
+        if stage == FALLBACK_STAGE:
+            # 1-7 固定保底、永远在最后，无需重复添加
+            self.picker.setCurrentIndex(0)
+            return
         if self.optional_sw.isChecked():
             if stage not in self.selected:
-                self.selected.append(stage)
+                self.selected.insert(0, stage)
         else:
             # 不启用备选：只保留一个，直接替换
             self.selected = [stage]
@@ -384,8 +394,8 @@ class StagePlanDialog(QDialog):
     def _on_optional_toggled(self, checked):
         if not checked and len(self.selected) > 1:
             self.selected = self.selected[:1]
-            self._refresh_tags()
-            self._refresh_summary()
+        self._refresh_tags()
+        self._refresh_summary()
 
     def _move(self, index, delta):
         j = index + delta
@@ -402,7 +412,10 @@ class StagePlanDialog(QDialog):
             self._refresh_summary()
 
     def _chip(self, stage, index):
-        """固定高度的候选标签：序号 + 关卡名 + 上移/下移/删除。"""
+        """固定高度的候选标签：序号 + 关卡名 + 上移/下移/删除。
+
+        index 为 None 表示固定保底（1-7），只显示不可增删移。
+        """
         chip = QFrame()
         chip.setObjectName("stageTag")
         chip.setFixedHeight(40)
@@ -411,11 +424,18 @@ class StagePlanDialog(QDialog):
         lay = QHBoxLayout(chip)
         lay.setContentsMargins(10, 4, 6, 4)
         lay.setSpacing(6)
-        rank = _label("候选 %d" % (index + 1), "12px", "TEXT_2", "600")
+        rank = _label("保底" if index is None else "候选 %d" % (index + 1),
+                      "12px", "TEXT_2", "600")
         rank.setFixedWidth(52)
+        rank.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        if index is None:
+            rank.setToolTip("固定保底：前面的关卡未开放时最后刷 1-7")
         lay.addWidget(rank)
         name = _label(_stage_label(stage), "13px", "TEXT", "600", transparent=True)
         lay.addWidget(name)
+        if index is None:
+            lay.addStretch(1)
+            return chip
         lay.addStretch(1)
         for text, tip, fn in (("↑", "上移", lambda: self._move(index, -1)),
                               ("↓", "下移", lambda: self._move(index, 1)),
@@ -435,24 +455,25 @@ class StagePlanDialog(QDialog):
                 w.setParent(None)
                 w.deleteLater()
         if not self.selected:
-            empty = _label("还没有选择关卡，从上方下拉选择后点「添加候选关卡」",
+            empty = _label("还没选择其他关卡，只刷保底 1-7；从上方下拉选择后点「添加候选关卡」",
                            "12px", "TEXT_3", transparent=True)
             self.tags_layout.addWidget(empty)
-            self.tags_layout.addStretch(1)
-            return
+        # 用户关卡在前，末尾固定保底 1-7（最后一个条目 index 传 None）
+        entries = list(self.selected) + [FALLBACK_STAGE]
         # 每行两个固定格子：单个候选也占“两列中的一格”，和多个时大小一致
-        for i in range(0, len(self.selected), 2):
+        for i in range(0, len(entries), 2):
             row = QWidget()
             lay = QHBoxLayout(row)
             lay.setContentsMargins(0, 0, 0, 0)
             lay.setSpacing(10)
-            lay.addWidget(self._chip(self.selected[i], i), 1)
-            if i + 1 < len(self.selected):
-                lay.addWidget(self._chip(self.selected[i + 1], i + 1), 1)
-            else:
-                spacer = QWidget()
-                spacer.setMinimumHeight(1)
-                lay.addWidget(spacer, 1)
+            for j in (i, i + 1):
+                if j >= len(entries):
+                    spacer = QWidget()
+                    spacer.setMinimumHeight(1)
+                    lay.addWidget(spacer, 1)
+                    continue
+                idx = j if j < len(self.selected) else None
+                lay.addWidget(self._chip(entries[j], idx), 1)
             self.tags_layout.addWidget(row)
         self.tags_layout.addStretch(1)
 
@@ -502,16 +523,22 @@ class StagePlanDialog(QDialog):
         self._refresh_add_btn()
 
     def _refresh_summary(self):
-        if self.selected:
-            self.summary.setText("当前：%s" % format_stage_plan(self.selected))
+        if self.optional_sw.isChecked():
+            # 保存时会在末尾追加保底 1-7，摘要按最终生效的顺序显示
+            self.summary.setText("当前：%s"
+                                 % format_stage_plan(list(self.selected)
+                                                     + [FALLBACK_STAGE]))
         else:
-            self.summary.setText("当前：跟随 MAA 原设置")
+            first = self.selected[0] if self.selected else FALLBACK_STAGE
+            self.summary.setText("当前：%s（仅刷第一项）"
+                                 % format_stage_plan([first]))
 
     def _on_save(self):
-        plan = list(self.selected)
         use_optional = self.optional_sw.isChecked()
-        if not use_optional and len(plan) > 1:
-            plan = plan[:1]
+        if use_optional:
+            plan = list(self.selected) + [FALLBACK_STAGE]
+        else:
+            plan = [self.selected[0]] if self.selected else [FALLBACK_STAGE]
         self.acc["second_fight_plan"] = plan
         self.acc["second_fight_use_optional"] = use_optional
         appconfig.save(self.cfg)

@@ -4,6 +4,8 @@ r"""账号级第二理智作战候选关卡插件（写入 MAA 当前配置的�
 由 master.ps1 在启动每个账号的 MAA 前调用，按 config.json 中该账号的
 second_fight_plan（候选关卡列表）原样改写 MAA 当前配置（gui.new.json 的
 Current）里第二个理智作战任务的 StagePlan，与 MAA「候选关卡」一致。
+启用备选时 1-7 固定为保底关卡：规范化后强制排在候选最后（历史配置里没有
+也会追加），其他关卡未开放或没选其他关卡时由 MAA 兜底刷 1-7。
 列表为空时不调用本插件，保持 MAA 原设置。
 
 用法（由 master.ps1 调用）：
@@ -26,6 +28,10 @@ from common import (atomic_json_write as _atomic_json_write, find_account,
 
 def _log_file(cfg, msg):
     log_file(cfg, "理智关卡", msg)
+
+
+# 1-7 固定保底：启用备选时永远排在候选最后，其他关卡未开放时兜底
+FALLBACK_STAGE = "1-7"
 
 
 def apply_plan_to_maa(maa_dir, plan, use_optional=True):
@@ -84,6 +90,9 @@ def cmd_apply(args):
         print("SKIP second fight plan not configured")
         return 0
     use_optional = bool(acc.get("second_fight_use_optional", True))
+    if use_optional:
+        # 保底关卡去重后强制排最后（历史配置里写在中间/开头也会被规范）
+        plan = [s for s in plan if s != FALLBACK_STAGE] + [FALLBACK_STAGE]
 
     server = args.server or acc.get("server") or "official"
     maa_dir = _maa_dir(cfg, server)

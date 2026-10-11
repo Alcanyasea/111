@@ -266,7 +266,8 @@ def _migrate_accounts(cfg):
             a.setdefault("slot", "")
             a.setdefault("username", "")
             a.setdefault("password", "")
-            # 第二理智作战候选关卡（对应 MAA StagePlan 列表；空 = 跟随 MAA 原设置）
+            # 第二理智作战候选关卡（对应 MAA StagePlan 列表；空 = 跟随 MAA 原设置。
+            # 1-7 固定保底：保存/写入 MAA 时自动去重并排在最后）
             if not isinstance(a.get("second_fight_plan"), list):
                 legacy = a.pop("second_fight_stage", None)
                 if isinstance(legacy, list):
