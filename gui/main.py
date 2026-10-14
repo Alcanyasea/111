@@ -24,10 +24,11 @@ from PySide6.QtNetwork import QLocalServer, QLocalSocket
 
 from qfluentwidgets import (FluentIcon, FluentWindow, InfoBar, InfoBarIcon,
                             InfoBarManager, InfoBarPosition, MessageBox,
-                            PrimaryPushButton, PushButton, Theme, setTheme,
-                            setThemeColor)
+                            NavigationItemPosition, PrimaryPushButton,
+                            PushButton, Theme, setTheme, setThemeColor)
 
-from widgets import BusyStrip, style_button, style_primary_button
+from widgets import (BusyStrip, refresh_card_shadows, style_button,
+                     style_primary_button)
 
 import config as appconfig
 import theme
@@ -40,7 +41,7 @@ from pages.logs import LogsPage
 from pages.settings import SettingsPage
 from widgets import Pill
 
-PAGE_TITLES = ["仪表盘", "账号管理", "运行设置", "运行历史", "日志"]
+PAGE_TITLES = ["仪表盘", "账号管理", "运行历史", "日志", "运行设置"]
 
 # 当前主窗口引用（main() 里创建；主题切换就地换肤，不再重建窗口）
 _win = None
@@ -150,21 +151,23 @@ class HeaderBar(QWidget):
         # 外层纵向布局：上行是标题/按钮行，底边压一条运行光带（空闲时隐藏）
         outer = QVBoxLayout(self)
         outer.setContentsMargins(2, 6, 2, 0)
-        outer.setSpacing(5)
+        outer.setSpacing(6)
         lay = QHBoxLayout()
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(12)
         self.title = QLabel("仪表盘")
         theme.bind(self.title, lambda: "font-family: %s; %s color: %s;"
                    " background: transparent;"
-                   % (theme.FONT_FAMILY, theme.font_stack(24, "700"), theme.TEXT))
+                   % (theme.FONT_FAMILY, theme.font_stack(theme.FS_DISPLAY, "700"),
+                      theme.TEXT))
         lay.addWidget(self.title)
-        self.chip = Pill("空闲")
+        self.chip = Pill("空闲", dot=True)
         lay.addWidget(self.chip, 0, Qt.AlignmentFlag.AlignVCenter)
         self.detail = QLabel("")
         theme.bind(self.detail, lambda: "font-family: %s; %s color: %s;"
                    " background: transparent;"
-                   % (theme.FONT_FAMILY, theme.font_stack(12.5), theme.TEXT_2))
+                   % (theme.FONT_FAMILY, theme.font_stack(theme.FS_CAPTION),
+                      theme.TEXT_2))
         lay.addWidget(self.detail, 0, Qt.AlignmentFlag.AlignVCenter)
         lay.addStretch(1)
         self.stop_btn = style_button(PushButton("停止"))
@@ -182,15 +185,22 @@ class HeaderBar(QWidget):
             "手动运行一次完整挂机流程（启动模拟器 → 切号 → 跑 MAA → 关模拟器）。\n"
             "手动运行不会自动关机（无论成败）。")
         lay.addWidget(self.stop_btn)
+        lay.addSpacing(2)
         lay.addWidget(self.collect_btn)
+        lay.addSpacing(2)
         lay.addWidget(self.run_btn)
         outer.addLayout(lay)
         # 运行中的动态光带：通栏贴在页头底边，空闲时隐藏不占空间
         self.busy = BusyStrip(self)
         outer.addWidget(self.busy)
 
+    def set_narrow(self, narrow):
+        """窄窗口：隐藏页头状态说明文字，给右侧运行按钮让位（周期刷新原样保留）。"""
+        self.detail.setVisible(not narrow)
+
     def update_state(self, running, detail):
-        self.chip.set_state("run" if running else "ok", "运行中" if running else "空闲")
+        self.chip.set_state("run" if running else "ok",
+                            "运行中" if running else "空闲")
         self.detail.setText(detail)
         self.stop_btn.setEnabled(running)
         self.collect_btn.setEnabled(not running)
@@ -202,6 +212,12 @@ class HeaderBar(QWidget):
 
 
 class MainWindow(FluentWindow):
+    # __init__ 早期（设背景色等）就会触发 resizeEvent，此时实例属性尚未建好：
+    # 给默认值 + resizeEvent 里 getattr 防御，避免 AttributeError
+    _header_narrow = False
+    _content_margins = None
+    header = None
+
     def __init__(self):
         super().__init__()
         self.cfg = appconfig.load()
@@ -222,14 +238,18 @@ class MainWindow(FluentWindow):
         self._init_tray()
         self.setWindowTitle("MAA 挂机控制台")
         self.titleBar.setTitle("MAA 挂机控制台")
-        # 标题栏关闭按钮默认悬停是红色，统一改成黑/灰系
-        self.titleBar.closeBtn.setHoverBackgroundColor(QColor("#22252a"))
-        self.titleBar.closeBtn.setPressedBackgroundColor(QColor("#3a3f46"))
-        self.titleBar.closeBtn.setHoverColor(QColor("#ffffff"))
-        self.titleBar.closeBtn.setPressedColor(QColor("#ffffff"))
+        # 标题栏关闭按钮默认悬停是红色，统一改成黑/灰系（随明暗主题）
+        self._apply_close_btn_colors()
         self.resize(1180, 780)
+        # 缩放下限与固定双列配套：1000 时侧栏保持收起，内容区视口
+        # 912px ≥ 班次/收菜并排所需（~892px），所有页面完整显示不横向滚动
+        self.setMinimumSize(1000, 560)
         # 侧边栏收窄：能完整显示「仪表盘/账号管理/运行设置/日志」即可
         # （必须先设宽度再 expand，expand 时按 expandWidth 定宽）
+        # 侧栏自动展开门槛提到 1190（默认 1008）：窗口 < 1190 时侧栏保持
+        # 收起（48px），固定双列版式才有足够视口；≥1190 展开后（200px）
+        # 视口仍有 902px，同样放得下。只在菜单按钮上手动展开为浮层
+        self.navigationInterface.setMinimumExpandWidth(1190)
         self.navigationInterface.setExpandWidth(200)
         self.navigationInterface.expand(useAni=False)
 
@@ -245,11 +265,16 @@ class MainWindow(FluentWindow):
         self.settings_p.setObjectName("settings")
         self.history_p.setObjectName("history")
         self.logs_p.setObjectName("logs")
+        # 侧边栏分组：概览与账号在上，运行记录（历史/日志）居中，
+        # 低频的「运行设置」沉底 —— 与常见桌面应用导航一致
         self.addSubInterface(self.dash, FluentIcon.HOME, "仪表盘")
         self.addSubInterface(self.accounts_p, FluentIcon.PEOPLE, "账号管理")
-        self.addSubInterface(self.settings_p, FluentIcon.SETTING, "运行设置")
+        self.navigationInterface.addSeparator()
         self.addSubInterface(self.history_p, FluentIcon.HISTORY, "运行历史")
         self.addSubInterface(self.logs_p, FluentIcon.DOCUMENT, "日志")
+        self.navigationInterface.addSeparator(NavigationItemPosition.BOTTOM)
+        self.addSubInterface(self.settings_p, FluentIcon.SETTING, "运行设置",
+                             NavigationItemPosition.BOTTOM)
 
         # 在内容区顶部插入大标题页头（透明背景，与内容区留白分隔）。
         # 注意：标题栏是悬浮在窗口顶部的覆盖层，内容区必须留出 48px 上边距
@@ -257,8 +282,10 @@ class MainWindow(FluentWindow):
         # stackedWidget 原本在 widgetLayout 里，先摘出来再包进新容器。
         self.widgetLayout.removeWidget(self.stackedWidget)
         self.header = HeaderBar()
+        self._header_narrow = False
         right = QWidget()
         v = QVBoxLayout(right)
+        self._content_margins = v
         # 左右 44px 留白：卡片不贴窗口边，右侧还留出悬浮滚动条的位置
         v.setContentsMargins(44, 62, 44, 12)
         v.setSpacing(6)
@@ -296,6 +323,22 @@ class MainWindow(FluentWindow):
         self.poller.start()
         self.adb_poller.start()
         self.refresh_status()
+
+    def resizeEvent(self, event):
+        """窗口缩放：边距收窄 + 页头隐藏次级文字，保证窄窗内容完整可见。"""
+        super().resizeEvent(event)
+        w = self.width()
+        narrow = w < 960   # 页头按钮行放不下说明文字的宽度
+        if narrow != self._header_narrow:
+            self._header_narrow = narrow
+            if self.header is not None:
+                self.header.set_narrow(narrow)
+        margins = self._content_margins
+        if margins is not None:
+            # 边距档位与侧栏展开门槛对齐（1190）：展开态视口足够宽时才用
+            # 44px 大留白，收起态全程 20px，避免中段宽度视口回缩造成溢出
+            m = 44 if w >= 1190 else 20
+            margins.setContentsMargins(m, 62, m, 12)
 
     def _on_page_changed(self, index):
         if 0 <= index < len(PAGE_TITLES):
@@ -387,11 +430,6 @@ class MainWindow(FluentWindow):
 
     def _on_theme_change(self, name, palette_name=None):
         """运行设置页切换外观（明暗主题 × 配色方案）：保存配置后就地换肤。"""
-        if self.dash.update_running():
-            InfoBar.warning("MAA 更新进行中", "请等更新结束后再切换外观",
-                            parent=self, position=InfoBarPosition.TOP_RIGHT,
-                            duration=4000)
-            return False
         appearance = self.cfg.setdefault("appearance", {})
         appearance["theme"] = name
         if palette_name is not None:
@@ -416,6 +454,9 @@ class MainWindow(FluentWindow):
         setThemeColor(theme.accent_of(name, palette_name))
         theme.apply(name, palette_name or theme.palette_name())
         self.setCustomBackgroundColor(theme.BG_LIGHT, theme.BG_DARK)
+        self._apply_close_btn_colors()
+        # 投影色随背景色相派生：换配色后重建全部卡片特效
+        refresh_card_shadows()
         # qfluentwidgets 卡片（CardWidget 等）的背景色缓存在 backgroundColor
         # 属性里，且只在 themeChanged 时重读——setTheme 那一刻调色板还是旧值，
         # 所以 apply 之后要把这批控件的背景色再刷一次，否则慢一拍
@@ -425,6 +466,17 @@ class MainWindow(FluentWindow):
             w.update()
         self.dash.refresh()
         self.history_p.refresh()
+
+    def _apply_close_btn_colors(self):
+        """标题栏关闭按钮悬停/按下配色：明暗两套观感（替代 qfluentwidgets 默认红）。"""
+        if theme.is_dark():
+            hover_bg, press_bg = QColor("#3a4048"), QColor("#464d56")
+        else:
+            hover_bg, press_bg = QColor("#22252a"), QColor("#3a3f46")
+        self.titleBar.closeBtn.setHoverBackgroundColor(hover_bg)
+        self.titleBar.closeBtn.setPressedBackgroundColor(press_bg)
+        self.titleBar.closeBtn.setHoverColor(QColor("#ffffff"))
+        self.titleBar.closeBtn.setPressedColor(QColor("#ffffff"))
 
     def _maybe_auto_clean(self):
         """自动清理到期检查（每 2 秒轮询中顺带执行，判断本身是纯字符串比较）。
@@ -501,21 +553,7 @@ class MainWindow(FluentWindow):
         self._tray.setToolTip("MAA 挂机控制台 · " + ("运行中" if running else "空闲"))
 
     def closeEvent(self, event):
-        """关窗前收尾：更新线程先恢复配置再退，轮询线程停净，导出转后台。"""
-        if self.dash.update_running():
-            box = MessageBox(
-                "MAA 更新进行中",
-                "MAA 正在后台更新，现在退出会中止更新。\n\n"
-                "退出前会等更新流程恢复 MAA 配置并关闭 Clash（最多约半分钟），"
-                "确定退出吗？",
-                self)
-            box.yesButton.setText("仍要退出")
-            box.cancelButton.setText("继续更新")
-            if not box.exec():
-                event.ignore()
-                return
-            self.dash.request_update_stop()
-            self.dash.wait_update_worker(30000)
+        """关窗前收尾：轮询线程停净，导出与 token 自检转后台。"""
         for p in (self.poller, self.adb_poller):
             p.stop()
             # 不带超时：底层查询超时已压到 12 秒，等到位再退，
@@ -552,11 +590,6 @@ class MainWindow(FluentWindow):
         """基建收菜：逐个已启用账号收制造站/贸易站产物并自动换休宿舍，不碰班次计划。"""
         if runner.is_running():
             return
-        if self.dash.update_running():
-            InfoBar.warning("MAA 更新进行中", "请等更新结束后再收菜",
-                            parent=self, position=InfoBarPosition.TOP_RIGHT,
-                            duration=4000)
-            return
         if self.dash.export_running() or _export_threads_alive():
             InfoBar.warning("干员导出进行中", "导出正在占用模拟器，请等导出结束后再收菜",
                             parent=self, position=InfoBarPosition.TOP_RIGHT,
@@ -578,11 +611,6 @@ class MainWindow(FluentWindow):
         """账号详情里点了「导出干员资料」：互斥检查 + 确认后只导这一个号。"""
         if runner.is_running():
             InfoBar.warning("挂机运行中", "请先停止挂机再导出干员资料",
-                            parent=self, position=InfoBarPosition.TOP_RIGHT,
-                            duration=4000)
-            return
-        if self.dash.update_running():
-            InfoBar.warning("MAA 更新进行中", "更新会占用 MAA，请等更新结束后再导出",
                             parent=self, position=InfoBarPosition.TOP_RIGHT,
                             duration=4000)
             return
@@ -618,11 +646,6 @@ class MainWindow(FluentWindow):
         """
         if runner.is_running():
             InfoBar.warning("挂机运行中", "请先停止当前流程再切换账号",
-                            parent=self, position=InfoBarPosition.TOP_RIGHT,
-                            duration=4000)
-            return
-        if self.dash.update_running():
-            InfoBar.warning("MAA 更新进行中", "请等更新结束后再切换账号",
                             parent=self, position=InfoBarPosition.TOP_RIGHT,
                             duration=4000)
             return
@@ -664,11 +687,6 @@ class MainWindow(FluentWindow):
         """
         if runner.is_running():
             InfoBar.warning("流程运行中", "请先停止当前流程再快速启动账号",
-                            parent=self, position=InfoBarPosition.TOP_RIGHT,
-                            duration=4000)
-            return
-        if self.dash.update_running():
-            InfoBar.warning("MAA 更新进行中", "请等更新结束后再快速启动账号",
                             parent=self, position=InfoBarPosition.TOP_RIGHT,
                             duration=4000)
             return

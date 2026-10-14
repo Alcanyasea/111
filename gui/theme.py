@@ -10,7 +10,8 @@
 主窗口触发一次全量重画 / 页面刷新，读取的已是新调色板。
 
 立体感公式：背景深一档、卡片亮一档 + 发丝描边 + 柔和投影
-（投影参数在 widgets.Card.apply_shadow，两套主题共用）。
+（投影参数在 widgets.Card.apply_shadow，颜色由 card_shadow_color() 按
+当前背景色相派生：明亮 = 背景加深 70%，暗夜 = 纯黑加重）。
 """
 import weakref
 
@@ -19,20 +20,45 @@ import weakref
 # 字体：Windows 上最接近 SF Pro 的组合；中文回落微软雅黑
 FONT_FAMILY = '"Segoe UI Variable Text", "Segoe UI", "Microsoft YaHei UI", "PingFang SC", sans-serif'
 FONT_MONO = '"Cascadia Mono", Consolas, "Courier New", monospace'
+# 同一份等宽字体族的 QFont 版（QFont.setFamilies 不吃 QSS 栈串），
+# 给时间输入框、大数字这类「数据对齐」控件直接设字体用；末位带上泛型
+# monospace，与 QSS 栈串的回落行为完全一致
+FONT_MONO_FAMILIES = ["Cascadia Mono", "Consolas", "Courier New", "monospace"]
 
-# 圆角：卡片 12 / 按钮与输入 8 / 内嵌行 6（对应 macOS 12pt、8pt 层级）
+# 字号标尺：全套界面只允许出现这几档（半像素字号 12.5/14.5 渲染发虚，
+# 一并归档到相邻整数档）。数据数字（耗时/时间/版本）统一用 FONT_MONO，
+# 等宽数字天然按列对齐，比比例字体更像「控制台」。
+FS_DISPLAY = 24    # 页头大标题
+FS_TITLE = 16      # 账号名 / 弹窗主标题
+FS_SUBTITLE = 15   # 卡片标题
+FS_STAT = 22       # 仪表盘大数字（big_number）
+FS_STAT_SM = 20    # 键值行内嵌大数字
+FS_BODY = 13       # 正文 / 按钮
+FS_CAPTION = 12    # 辅注 / 键名 / 次要说明
+FS_MICRO = 11      # 徽章 / 列头 / 汇总微字
+
+# 圆角：卡片 12 / 按钮与输入 8 / 内嵌行 8（对应 macOS 12pt、8pt 层级）
 RADIUS_CARD = 12
 RADIUS_BTN = 8
-RADIUS_ROW = 6
+RADIUS_ROW = 8
 
 # 控件规格：macOS 常规按钮高度 32~36，输入框 30
 BTN_H = 34
 BTN_H_SM = 30
 INPUT_H = 32
 
-# 卡片内边距与卡片间距（8pt 栅格）
-CARD_PAD = 24
+# 卡片内边距与卡片间距（8pt 栅格）；PAD_SM 给账号卡等紧凑卡片用
+CARD_PAD = 20
+CARD_PAD_SM = 16
 GAP = 16
+
+# 间距标尺（8pt 栅格的半步）：行间距统一从这里取，避免各页自定数字漂移
+SPACE_1 = 4
+SPACE_2 = 8
+SPACE_3 = 12
+SPACE_4 = 16
+SPACE_5 = 20
+SPACE_6 = 24
 
 # 深色日志视图（两种主题下日志都保持深色终端观感）
 LOG_BG = "#14171c"
@@ -79,6 +105,7 @@ _LIGHT = {
     "BTN_BG_HOVER": "rgba(255, 255, 255, 0.78)",
     "BTN_BG_PRESSED": "rgba(255, 255, 255, 0.40)",
     "BTN_BORDER": "rgba(0, 0, 0, 0.10)",
+    "BTN_BORDER_HOVER": "rgba(0, 0, 0, 0.18)",
     "BTN_FG": "#2e2c29",
     "BTN_DISABLED_FG": "rgba(0, 0, 0, 0.28)",
     "BTN_DISABLED_BG": "rgba(255, 255, 255, 0.25)",
@@ -88,8 +115,6 @@ _LIGHT = {
     "PRIMARY_HOVER": "#6b665d", "PRIMARY_PRESSED": "#4a463f",
     "PRIMARY_DISABLED_BG": "rgba(90, 85, 77, 0.35)",
     "PRIMARY_DISABLED_FG": "rgba(255, 255, 255, 0.75)",
-    # 圆角数字徽章渐变
-    "BADGE_TOP": "#6b665c", "BADGE_BOTTOM": "#3a3733",
     # 通知条 / 弹窗描边
     "INFOBAR_BG": "#f0efeb",
     "POP_BORDER": "rgba(0, 0, 0, 0.10)",
@@ -123,6 +148,7 @@ _DARK = {
     "BTN_BG_HOVER": "rgba(255, 255, 255, 0.13)",
     "BTN_BG_PRESSED": "rgba(255, 255, 255, 0.05)",
     "BTN_BORDER": "rgba(255, 255, 255, 0.14)",
+    "BTN_BORDER_HOVER": "rgba(255, 255, 255, 0.22)",
     "BTN_FG": "#e7e9ec",
     "BTN_DISABLED_FG": "rgba(255, 255, 255, 0.28)",
     "BTN_DISABLED_BG": "rgba(255, 255, 255, 0.04)",
@@ -131,7 +157,6 @@ _DARK = {
     "PRIMARY_HOVER": "#a8b0b9", "PRIMARY_PRESSED": "#8a929c",
     "PRIMARY_DISABLED_BG": "rgba(154, 162, 172, 0.25)",
     "PRIMARY_DISABLED_FG": "rgba(32, 35, 39, 0.55)",
-    "BADGE_TOP": "#6a717b", "BADGE_BOTTOM": "#3f444b",
     "INFOBAR_BG": "#3a3e45",
     "POP_BORDER": "rgba(255, 255, 255, 0.10)",
     "SCROLLBAR_HANDLE": "rgba(255, 255, 255, 0.22)",
@@ -150,10 +175,14 @@ SIDEBAR_BG = "#20262e"
 #   everforest  Everforest Light/Medium —— 柔和森林绿，护眼暖米底
 #   nord        Nord Snow Storm/Polar Night —— 冷冽蓝灰，Aurora 四色点缀
 #   tokyonight  Tokyo Night Day/Night —— 深夜蓝紫与霓虹语义色
-# 每个方案只声明「色相敏感层」的覆盖：背景/卡片/文字/强调/主按钮/徽章/
+# 每个方案只声明「色相敏感层」的覆盖：背景/卡片/文字/强调/主按钮/
 # 通知条与语义状态色（成功绿/运行蓝/等待黄/失败红 随主题自带的色板走）；
 # 黑白透明度类的结构令牌（分隔线、ghost 按钮底、滚动条、发丝描边）沿用
 # neutral 明暗模板。ALERT 警示红保持全局唯一「必须人工处理」提醒不随配色变。
+#
+# 协调性约定：主按钮（PRIMARY_*）一律取方案自己的强调色（ACCENT），
+# 与开关、焦点环同色相 —— 界面上只出现一个「主色」；绿色只留给
+# OK（成功状态），红色只留给 ERR/ALERT（失败/警示），不做第二主色。
 
 _PALETTES = {
     "github": {
@@ -168,11 +197,10 @@ _PALETTES = {
             "RUN": "#0969da", "RUN_TINT": "#ddf4ff",
             "WAIT": "#9a6700", "WAIT_TINT": "#fff8c5",
             "ERR": "#d1242f", "ERR_TINT": "#ffebe9",
-            "PRIMARY_BG": "#1f883d", "PRIMARY_FG": "#ffffff",
-            "PRIMARY_HOVER": "#2da44e", "PRIMARY_PRESSED": "#1b6f37",
-            "PRIMARY_DISABLED_BG": "rgba(31, 136, 61, 0.35)",
+            "PRIMARY_BG": "#0969da", "PRIMARY_FG": "#ffffff",
+            "PRIMARY_HOVER": "#218bff", "PRIMARY_PRESSED": "#0a5cb8",
+            "PRIMARY_DISABLED_BG": "rgba(9, 105, 218, 0.35)",
             "PRIMARY_DISABLED_FG": "rgba(255, 255, 255, 0.75)",
-            "BADGE_TOP": "#4a7bc4", "BADGE_BOTTOM": "#1c3f77",
             "INFOBAR_BG": "#fbfcfd",
         },
         "dark": {
@@ -185,11 +213,10 @@ _PALETTES = {
             "RUN": "#4493f8", "RUN_TINT": "#102a42",
             "WAIT": "#d29922", "WAIT_TINT": "#2d2410",
             "ERR": "#f85149", "ERR_TINT": "#3c1614",
-            "PRIMARY_BG": "#238636", "PRIMARY_FG": "#ffffff",
-            "PRIMARY_HOVER": "#2ea043", "PRIMARY_PRESSED": "#1f6b2e",
-            "PRIMARY_DISABLED_BG": "rgba(35, 134, 54, 0.35)",
+            "PRIMARY_BG": "#2f81f7", "PRIMARY_FG": "#ffffff",
+            "PRIMARY_HOVER": "#4493f8", "PRIMARY_PRESSED": "#1f6feb",
+            "PRIMARY_DISABLED_BG": "rgba(47, 129, 247, 0.35)",
             "PRIMARY_DISABLED_FG": "rgba(255, 255, 255, 0.75)",
-            "BADGE_TOP": "#388bfd", "BADGE_BOTTOM": "#1158c7",
             "INFOBAR_BG": "#1c2431",
         },
     },
@@ -209,7 +236,6 @@ _PALETTES = {
             "PRIMARY_HOVER": "#4a7df7", "PRIMARY_PRESSED": "#154cc4",
             "PRIMARY_DISABLED_BG": "rgba(30, 102, 245, 0.35)",
             "PRIMARY_DISABLED_FG": "rgba(255, 255, 255, 0.75)",
-            "BADGE_TOP": "#7287fd", "BADGE_BOTTOM": "#3a49c0",
             "INFOBAR_BG": "#e9ecf2",
         },
         "dark": {
@@ -226,7 +252,6 @@ _PALETTES = {
             "PRIMARY_HOVER": "#9fb5f1", "PRIMARY_PRESSED": "#7899e4",
             "PRIMARY_DISABLED_BG": "rgba(140, 170, 238, 0.25)",
             "PRIMARY_DISABLED_FG": "rgba(35, 38, 52, 0.55)",
-            "BADGE_TOP": "#7986e3", "BADGE_BOTTOM": "#3b4585",
             "INFOBAR_BG": "#414559",
         },
     },
@@ -246,7 +271,6 @@ _PALETTES = {
             "PRIMARY_HOVER": "#9cae1b", "PRIMARY_PRESSED": "#7a8c0c",
             "PRIMARY_DISABLED_BG": "rgba(141, 161, 1, 0.35)",
             "PRIMARY_DISABLED_FG": "rgba(253, 246, 227, 0.75)",
-            "BADGE_TOP": "#a7b04a", "BADGE_BOTTOM": "#6b7327",
             "INFOBAR_BG": "#f4f0d9",
         },
         "dark": {
@@ -263,7 +287,6 @@ _PALETTES = {
             "PRIMARY_HOVER": "#b3cc8e", "PRIMARY_PRESSED": "#93ad6f",
             "PRIMARY_DISABLED_BG": "rgba(167, 192, 128, 0.25)",
             "PRIMARY_DISABLED_FG": "rgba(45, 53, 59, 0.55)",
-            "BADGE_TOP": "#7f9a55", "BADGE_BOTTOM": "#45532c",
             "INFOBAR_BG": "#3d484d",
         },
     },
@@ -283,7 +306,6 @@ _PALETTES = {
             "PRIMARY_HOVER": "#6f91b8", "PRIMARY_PRESSED": "#4f7097",
             "PRIMARY_DISABLED_BG": "rgba(94, 129, 172, 0.35)",
             "PRIMARY_DISABLED_FG": "rgba(255, 255, 255, 0.75)",
-            "BADGE_TOP": "#7b93ba", "BADGE_BOTTOM": "#3a4d68",
             "INFOBAR_BG": "#e9edf4",
         },
         "dark": {
@@ -300,7 +322,6 @@ _PALETTES = {
             "PRIMARY_HOVER": "#94cbdc", "PRIMARY_PRESSED": "#76aec0",
             "PRIMARY_DISABLED_BG": "rgba(136, 192, 208, 0.25)",
             "PRIMARY_DISABLED_FG": "rgba(46, 52, 64, 0.55)",
-            "BADGE_TOP": "#6d93b8", "BADGE_BOTTOM": "#3b5269",
             "INFOBAR_BG": "#404a5c",
         },
     },
@@ -320,7 +341,6 @@ _PALETTES = {
             "PRIMARY_HOVER": "#3a86f0", "PRIMARY_PRESSED": "#2568c4",
             "PRIMARY_DISABLED_BG": "rgba(46, 125, 233, 0.35)",
             "PRIMARY_DISABLED_FG": "rgba(255, 255, 255, 0.75)",
-            "BADGE_TOP": "#5b7fd4", "BADGE_BOTTOM": "#2c4a8f",
             "INFOBAR_BG": "#e6e8ef",
         },
         "dark": {
@@ -337,7 +357,6 @@ _PALETTES = {
             "PRIMARY_HOVER": "#89b4fa", "PRIMARY_PRESSED": "#6b90dd",
             "PRIMARY_DISABLED_BG": "rgba(122, 162, 247, 0.25)",
             "PRIMARY_DISABLED_FG": "rgba(26, 27, 38, 0.55)",
-            "BADGE_TOP": "#5d6fb0", "BADGE_BOTTOM": "#2d3354",
             "INFOBAR_BG": "#292e42",
         },
     },
@@ -462,6 +481,14 @@ def palette_name():
     return _current_palette
 
 
+def palette_preview(name):
+    """色卡预览：该配色明暗两套底色 + 主题色（不依赖当前主题状态）。"""
+    light = _merged("light", name)
+    dark = _merged("dark", name)
+    return {"light_bg": light["BG"], "dark_bg": dark["BG"],
+            "accent": light["ACCENT"]}
+
+
 def palette_labels():
     """[(方案名, 显示名)] 有序列表（设置页下拉直接用）。"""
     return [(k, _PALETTES[k]["label"]) for k in PALETTES]
@@ -470,6 +497,28 @@ def palette_labels():
 def font_stack(size, weight="400"):
     """QSS font 简写：font_stack(13, '600') → 'font-size: 13px; font-weight: 600;'。"""
     return "font-size: %spx; font-weight: %s;" % (size, weight)
+
+
+def mix(hex_a, hex_b, t):
+    """两个 '#rrggbb' 线性混合：t 为 hex_b 的占比（0~1），返回 '#rrggbb'。
+
+    给「在既有颜色上派生一档」用（如账号卡悬停底色 = CARD 混入 5% TEXT），
+    不引入色板之外的新颜色。
+    """
+    ca = tuple(int(hex_a[i:i + 2], 16) for i in (1, 3, 5))
+    cb = tuple(int(hex_b[i:i + 2], 16) for i in (1, 3, 5))
+    return "#%02x%02x%02x" % tuple(
+        round(a + (b - a) * t) for a, b in zip(ca, cb))
+
+
+def card_shadow_color():
+    """卡片投影色：明亮模式取当前背景色加深 70%（同色相深投影，投影不发
+    灰黑、随配色方案自然变化）；暗夜模式深底上带色投影不可见，用纯黑加重。
+    返回 (r, g, b, a)，Card.apply_shadow 每次重建特效时读取。"""
+    if is_dark():
+        return (0, 0, 0, 120)
+    r, g, b = (int(BG[i:i + 2], 16) for i in (1, 3, 5))
+    return (int(r * 0.30), int(g * 0.30), int(b * 0.30), 52)
 
 
 # 模块导入时先落一份明亮值，保证 import 期读取默认参数等场景不缺色；

@@ -50,15 +50,18 @@ class LogsPage(QWidget):
         self.filter_edit = LineEdit()
         self.filter_edit.setPlaceholderText("过滤关键字（留空显示全部）")
         self.filter_edit.setClearButtonEnabled(True)
-        self.filter_edit.setFixedWidth(220)
+        # 不钉死宽度：窄窗口时由布局压到最小 150，避免工具栏溢出换行
+        self.filter_edit.setMinimumWidth(150)
+        self.filter_edit.setMaximumWidth(220)
         self.filter_edit.textChanged.connect(self.refresh)
         bar.addStretch(1)
         bar.addWidget(self.filter_edit)
         autoscroll_label = BodyLabel("自动滚动")
         theme.bind(autoscroll_label,
-                   lambda: "color: %s; font-size: 12.5px;" % theme.TEXT_2)
-        self.autoscroll = set_switch_checked_gray(SwitchButton())
-        self.autoscroll.setChecked(True)
+                   lambda: "color: %s; %s"
+                   % (theme.TEXT_2, theme.font_stack(theme.FS_CAPTION)))
+        self.autoscroll = set_switch_checked_gray(SwitchButton(), "")
+        self.autoscroll.setChecked(True)   # 文案留空：开关含义由旁边标签说明
         bar.addWidget(autoscroll_label)
         bar.addWidget(self.autoscroll)
         root.addLayout(bar)
@@ -68,9 +71,10 @@ class LogsPage(QWidget):
         self.view.setReadOnly(True)
         self.view.setStyleSheet(
             "TextEdit { background: %s; color: %s;"
-            " font-family: %s; font-size: 12px; border-radius: %dpx;"
+            " font-family: %s; font-size: %spx; border-radius: %dpx;"
             " padding: 12px 14px; border: none; }"
-            % (theme.LOG_BG, theme.LOG_FG, theme.FONT_MONO, theme.RADIUS_CARD))
+            % (theme.LOG_BG, theme.LOG_FG, theme.FONT_MONO, theme.FS_CAPTION,
+               theme.RADIUS_CARD))
         root.addWidget(self.view, 1)
 
         self.refresh()

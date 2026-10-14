@@ -3,6 +3,8 @@
 from datetime import datetime
 from pathlib import Path
 
+from PySide6.QtCore import Qt, QPointF, QRectF, Signal
+from PySide6.QtGui import QColor, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import QFileDialog, QHBoxLayout, QVBoxLayout, QWidget
 
 from qfluentwidgets import (BodyLabel, ComboBox, InfoBar, InfoBarPosition,
@@ -24,10 +26,63 @@ PATH_KEYS = (
 
 def _row_label(text, width=96):
     lab = BodyLabel(text)
-    theme.bind(lab, lambda: "font-family: %s; font-size: 13px; color: %s;"
-               % (theme.FONT_FAMILY, theme.TEXT_2))
+    theme.bind(lab, lambda: "font-family: %s; %s color: %s;"
+               % (theme.FONT_FAMILY, theme.font_stack(theme.FS_BODY),
+                  theme.TEXT_2))
     lab.setFixedWidth(width)
     return lab
+
+
+class PaletteSwatch(QWidget):
+    """配色方案色卡：左半亮色底、右半暗色底、中间主题色圆点；选中画描边圈。
+
+    颜色每次绘制时从 theme.palette_preview 实时取（不随当前明暗切换变化，
+    色卡本身就是两套底色的并排预览）；主题切换后主窗口全量 update 会重画。
+    """
+    clicked = Signal()
+
+    def __init__(self, name, label, parent=None):
+        super().__init__(parent)
+        self.name = name
+        self._label = label
+        self._selected = False
+        self.setFixedSize(64, 40)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setToolTip(label)
+
+    def set_selected(self, on):
+        if on != self._selected:
+            self._selected = bool(on)
+            self.update()
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.clicked.emit()
+        super().mouseReleaseEvent(event)
+
+    def paintEvent(self, event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        r = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+        path = QPainterPath()
+        path.addRoundedRect(r, 8, 8)
+        pv = theme.palette_preview(self.name)
+        p.setClipPath(path)
+        w, h = r.width(), r.height()
+        p.fillRect(QRectF(r.left(), r.top(), w / 2, h), QColor(pv["light_bg"]))
+        p.fillRect(QRectF(r.left() + w / 2, r.top(), w / 2, h), QColor(pv["dark_bg"]))
+        p.setPen(QPen(Qt.PenStyle.NoPen))
+        p.setBrush(QColor(pv["accent"]))
+        p.drawEllipse(r.center(), 5, 5)
+        p.setClipping(False)
+        if self._selected:
+            p.setPen(QPen(QColor(theme.ACCENT), 2))
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.drawRoundedRect(r.adjusted(1, 1, -1, -1), 8, 8)
+        else:
+            p.setPen(QPen(QColor(*theme.HAIRLINE), 1))
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.drawRoundedRect(r, 8, 8)
 
 
 class SettingsPage(ScrollArea):
@@ -59,35 +114,58 @@ class SettingsPage(ScrollArea):
         appear_row.setSpacing(10)
         appear_row.addWidget(_row_label("界面主题"))
         appear_row.addWidget(self.theme_combo)
-        appear_hint = BodyLabel("切换后界面立即刷新；MAA 更新进行中暂不可切换")
-        theme.bind(appear_hint, lambda: "font-family: %s; font-size: 12px; color: %s;"
-                   % (theme.FONT_FAMILY, theme.TEXT_3))
+        appear_hint = BodyLabel("切换后界面立即刷新")
+        theme.bind(appear_hint, lambda: "font-family: %s; %s color: %s;"
+                   % (theme.FONT_FAMILY, theme.font_stack(theme.FS_CAPTION), theme.TEXT_3))
         appear_row.addWidget(appear_hint)
         appear_row.addStretch(1)
         self.appearance_card.vbox.addLayout(appear_row)
 
-        # 配色方案（背景色调）：每个方案都有明 / 暗两套，与上面主题组合生效
+        # 配色方案（背景色调）：每个方案都有明 / 暗两套，与上面主题组合生效。
+        # 用一排色卡直接预览选择（左亮右暗 + 主题色圆点）；下拉框保留为数据源
+        # （隐藏），选中/回退都走原有信号路径，色卡随 currentData 同步高亮
         self.palette_combo = ComboBox()
         self._palette_items = theme.palette_labels()
         for _name, label in self._palette_items:
             self.palette_combo.addItem(label, userData=_name)
-        self.palette_combo.setFixedWidth(180)
         cur = (cfg.get("appearance") or {}).get("palette") or theme.DEFAULT_PALETTE
         idx = self.palette_combo.findData(cur)
         self.palette_combo.setCurrentIndex(idx if idx >= 0 else 0)
         self.palette_combo.currentIndexChanged.connect(self._on_appearance_changed)
         palette_row = QHBoxLayout()
-        palette_row.setSpacing(10)
+        palette_row.setSpacing(12)
         palette_row.addWidget(_row_label("配色方案"))
-        palette_row.addWidget(self.palette_combo)
-        palette_hint = BodyLabel("背景色调，与「界面主题」明暗两两组合；切换后立即生效")
-        theme.bind(palette_hint, lambda: "font-family: %s; font-size: 12px; color: %s;"
-                   % (theme.FONT_FAMILY, theme.TEXT_3))
-        palette_row.addWidget(palette_hint)
+        self.palette_swatches = []
+        for _name, label in self._palette_items:
+            swatch = PaletteSwatch(_name, label)
+            swatch.clicked.connect(
+                lambda _=False, n=_name: self._pick_palette(n))
+            palette_row.addWidget(swatch)
+            self.palette_swatches.append(swatch)
         palette_row.addStretch(1)
         self.appearance_card.vbox.addLayout(palette_row)
+        # 提示独立成行（窄窗口下色卡行放不下，同行会把整卡撑出横向滚动）
+        palette_hint = BodyLabel("背景色调预览（左亮 / 右暗，圆点为主题色）；点击立即切换")
+        theme.bind(palette_hint, lambda: "font-family: %s; %s color: %s;"
+                   % (theme.FONT_FAMILY, theme.font_stack(theme.FS_CAPTION), theme.TEXT_3))
+        palette_hint.setWordWrap(True)
+        self.appearance_card.vbox.addSpacing(2)
+        self.appearance_card.vbox.addWidget(palette_hint)
         self.appearance_card.vbox.addSpacing(10)
         root.addWidget(self.appearance_card)
+        self._sync_palette_swatches()
+
+        # ---- 宽窗口双栏：左 = 程序路径 / 连接与超时 / 通知推送；
+        #      右 = 行为开关 / MAA 服务器配置 / 数据清理 / 保存。
+        #      窄窗口下各卡片本就是可压缩的行式布局，滚动区兜底 ----
+        cols = QHBoxLayout()
+        cols.setSpacing(16)
+        left_col = QVBoxLayout()
+        left_col.setContentsMargins(0, 0, 0, 0)
+        left_col.setSpacing(16)
+        right_col = QVBoxLayout()
+        right_col.setContentsMargins(0, 0, 0, 0)
+        right_col.setSpacing(16)
 
         # ---- 程序路径 ----
         self.path_card = Card("程序路径")
@@ -106,7 +184,7 @@ class SettingsPage(ScrollArea):
             self.path_card.vbox.addLayout(row)
             self.path_card.vbox.addSpacing(10)
             self.path_edits[key] = edit
-        root.addWidget(self.path_card)
+        left_col.addWidget(self.path_card)
 
         # ---- 连接与超时 / 行为开关：固定上下两张通栏卡片，不随宽度重排 ----
         self.conn_card = Card("连接与超时")
@@ -126,26 +204,26 @@ class SettingsPage(ScrollArea):
         self._card_row(self.conn_card, "更新等待上限", self.update_spin,
                        "分钟（干员导出前等待游戏更新的上限；挂机的更新等待内置于登录检查，上限 2 小时）")
         self.behavior_card = Card("行为开关")
-        self.close_emu_sw = set_switch_checked_gray(SwitchButton())
+        self.close_emu_sw = set_switch_checked_gray(SwitchButton(), "")
         self._card_row(self.behavior_card, "完成后关模拟器", self.close_emu_sw)
         update_hint = BodyLabel(
             "游戏更新等待已内置于登录检查：检测到更新界面/安装器只等待不点击，"
             "最长 2 小时；更新失败会立即判该号失败，不空跑")
-        theme.bind(update_hint, lambda: "color: %s; font-size: 12px;" % theme.TEXT_3)
+        theme.bind(update_hint, lambda: "color: %s; %s" % (theme.TEXT_3, theme.font_stack(theme.FS_CAPTION)))
         update_hint.setWordWrap(True)
         self.behavior_card.vbox.addWidget(update_hint)
         self.behavior_card.vbox.addSpacing(10)
         shutdown_hint = BodyLabel(
             "每个启动时间的「关机」开关在仪表盘「班次计划」中设置（60 秒倒计时）")
-        theme.bind(shutdown_hint, lambda: "color: %s; font-size: 12px;" % theme.TEXT_3)
+        theme.bind(shutdown_hint, lambda: "color: %s; %s" % (theme.TEXT_3, theme.font_stack(theme.FS_CAPTION)))
         shutdown_hint.setWordWrap(True)
         self.behavior_card.vbox.addWidget(shutdown_hint)
         self.behavior_card.vbox.addSpacing(10)
         acc_hint = BodyLabel("账号增删 / 启用 / 捕获请到「账号管理」页")
-        theme.bind(acc_hint, lambda: "color: %s; font-size: 12px;" % theme.TEXT_3)
+        theme.bind(acc_hint, lambda: "color: %s; %s" % (theme.TEXT_3, theme.font_stack(theme.FS_CAPTION)))
         self.behavior_card.vbox.addWidget(acc_hint)
-        root.addWidget(self.conn_card)
-        root.addWidget(self.behavior_card)
+        left_col.addWidget(self.conn_card)
+        right_col.addWidget(self.behavior_card)
 
         # ---- MAA 服务器配置 ----
         self.maa_setup_card = Card("MAA 服务器配置")
@@ -153,7 +231,7 @@ class SettingsPage(ScrollArea):
             "一键修正对应服务器 MAA 的关键配置（客户端类型 / ADB / 直接运行 / "
             "结束脚本 / 常用任务），目录缺失时自动从另一服复制一份。")
         hint.setWordWrap(True)
-        theme.bind(hint, lambda: "color: %s; font-size: 12px;" % theme.TEXT_3)
+        theme.bind(hint, lambda: "color: %s; %s" % (theme.TEXT_3, theme.font_stack(theme.FS_CAPTION)))
         self.maa_setup_card.vbox.addWidget(hint)
         self.maa_setup_card.vbox.addSpacing(10)
         setup_row = QHBoxLayout()
@@ -169,43 +247,7 @@ class SettingsPage(ScrollArea):
         setup_row.addStretch(1)
         self.maa_setup_card.vbox.addLayout(setup_row)
         self.maa_setup_card.vbox.addSpacing(10)
-        root.addWidget(self.maa_setup_card)
-
-        # ---- MAA 更新（一键更新按钮在仪表盘；这里只放 Clash 代理配置）----
-        self.upd_card = Card("MAA 更新")
-        upd_hint = BodyLabel(
-            "「仪表盘 → 一键更新」会依次更新两套 MAA（版本更新，由 MAA "
-            "启动时自动完成，资源随版本包到位）。更新前自动启动 Clash 并把 MAA 下载代理指向它，"
-            "全部结束后关闭 Clash 并恢复 MAA 原配置；更新前 Clash 已开着则复用，"
-            "不会主动关闭。挂机运行或 MAA 正在打开时不能更新。")
-        upd_hint.setWordWrap(True)
-        theme.bind(upd_hint, lambda: "color: %s; font-size: 12px;" % theme.TEXT_3)
-        self.upd_card.vbox.addWidget(upd_hint)
-        self.upd_card.vbox.addSpacing(10)
-        self.use_vpn_sw = set_switch_checked_gray(SwitchButton())
-        self._card_row(self.upd_card, "Clash 代理", self.use_vpn_sw,
-                       "关闭后 MAA 更新直连下载（不推荐，GitHub 直连不稳）")
-        self.vpn_edit = LineEdit()
-        self.vpn_edit.setClearButtonEnabled(False)
-        vpn_browse = style_button(PushButton("浏览…"), small=True)
-        vpn_browse.setFixedWidth(76)
-        vpn_browse.clicked.connect(self._browse_vpn)
-        vpn_row = QHBoxLayout()
-        vpn_row.setSpacing(10)
-        vpn_row.addWidget(_row_label("Clash 程序"))
-        vpn_row.addWidget(self.vpn_edit, 1)
-        vpn_row.addWidget(vpn_browse)
-        self.upd_card.vbox.addLayout(vpn_row)
-        self.upd_card.vbox.addSpacing(10)
-        self.port_spin = SpinBox()
-        self.port_spin.setRange(1024, 65535)
-        self._card_row(self.upd_card, "代理端口", self.port_spin,
-                       "Clash 混合端口（Clash Verge Rev 默认 7897）")
-        self.upd_timeout = SpinBox()
-        self.upd_timeout.setRange(5, 60)
-        self._card_row(self.upd_card, "更新超时", self.upd_timeout,
-                       "分钟（单套 MAA 下载+安装的等待上限）")
-        root.addWidget(self.upd_card)
+        right_col.addWidget(self.maa_setup_card)
 
         # ---- 通知推送 ----
         self.notify_card = Card("通知推送")
@@ -215,10 +257,10 @@ class SettingsPage(ScrollArea):
             "成功默认不推送，可开「成功也推送」收每轮极简汇总。"
             "无人值守（自动关机）场景下，失败不再只有本机弹窗。")
         notify_hint.setWordWrap(True)
-        theme.bind(notify_hint, lambda: "color: %s; font-size: 12px;" % theme.TEXT_3)
+        theme.bind(notify_hint, lambda: "color: %s; %s" % (theme.TEXT_3, theme.font_stack(theme.FS_CAPTION)))
         self.notify_card.vbox.addWidget(notify_hint)
         self.notify_card.vbox.addSpacing(10)
-        self.notify_sw = set_switch_checked_gray(SwitchButton())
+        self.notify_sw = set_switch_checked_gray(SwitchButton(), "")
         self._card_row(self.notify_card, "启用推送", self.notify_sw)
         self.notify_provider = ComboBox()
         self.notify_provider.addItems(
@@ -233,7 +275,7 @@ class SettingsPage(ScrollArea):
         key_row.addWidget(_row_label("推送密钥"))
         key_row.addWidget(self.notify_key, 1)
         self.notify_card.vbox.addLayout(key_row)
-        self.notify_success_sw = set_switch_checked_gray(SwitchButton())
+        self.notify_success_sw = set_switch_checked_gray(SwitchButton(), "")
         self._card_row(self.notify_card, "成功也推送", self.notify_success_sw,
                        "开启后全部账号成功也发一条极简汇总（班次 + 每号用时）")
         self.notify_card.vbox.addSpacing(10)
@@ -250,11 +292,11 @@ class SettingsPage(ScrollArea):
         test_row.addStretch(1)
         self.notify_card.vbox.addLayout(test_row)
         self.notify_card.vbox.addSpacing(10)
-        root.addWidget(self.notify_card)
+        left_col.addWidget(self.notify_card)
 
         # ---- 数据清理 ----
         self.clean_card = Card("数据清理")
-        self.clean_auto_sw = set_switch_checked_gray(SwitchButton())
+        self.clean_auto_sw = set_switch_checked_gray(SwitchButton(), "")
         self._card_row(self.clean_card, "自动清理", self.clean_auto_sw,
                        "控制台运行期间到期自动清理（挂机中不清理）")
         self.clean_interval = SpinBox()
@@ -269,10 +311,10 @@ class SettingsPage(ScrollArea):
         clean_row.addStretch(1)
         self.clean_card.vbox.addLayout(clean_row)
         self.clean_hint = BodyLabel("")
-        theme.bind(self.clean_hint, lambda: "color: %s; font-size: 12px;" % theme.TEXT_3)
+        theme.bind(self.clean_hint, lambda: "color: %s; %s" % (theme.TEXT_3, theme.font_stack(theme.FS_CAPTION)))
         self.clean_card.vbox.addWidget(self.clean_hint)
         self.clean_card.vbox.addSpacing(10)
-        root.addWidget(self.clean_card)
+        right_col.addWidget(self.clean_card)
 
         # ---- 保存 ----
         self.action_card = Card()
@@ -286,13 +328,36 @@ class SettingsPage(ScrollArea):
         bar.addWidget(reset_btn)
         bar.addStretch(1)
         hint = BodyLabel("保存后计划任务自动更新，无需重启")
-        theme.bind(hint, lambda: "color: %s; font-size: 12px;" % theme.TEXT_3)
+        theme.bind(hint, lambda: "color: %s; %s" % (theme.TEXT_3, theme.font_stack(theme.FS_CAPTION)))
         bar.addWidget(hint)
         self.action_card.vbox.addLayout(bar)
-        root.addWidget(self.action_card)
+        right_col.addWidget(self.action_card)
+        left_col.addStretch(1)
+        right_col.addStretch(1)
+        cols.addLayout(left_col, 1)
+        cols.addLayout(right_col, 1)
+        root.addLayout(cols)
         root.addStretch(1)
+        # 版式固定双列不随宽度重排：窗口最小宽度已由主窗口限制在
+        # 双列能完整显示的尺寸（见 MainWindow.setMinimumSize）
 
         self.load_from_cfg()
+
+    def _pick_palette(self, name):
+        """点色卡：切到对应配色（走下拉框同一信号路径）；已是当前值则只刷高亮。"""
+        idx = self.palette_combo.findData(name)
+        if idx < 0:
+            return
+        if idx != self.palette_combo.currentIndex():
+            self.palette_combo.setCurrentIndex(idx)
+        else:
+            self._sync_palette_swatches()
+
+    def _sync_palette_swatches(self):
+        """色卡高亮跟随下拉框当前值（切换被拒绝回退后也走这里复位）。"""
+        cur = self.palette_combo.currentData()
+        for sw in self.palette_swatches:
+            sw.set_selected(sw.name == cur)
 
     def _on_appearance_changed(self, _index=None):
         """明暗主题或配色方案变化：回调成功后由主窗口就地换肤；被拒绝则回退。"""
@@ -312,6 +377,7 @@ class SettingsPage(ScrollArea):
             self.palette_combo.setCurrentIndex(idx if idx >= 0 else 0)
             self.theme_combo.blockSignals(False)
             self.palette_combo.blockSignals(False)
+        self._sync_palette_swatches()
 
     def _card_row(self, card, label, widget, hint=None):
         row = QHBoxLayout()
@@ -320,9 +386,11 @@ class SettingsPage(ScrollArea):
         row.addWidget(widget, 0)
         if hint:
             h = BodyLabel(hint)
-            theme.bind(h, lambda: "color: %s; font-size: 12px;" % theme.TEXT_3)
-            row.addWidget(h)
-        row.addStretch(1)
+            h.setWordWrap(True)   # 双栏下卡片变窄，提示文字换行不裁字
+            theme.bind(h, lambda: "color: %s; %s" % (theme.TEXT_3, theme.font_stack(theme.FS_CAPTION)))
+            row.addWidget(h, 1)
+        else:
+            row.addStretch(1)
         card.vbox.addLayout(row)
         card.vbox.addSpacing(10)
 
@@ -338,11 +406,6 @@ class SettingsPage(ScrollArea):
         self.clean_auto_sw.setChecked(bool(c.get("auto", True)))
         self.clean_interval.setValue(int(c.get("interval_days", 7)))
         self._refresh_clean_hint()
-        u = source.get("maa_update") or {}
-        self.use_vpn_sw.setChecked(bool(u.get("use_vpn", True)))
-        self.vpn_edit.setText(str(u.get("vpn_exe", "")))
-        self.port_spin.setValue(int(u.get("proxy_port", 7897)))
-        self.upd_timeout.setValue(int(u.get("timeout_min", 15)))
         n = source.get("notify") or {}
         self.notify_sw.setChecked(bool(n.get("enabled", False)))
         self.notify_provider.setCurrentIndex(
@@ -379,11 +442,6 @@ class SettingsPage(ScrollArea):
         c = self.cfg.setdefault("cleanup", {})
         c["auto"] = self.clean_auto_sw.isChecked()
         c["interval_days"] = self.clean_interval.value()
-        u = self.cfg.setdefault("maa_update", {})
-        u["use_vpn"] = self.use_vpn_sw.isChecked()
-        u["vpn_exe"] = self.vpn_edit.text().strip()
-        u["proxy_port"] = self.port_spin.value()
-        u["timeout_min"] = self.upd_timeout.value()
         n = self.cfg.setdefault("notify", {})
         n["enabled"] = self.notify_sw.isChecked()
         n["provider"] = notify.PROVIDERS[self.notify_provider.currentIndex()]
@@ -579,12 +637,6 @@ class SettingsPage(ScrollArea):
             InfoBar.error("%s MAA 配置失败" % name, msg,
                           parent=self.window(),
                           position=InfoBarPosition.TOP_RIGHT, duration=8000)
-
-    def _browse_vpn(self):
-        path, _ = QFileDialog.getOpenFileName(
-            self, "选择 Clash 程序", "", "程序 (*.exe);;所有文件 (*.*)")
-        if path:
-            self.vpn_edit.setText(path)
 
     def _browse(self, key):
         path, _ = QFileDialog.getOpenFileName(

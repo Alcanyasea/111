@@ -16,13 +16,13 @@ from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (QHBoxLayout, QLabel, QListWidget,
                                QListWidgetItem, QVBoxLayout, QWidget)
 
-from qfluentwidgets import (BodyLabel, InfoBar, InfoBarPosition, MessageBox,
-                            PushButton)
+from qfluentwidgets import (BodyLabel, FluentIcon, InfoBar, InfoBarPosition,
+                            MessageBox, PushButton)
 
 import theme
 from core import runner
-from widgets import (Card, Pill, _label_transparent, hline, style_button,
-                     style_scroll_area)
+from widgets import (Card, Pill, _label_transparent, _rgba, empty_state,
+                     hline, style_button, style_scroll_area)
 
 MODE_LABELS = {"farm": "挂机", "collect": "收菜", "switch": "切号",
                "start": "快速启动"}
@@ -53,14 +53,15 @@ def _fmt_dur(mins):
     return "%g 分钟" % m
 
 
-def _label(text, size="13px", weight="400", color=None):
-    """主题色文本标签。color 传调色板令牌名（如 "TEXT_2"），
-    配方随主题切换自动重读；None = TEXT。"""
+def _label(text, size=None, weight="400", color=None, mono=False):
+    """主题色文本标签。size 缺省取字号标尺正文档；color 传调色板令牌名，
+    配方随主题切换自动重读；mono=True 用等宽字体（耗时等数据列对齐）。"""
     token = color if isinstance(color, str) else "TEXT"
     lab = QLabel(text)
-    theme.bind(lab, lambda: "font-family: %s; font-size: %s; font-weight: %s;"
+    theme.bind(lab, lambda: "font-family: %s; font-size: %spx; font-weight: %s;"
                " color: %s; background: transparent;"
-               % (theme.FONT_FAMILY, size, weight, getattr(theme, token)))
+               % (theme.FONT_MONO if mono else theme.FONT_FAMILY,
+                  size or theme.FS_BODY, weight, getattr(theme, token)))
     return lab
 
 
@@ -90,7 +91,8 @@ class HistoryPage(QWidget):
         bar.addWidget(clear_btn)
         bar.addStretch(1)
         hint = BodyLabel("每轮挂机结束自动记录 · 保留 60 天")
-        theme.bind(hint, lambda: "color: %s; font-size: 12px;" % theme.TEXT_3)
+        theme.bind(hint, lambda: "color: %s; %s"
+                   % (theme.TEXT_3, theme.font_stack(theme.FS_CAPTION)))
         bar.addWidget(hint)
         root.addLayout(bar)
 
@@ -100,15 +102,18 @@ class HistoryPage(QWidget):
         self.list = QListWidget()
         self.list.setFixedWidth(300)
         self.list.setVerticalScrollMode(QListWidget.ScrollMode.ScrollPerPixel)
+        # 选中态用强调色 14% 透明底：随配色方案走，比内嵌行底色对比清晰
         theme.bind(
             self.list,
             lambda: "QListWidget { background: %s; border: 1px solid %s;"
                     " border-radius: %dpx; padding: 6px; font-family: %s; }"
-                    "QListWidget::item { color: %s; padding: 9px 10px; margin: 2px 0;"
-                    " border-radius: 8px; }"
+                    "QListWidget::item { color: %s; padding: 10px 12px;"
+                    " margin: 2px 2px; border-radius: 8px; }"
+                    "QListWidget::item:hover { background: %s; }"
                     "QListWidget::item:selected { background: %s; color: %s; }"
                     % (theme.CARD, theme.BORDER, theme.RADIUS_CARD,
-                       theme.FONT_FAMILY, theme.TEXT, theme.ROW_INSET, theme.TEXT))
+                       theme.FONT_FAMILY, theme.TEXT,
+                       theme.BTN_BG, _rgba(theme.ACCENT, 0.14), theme.TEXT))
         self.list.currentItemChanged.connect(self._on_select)
         main.addWidget(self.list)
 
@@ -238,16 +243,19 @@ class HistoryPage(QWidget):
 
     def _show_detail(self, rec):
         self._clear_detail()
-        self.detail_card = Card()
         if rec is None:
-            tip = ("暂无运行记录，挂机/收菜结束后自动生成。"
-                   if self._records == [] else "在左侧选择一轮查看详情。")
-            empty = BodyLabel(tip)
-            theme.bind(empty, lambda: "color: %s; font-size: 13px;"
-                       " background: transparent;" % theme.TEXT_3)
-            self.detail_card.vbox.addWidget(empty)
-        else:
-            self._build_detail(rec)
+            # 空态：居中构图（图标 + 标题 + 辅注），区别于「有记录未选中」
+            self.detail_card = None
+            if self._records:
+                self.detail_slot.addWidget(
+                    empty_state("在左侧选择一轮查看详情", icon=FluentIcon.HISTORY))
+            else:
+                self.detail_slot.addWidget(
+                    empty_state("暂无运行记录", "挂机/收菜结束后自动生成",
+                                icon=FluentIcon.HISTORY))
+            return
+        self.detail_card = Card()
+        self._build_detail(rec)
         self.detail_slot.addWidget(self.detail_card)
 
     def _build_detail(self, rec):
@@ -257,7 +265,7 @@ class HistoryPage(QWidget):
             else "（%s班）" % rec["batch"]
         title = _label("%s → %s · %s%s" % (
             _fmt_dt(rec.get("start")), _fmt_dt(rec.get("end"), short=True),
-            mode, batch), size="15px", weight="600")
+            mode, batch), size=theme.FS_SUBTITLE, weight="600")
         box.addWidget(title)
         box.addSpacing(6)
 
@@ -276,7 +284,7 @@ class HistoryPage(QWidget):
             meta.addWidget(pill)
         dur = _fmt_dur(rec.get("total_min"))
         if dur:
-            meta.addWidget(_label(dur, size="12.5px", color="TEXT_2"))
+            meta.addWidget(_label(dur, mono=True, color="TEXT_2"))
         meta.addStretch(1)
         box.addLayout(meta)
         box.addSpacing(8)
@@ -307,16 +315,16 @@ class HistoryPage(QWidget):
         pill.set_state("wait" if skipped else ("ok" if ok else "fail"),
                        "跳过" if skipped else ("成功" if ok else "失败"))
         lay.addWidget(pill)
-        name = _label(str(a.get("name") or "—"), size="13px", weight="500")
+        name = _label(str(a.get("name") or "—"), size=theme.FS_BODY, weight="500")
         lay.addWidget(name)
         lay.addStretch(1)
         reason = str(a.get("reason") or "")
         if not ok and not skipped and reason:
-            tip = _label(reason, size="12px", color="ALERT")
+            tip = _label(reason, size=theme.FS_CAPTION, color="ALERT")
             lay.addWidget(tip)
         dur = _fmt_dur(a.get("dur_min"))
         if dur:
-            lay.addWidget(_label(dur, size="12px", color="TEXT_2"))
+            lay.addWidget(_label(dur, mono=True, color="TEXT_2"))
         return row
 
     # ---------- 操作 ----------

@@ -7,6 +7,8 @@ gui/.venv/
 
 # Local AI agent convention files (not distributed)
 AGENTS.md
+.agents/
+skills-lock.json
 
 # Local configuration (contains credentials)
 config.json

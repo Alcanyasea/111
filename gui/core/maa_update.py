@@ -1,58 +1,32 @@
 # -*- coding: utf-8 -*-
-"""一键更新 MAA（版本更新），两套 MAA 依次执行。
+"""打开 MAA 主程序（更新交给 MAA 自身）+ 版本号读取 + 更新中断残留恢复。
 
-资源更新不在此流程内：MAA 启动时会自动检查资源热更版本（内置 ResourceUpdater）
-但检查到新资源包不会自动下载，需要人工在 MAA 界面确认；tasks.json 等部分资源
-MAA 会自行自动更新，新活动素材随版本更新包一并到位。
+历史：控制台曾自带一套「开 Clash → 临时改 MAA 配置 → 启动 MAA → 盯日志
+驱动安装」的更新流程。MAA 6.18.0 起资源热更包改为启动时自动下载安装，
+与该流程的日志监听标记互相误判（把资源包下载当成版本包下载 → 反复强杀
+重启 → 15 分钟假超时， worst case 把正在应用资源包的 MAA 杀成「资源损坏」）。
+2026-10 起控制台不再驱动更新：MAA 自己的 CheckOnStartup / AutoDownload /
+AutoInstall 已开启，打开主程序即自动检查并安装更新（含资源热更）。
 
-原理：MAA 启动时按 gui.new.json 顶层 Update 块自动检查并安装更新
-（CheckOnStartup / AutoDownloadUpdatePackage / AutoInstallUpdatePackage），
-版本更新由 MAA 自己完成：原地升级、目录名不变、装完自动重启。
-MAA 是单实例程序（互斥锁），两套必须串行，不能同时开。
+本模块现在只负责三件事：
+- open_maa：打开一套 MAA 主程序；
+- 版本号读取（仪表盘「连接状态与 MAA」卡片的版本徽章）；
+- recover_all：旧版控制台更新中断残留的临时配置恢复（main.py 启动时调用，
+  防御从旧版本升级上来的场景——残留的 RunDirectly=false 会让每轮挂机超时）。
 
-GitHub 直连不稳，更新前先启动 Clash（Clash Verge Rev，配置在 config.json
-的 maa_update 节），并临时把 MAA 的 Update.Proxy 指向 Clash 混合端口，确保
-下载走代理；同时临时把 StartUpSettings.RunDirectly 置 false——否则 MAA 启动
-会直接连模拟器跑任务（RunDirectly 必须 true 是挂机流程的要求，更新完恢复）。
-全部结束后恢复 MAA 原配置。注意 MAA 退出时会回写 gui.new.json，所以恢复必须
-在 MAA 进程完全退出之后进行。
-
-若更新前 Clash 已在运行则复用，结束时不主动关闭；若是本次启动的，结束时
-关闭 Clash 并清理系统代理残留（Clash 被强杀后 ProxyEnable 可能残留，
-残留的失效代理会导致普通网页打不开）。
+MAA 是单实例程序（互斥锁）：两套不能同时开，后开的一套会立刻退出。
 """
 import ctypes
 import json
 import os
-import shutil
-import socket
 import subprocess
-import time
-import winreg
 from ctypes import wintypes
 from datetime import datetime
 from pathlib import Path
 
-from core import proc, runner
-from core.util import CREATE_NO_WINDOW, to_int
-from core.util import run as _run
+from core.util import CREATE_NO_WINDOW
 
 MAA_EXE = "MAA.exe"
-UPDATER_EXE = "MAA.Updater.exe"
-# Clash Verge Rev 的 mihomo 内核进程，结束 Clash 时一并清理
-CLASH_CORE_EXES = ("verge-mihomo.exe", "verge-mihomo-alpha.exe")
-CLASH_START_WAIT_SEC = 90   # Clash 启动后等代理端口就绪的上限
-INSTALL_SETTLE_SEC = 60     # 版本装完后等 MAA 重启与启动自检的宽限
-
-
-def _wait_until(fn, timeout):
-    """每 2 秒轮询 fn 直到为真或超时，返回是否等到。"""
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        if fn():
-            return True
-        time.sleep(2)
-    return False
 
 
 # ---------- 版本号 ----------
@@ -158,97 +132,35 @@ def version_rows(cfg):
     return rows
 
 
-# ---------- Clash（VPN）----------
+# ---------- 打开 MAA ----------
 
-def vpn_ready(port):
-    """Clash 混合端口是否就绪（TCP 可连即视为内核已起）。"""
-    try:
-        with socket.create_connection(("127.0.0.1", int(port)), timeout=1):
-            return True
-    except OSError:
-        return False
+def open_maa(cfg, key):
+    """打开指定一套 MAA 主程序（key: "official" / "bilibili"）。
 
+    更新完全由 MAA 自身完成：启动时按 gui.new.json 顶层 Update 块自动检查
+    并安装更新（CheckOnStartup / AutoDownloadUpdatePackage /
+    AutoInstallUpdatePackage），原地升级、装完自动重启。
 
-def vpn_start(cfg, log):
-    """启动 Clash 并等代理端口就绪。
-
-    返回 (started, ready)：started = 是否本次新启动（结束时需要关闭），
-    ready = 代理端口是否就绪。已在运行则复用，结束后不关它。
+    返回 (ok: bool, message: str)；调用方负责挂机互斥与「已在运行」提示。
     """
-    mu = cfg.get("maa_update") or {}
-    exe = str(mu.get("vpn_exe", "")).strip()
-    port = to_int(mu.get("proxy_port"), 7897)
-    if not exe or not Path(exe).is_file():
-        log("!! 找不到 Clash 程序：%s（请在「运行设置 → MAA 更新」里配置）"
-            % (exe or "未配置"))
-        return False, False
-    if proc.process_running(Path(exe).name):
-        log("Clash 已在运行，复用现有连接（更新结束后不会关闭它）")
-        if not _wait_until(lambda: vpn_ready(port), 20):
-            log("!! 代理端口 %d 未就绪，MAA 将尝试直连下载" % port)
-        return False, vpn_ready(port)
-    log("启动 Clash：%s" % exe)
-    try:
-        subprocess.Popen([exe], cwd=str(Path(exe).parent),
-                         creationflags=CREATE_NO_WINDOW)
-    except OSError as exc:
-        log("!! Clash 启动失败：%s" % exc)
-        return False, False
-    if not _wait_until(lambda: vpn_ready(port), CLASH_START_WAIT_SEC):
-        log("!! 等待 %d 秒后代理端口 %d 仍未就绪" % (CLASH_START_WAIT_SEC, port))
-        return True, False
-    log("Clash 代理端口 %d 已就绪" % port)
-    return True, True
-
-
-def vpn_stop(cfg, log):
-    """结束 Clash（GUI + mihomo 内核）并清理系统代理残留。"""
-    mu = cfg.get("maa_update") or {}
-    exe = str(mu.get("vpn_exe", "")).strip()
-    names = [Path(exe).name] if exe else []
-    names.extend(n for n in CLASH_CORE_EXES if n not in names)
-    log("关闭 Clash…")
-    for n in names:
-        _run(["taskkill", "/IM", n, "/F"])
-    # 等进程真正退出（内核还在监听时清系统代理会误伤）
-    _wait_until(lambda: not any(proc.process_running(n) for n in names), 10)
-    _clear_system_proxy(log)
-
-
-def _clear_system_proxy(log):
-    """关掉 Windows 系统代理（ProxyEnable=0）并通知系统刷新。
-
-    Clash 被强杀后系统代理设置可能残留，指向已关闭的 127.0.0.1 端口，
-    会导致关闭 VPN 后上不了网，这里兜底清理。只清理指向本机的代理：
-    用户手动配过指向别的机器的代理时不能顺手关掉。
-    """
-    try:
-        key = winreg.OpenKey(
-            winreg.HKEY_CURRENT_USER,
-            r"Software\Microsoft\Windows\CurrentVersion\Internet Settings",
-            0, winreg.KEY_READ | winreg.KEY_SET_VALUE)
+    for k, name, d in _maa_targets(cfg):
+        if k != key:
+            continue
+        if not d or not Path(d).is_dir():
+            return False, "%s MAA 目录未配置或不存在" % name
+        exe = Path(d) / MAA_EXE
+        if not exe.is_file():
+            return False, "找不到 %s" % exe
         try:
-            try:
-                server, _type = winreg.QueryValueEx(key, "ProxyServer")
-            except OSError:
-                server = ""
-            if server and not any(h in str(server).lower()
-                                  for h in ("127.0.0.1", "localhost")):
-                log("系统代理指向 %s（非本机 Clash），不清理" % server)
-                return
-            winreg.SetValueEx(key, "ProxyEnable", 0, winreg.REG_DWORD, 0)
-        finally:
-            key.Close()
-        wininet = ctypes.WinDLL("wininet")
-        wininet.InternetSetOptionW(None, 39, None, 0)  # SETTINGS_CHANGED
-        wininet.InternetSetOptionW(None, 37, None, 0)  # REFRESH
-        log("已清理系统代理残留")
-    except OSError as exc:
-        log("!! 清理系统代理失败：%s（如无法上网请到 系统设置→网络→代理 手动关闭）"
-            % exc)
+            subprocess.Popen([str(exe)], cwd=str(d),
+                             creationflags=CREATE_NO_WINDOW)
+        except OSError as exc:
+            return False, "启动 %s MAA 失败：%s" % (name, exc)
+        return True, "%s MAA 已打开" % name
+    return False, "未知的 MAA 标识：%s" % key
 
 
-# ---------- MAA 配置临时修改 ----------
+# ---------- 更新中断残留恢复 ----------
 
 def _read_json(path):
     return json.loads(Path(path).read_text(encoding="utf-8"))
@@ -260,19 +172,11 @@ def _write_json(path, data):
     os.replace(tmp, path)
 
 
-def _backup(path):
-    try:
-        shutil.copy2(path, Path(path).with_suffix(Path(path).suffix + ".bak"))
-    except OSError:
-        pass
-
-
-# 崩溃恢复标记：改 gui.new.json 前先把「原值快照」写进该标记，恢复成功后删除。
-# 控制台在更新途中被强杀/断电时，update_one 的 finally 恢复不会执行，残留的
-# RunDirectly=false 会让之后每轮挂机等 maa_done.signal 全部超时失败。控制台
-# 启动（main.py）与每次更新前（run_full_update）检测到标记即按快照自动复原。
-# 标记先于配置修改写入：强杀落在「标记已写、配置未改」的窗口时，恢复只是把
-# 原值原样写回（无副作用）；反过来先改配置就会留下无法察觉的残留。
+# 崩溃恢复标记：旧版控制台驱动式更新改 gui.new.json 前会把「原值快照」写进
+# 该标记，正常结束时删除。旧版在更新途中被强杀/断电时 finally 恢复不会执行，
+# 残留的 RunDirectly=false 会让之后每轮挂机等 maa_done.signal 全部超时失败。
+# 新版控制台不再改 MAA 配置，但启动（main.py）检测到旧版残留的标记仍会按
+# 快照自动复原，兼容从旧版本升级上来的场景。
 RECOVER_MARKER = "gui.new.json.update-recover"
 
 
@@ -289,39 +193,8 @@ def _master_log(cfg, msg):
         pass
 
 
-def _apply_update_config(maa_dir, proxy_url):
-    """临时改 gui.new.json：下载走代理、强制自动更新、暂停直接运行。
-
-    返回原值 dict（供结束后恢复）。更新前备份 .bak。
-    """
-    gui_new = Path(maa_dir) / "config" / "gui.new.json"
-    data = _read_json(gui_new)
-    _backup(gui_new)
-    update = data.setdefault("Update", {})
-    saved = {
-        "Proxy": update.get("Proxy", ""),
-        "ProxyType": update.get("ProxyType", "Http"),
-        "CheckOnStartup": update.get("CheckOnStartup", False),
-        "AutoDownloadUpdatePackage": update.get("AutoDownloadUpdatePackage", False),
-        "AutoInstallUpdatePackage": update.get("AutoInstallUpdatePackage", False),
-    }
-    update["Proxy"] = proxy_url
-    update["ProxyType"] = "Http"
-    update["CheckOnStartup"] = True
-    update["AutoDownloadUpdatePackage"] = True
-    update["AutoInstallUpdatePackage"] = True
-    conf = (data.get("Configurations") or {}).get(data.get("Current") or "Default")
-    if isinstance(conf, dict):
-        su = conf.setdefault("Gui", {}).setdefault("StartUpSettings", {})
-        saved["RunDirectly"] = su.get("RunDirectly", True)
-        su["RunDirectly"] = False   # 更新期间不要连模拟器跑任务
-    _write_json(Path(maa_dir) / "config" / RECOVER_MARKER, saved)
-    _write_json(gui_new, data)
-    return saved
-
-
 def _restore_update_config(maa_dir, saved):
-    """恢复 gui.new.json。必须在 MAA 进程退出后调用（否则会被回写覆盖）。"""
+    """按原值快照恢复 gui.new.json（MAA 进程须已退出，否则会被回写覆盖）。"""
     gui_new = Path(maa_dir) / "config" / "gui.new.json"
     try:
         data = _read_json(gui_new)
@@ -371,8 +244,8 @@ def recover_pending_update(maa_dir):
 def recover_all(cfg, log=None):
     """对两套 MAA 逐一做崩溃恢复。返回恢复的套数。
 
-    GUI 启动（main.py）与 run_full_update 开头调用：挂机流程要求 MAA 的
-    RunDirectly=true，残留不恢复则每轮挂机必超时失败。
+    GUI 启动（main.py）调用：挂机流程要求 MAA 的 RunDirectly=true，
+    旧版残留不恢复则每轮挂机必超时失败。
     """
     n = 0
     for _key, name, d in _maa_targets(cfg):
@@ -385,309 +258,6 @@ def recover_all(cfg, log=None):
                 if log:
                     log(msg)
                 _master_log(cfg, msg)
-        except Exception:  # 恢复失败不阻塞启动/更新，标记保留待下次再试
+        except Exception:  # 恢复失败不阻塞启动，标记保留待下次再试
             pass
     return n
-
-
-# ---------- 更新流程 ----------
-
-GUI_LOG = Path("debug") / "gui.log"
-# gui.log 里的关键节点（MAA 更新流程：启动检查 → 后台下载 → 下次启动安装）
-MARK_SUMMARY = "api/version/summary.json"      # 版本检查完成（无论有无更新都会拉）
-MARK_DOWNLOAD = "Start to download file from"  # 发现新版本，开始下载更新包
-MARK_DOWNLOADED = "Remove download temp file"  # 下载结束（成功或失败都清临时文件）
-MARK_PENDING = "Pending update package detected"  # 启动时检测到待安装更新包
-NO_UPDATE_GRACE_SEC = 30     # 版本检查完成且无下载动作后，再等的确认时间
-
-
-def _read_new_log_lines(path, offset):
-    """从 offset 起读取 gui.log 新增的完整行，返回 (新offset, 行列表)。
-
-    文件被轮转/重写（体积小于 offset，MAA 每次启动会把旧日志挪到 .bak）时从头读。
-    """
-    try:
-        if path.stat().st_size < offset:
-            offset = 0
-    except OSError:
-        return offset, []
-    try:
-        with open(path, "rb") as f:
-            f.seek(offset)
-            data = f.read()
-    except OSError:
-        return offset, []
-    if not data:
-        return offset, []
-    cut = data.rfind(b"\n")   # 只消费完整行，半行留给下次
-    if cut == -1:
-        return offset, []
-    return offset + cut + 1, data[:cut].decode("utf-8", errors="replace").splitlines()
-
-
-def _kill_maa(log):
-    """结束 MAA 主程序与更新器进程（强杀，不等待用户操作）。"""
-    if proc.process_running(MAA_EXE):
-        log("结束 MAA 进程…")
-        _run(["taskkill", "/IM", MAA_EXE, "/F"])
-    if proc.process_running(UPDATER_EXE):
-        _run(["taskkill", "/IM", UPDATER_EXE, "/F"])
-    _wait_until(lambda: not proc.process_running(MAA_EXE), 15)
-
-
-def _start_maa(exe, maa_dir, log):
-    try:
-        subprocess.Popen([str(exe)], cwd=str(maa_dir),
-                         creationflags=CREATE_NO_WINDOW)
-        return True
-    except OSError as exc:
-        log("!! 启动 MAA 失败：%s" % exc)
-        return False
-
-
-def _log_offset(log_path):
-    """日志快照：返回当前大小（文件不存在返回 0）。"""
-    try:
-        return Path(log_path).stat().st_size
-    except OSError:
-        return 0
-
-
-def _watch_maa(exe, maa_dir, old_ver, deadline, log, expect_download=False,
-               log_offset=None, cancel=None, latest=None):
-    """启动 MAA 并监控，直到得出结论。
-
-    返回 (new_ver, updater_seen, outcome)：
-    outcome = "updated"（版本已变） | "latest"（检查完无更新）
-            | "pending"（更新包已下载，需重启 MAA 安装） | "exited"（MAA 退出了）
-            | "cancelled"（收到取消请求） | "aborted"（检测到挂机启动，主动让路）
-    expect_download=True 时（第二阶段安装）不做 "latest" 判断，只等版本变化。
-    log_offset = 启动 MAA **之前**的日志快照：MAA 启动头几秒就会写版本检查/
-    残留包检测等关键行，快照晚于启动会把这些行漏在盲区里。
-    cancel = 取消检测回调（控制台退出时置位），命中即结束并走恢复流程。
-    """
-    maa_dir = Path(maa_dir)
-    log_path = maa_dir / GUI_LOG
-    offset = _log_offset(log_path) if log_offset is None else log_offset
-    started = time.time()
-    updater_seen = False
-    saw_summary = saw_download = downloaded = False
-    summary_at = 0.0
-    last_note = started
-    time.sleep(3)   # 等 MAA 进程真正起来，避免误判「提前退出」
-    while time.time() < deadline:
-        if cancel is not None and cancel():
-            log("收到取消请求，结束更新并恢复 MAA 配置…")
-            return None, updater_seen, "cancelled"
-        if runner.is_running():
-            # 更新要几分钟到十几分钟，期间计划任务可能到点拉起挂机；
-            # 挂机与更新抢 MAA/模拟器会互踩（_kill_maa 会误杀挂机的 MAA），
-            # 这里主动让路，finally 里的恢复逻辑保证 MAA 配置复原
-            log("检测到挂机流程已启动，中止更新以避免冲突")
-            return None, updater_seen, "aborted"
-        if not updater_seen and proc.process_running(UPDATER_EXE):
-            updater_seen = True
-            log("MAA.Updater 正在安装更新…")
-        v = file_version(exe)
-        if v and _looks_updated(v, old_ver, latest):
-            return v, updater_seen, "updated"
-        maa_up = proc.process_running(MAA_EXE)
-        upd_up = proc.process_running(UPDATER_EXE)
-        if not maa_up and not upd_up:
-            if downloaded:
-                return None, updater_seen, "pending"   # 下完还没装就退了
-            return None, updater_seen, "exited"
-        offset, lines = _read_new_log_lines(log_path, offset)
-        for line in lines:
-            if MARK_SUMMARY in line and not saw_summary:
-                saw_summary = True
-                summary_at = time.time()
-            elif MARK_DOWNLOAD in line and not saw_download:
-                saw_download = True
-                log("发现新版本，开始下载更新包…")
-            elif MARK_DOWNLOADED in line and saw_download and not downloaded:
-                downloaded = True
-                # 「Remove download temp file」成功失败都会打（失败也清临时文件），
-                # 这里只代表下载阶段结束，是否真的下载成功交给安装阶段验证
-                log("更新包下载阶段结束，等待安装（若下载失败会在安装时暴露）")
-            elif MARK_PENDING in line and not downloaded:
-                downloaded = True   # 启动即安装残留包的场景
-        if saw_summary and not saw_download and not expect_download \
-                and time.time() - summary_at > NO_UPDATE_GRACE_SEC:
-            return None, updater_seen, "latest"
-        if saw_download and downloaded:
-            return None, updater_seen, "pending"
-        if time.time() - last_note >= 60:
-            last_note = time.time()
-            log("更新进行中…（已等待 %d 分钟）" % int((time.time() - started) // 60))
-        time.sleep(3)
-    return None, updater_seen, "timeout"
-
-
-def _looks_updated(v, old_ver, latest):
-    """版本 v 是否足以判定「更新成功」。
-
-    old_ver 读到了就直接比较；启动前读不到旧版本时（文件被占用等），
-    必须确认超过缓存的最新版本才算——否则 MAA 一启动读到任意版本
-    都会被误判成「已更新」，报出「版本 ? → x」的假成功。
-    两个基准都拿不到时宁可不算成功，交给 updater_seen 等信号兜底。
-    """
-    if old_ver is not None:
-        return _ver_gt(v, old_ver)
-    if latest is not None:
-        return _ver_gt(v, latest)
-    return False
-
-
-def update_one(name, maa_dir, proxy_url, timeout_min, log,
-               cancel=None, _is_retry=False):
-    """更新一套 MAA。返回 (ok: bool, message: str)。
-
-    MAA 的版本更新分两跳：启动时检查并后台下载更新包（不立即安装），下次
-    启动检测到待安装包才交给 MAA.Updater 原地安装并自动重启。因此下载完成后
-    要把 MAA 重启一次触发安装。资源热更包 MAA 只检查不下载（需在 MAA 界面
-    人工确认），资源随版本更新包与 tasks.json 自动更新到位，见模块说明。
-    """
-    maa_dir = Path(maa_dir)
-    exe = maa_dir / MAA_EXE
-    if not exe.is_file():
-        return False, "找不到 %s" % exe
-    old_ver = file_version(exe)
-    latest = latest_version(maa_dir)
-    log("当前版本：%s；缓存最新版本：%s" % (old_ver or "未知", latest or "未知"))
-    if old_ver and latest and not _ver_gt(latest, old_ver):
-        log("版本已是最新，仍启动一次检查版本更新")
-
-    try:
-        saved = _apply_update_config(maa_dir, proxy_url)
-    except (OSError, json.JSONDecodeError) as exc:
-        return False, "修改 gui.new.json 失败：%s" % exc
-
-    ok, msg = False, ""
-    try:
-        deadline = time.time() + timeout_min * 60
-        log("启动 MAA 检查更新…")
-        offset = _log_offset(maa_dir / GUI_LOG)   # 启动前快照，防关键行落在盲区
-        if not _start_maa(exe, maa_dir, log):
-            return False, "启动 MAA 失败"
-        new_ver, updater_seen, outcome = _watch_maa(
-            exe, maa_dir, old_ver, deadline, log, log_offset=offset,
-            cancel=cancel, latest=latest)
-
-        if outcome == "pending":
-            # 下载完成但没装（MAA 装更新靠下次启动），重启触发安装
-            _kill_maa(log)
-            log("重启 MAA 安装已下载的更新…")
-            # 安装阶段重新计时：下载可能已用掉大半预算，否则装到一半被判超时
-            deadline = time.time() + timeout_min * 60
-            offset = _log_offset(maa_dir / GUI_LOG)
-            if not _start_maa(exe, maa_dir, log):
-                return False, "重启 MAA 安装更新失败"
-            new_ver, updater_seen, outcome = _watch_maa(
-                exe, maa_dir, old_ver, deadline, log, expect_download=True,
-                log_offset=offset, cancel=cancel, latest=latest)
-
-        if new_ver:
-            log("版本已更新到 %s，等待 MAA 自动重启与启动自检…" % new_ver)
-            _wait_until(lambda: not proc.process_running(UPDATER_EXE), 180)
-            _wait_until(lambda: proc.process_running(MAA_EXE), 120)
-            time.sleep(INSTALL_SETTLE_SEC)
-            ok = True
-            msg = "版本 %s → %s" % (old_ver or "?", new_ver)
-        elif outcome == "latest":
-            ok = True
-            msg = "已是最新（版本 %s）" % (file_version(exe) or old_ver or "?")
-        elif outcome == "cancelled":
-            ok = False
-            msg = "已取消（收到退出请求）"
-        elif outcome == "aborted":
-            ok = False
-            msg = "检测到挂机流程启动，更新已中止（MAA 配置已恢复）"
-        elif outcome == "exited":
-            if updater_seen:
-                # 装过更新包但没等到版本变化（如资源增量包），MAA 装完即退
-                _wait_until(lambda: not proc.process_running(UPDATER_EXE), 180)
-                ok = True
-                msg = "更新流程完成（版本 %s）" % (file_version(exe) or old_ver or "?")
-            else:
-                # 没见到 Updater 就退出：大概率更新包下载失败（成功失败都打同一条日志）
-                ok = False
-                msg = "MAA 提前退出，未执行更新（很可能是下载失败，请重试或手动更新）"
-        elif updater_seen:
-            # 装过更新包但版本号没变化（如资源增量包）
-            _wait_until(lambda: not proc.process_running(UPDATER_EXE), 180)
-            ok = True
-            msg = "更新流程完成（版本 %s）" % (file_version(exe) or old_ver or "?")
-        else:
-            ok = False
-            msg = "更新超时（%d 分钟），请稍后重试或手动打开 MAA 更新" % timeout_min
-    finally:
-        _kill_maa(log)
-        _restore_update_config(maa_dir, saved)
-
-    # MAA「提前退出」大概率是更新包下载失败（成功失败都会打同一条日志），
-    # 自动原样重试一次；取消/中止/超时不重试，避免成倍拉长等待
-    if not ok and not _is_retry and ("提前退出" in msg or "下载失败" in msg):
-        log("第一次更新未成功，自动重试一次…")
-        return update_one(name, maa_dir, proxy_url, timeout_min, log,
-                          cancel=cancel, _is_retry=True)
-    return ok, msg
-
-
-def run_full_update(cfg, log, cancel=None):
-    """一键更新两套 MAA（串行）。返回 (ok: bool, summary: str)，log 为逐行回调。
-
-    cancel = 取消检测回调（控制台退出前置位）；另外每套 MAA 更新途中都会
-    检测挂机锁（计划任务可能到点拉起 master.ps1），检测到即中止并恢复配置。
-    """
-    if runner.is_running():
-        return False, "挂机正在运行，请先停止挂机再更新 MAA"
-    if proc.process_running(MAA_EXE):
-        return False, "MAA 正在打开，请先关闭 MAA 窗口再更新"
-
-    recover_all(cfg, log)   # 上次更新强杀残留的临时配置，更新前先复原
-
-    mu = cfg.get("maa_update") or {}
-    timeout_min = to_int(mu.get("timeout_min"), 15)
-    port = to_int(mu.get("proxy_port"), 7897)
-    proxy_url = "http://127.0.0.1:%d" % port
-    use_vpn = bool(mu.get("use_vpn", True))
-    started_vpn = False
-
-    def _cancelled():
-        return cancel is not None and cancel()
-
-    results = []
-    ok_all = True
-    try:
-        if _cancelled():
-            return False, "已取消（收到退出请求）"
-        if use_vpn:
-            started_vpn, ready = vpn_start(cfg, log)
-            if started_vpn and not ready:
-                return False, "Clash 启动后代理端口未就绪，已取消更新"
-            if not ready:
-                log("!! 无可用代理，MAA 将直连下载（可能较慢或失败）")
-        for _key, name, mdir in _maa_targets(cfg):
-            if _cancelled():
-                results.append("%s：已取消" % name)
-                ok_all = False
-                continue
-            if not mdir or not Path(mdir).is_dir():
-                results.append("%s：MAA 目录未配置或不存在" % name)
-                ok_all = False
-                continue
-            log("")
-            log("======== %s MAA ========" % name)
-            try:
-                ok, msg = update_one(name, Path(mdir), proxy_url, timeout_min, log,
-                                     cancel=cancel)
-            except Exception as exc:  # 单套异常不影响另一套与收尾
-                ok, msg = False, "更新过程异常：%s" % exc
-            log("结果：%s" % msg)
-            results.append("%s %s" % (name, msg))
-            ok_all = ok_all and ok
-    finally:
-        if started_vpn:
-            vpn_stop(cfg, log)
-    return ok_all, "；".join(results)

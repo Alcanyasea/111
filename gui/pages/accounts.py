@@ -22,9 +22,10 @@ from PySide6.QtWidgets import (QApplication, QDialog, QGraphicsDropShadowEffect,
                                QGraphicsOpacityEffect, QGridLayout, QHBoxLayout,
                                QLabel, QPlainTextEdit, QVBoxLayout, QWidget)
 
-from qfluentwidgets import (BodyLabel, ComboBox, InfoBar, InfoBarPosition,
-                            LineEdit, MessageBox, PrimaryPushButton, PushButton,
-                            ScrollArea, SubtitleLabel, SwitchButton)
+from qfluentwidgets import (BodyLabel, ComboBox, FluentIcon, InfoBar,
+                            InfoBarPosition, LineEdit, MessageBox,
+                            PrimaryPushButton, PushButton, ScrollArea,
+                            SubtitleLabel, SwitchButton)
 
 import config as appconfig
 import theme
@@ -32,15 +33,15 @@ from core import runner, token_check
 from core.poller import FuncWorker
 from core.util import CREATE_NO_WINDOW, decode_console, pwsh_exe
 from pages.stage_plan_dialog import show_stage_plan_dialog
-from widgets import (Card, IconBadge, Pill, _label_transparent,
-                     set_switch_checked_gray, style_button,
+from widgets import (Card, IconBadge, Pill, _label_transparent, dark_log_qss,
+                     empty_state, set_switch_checked_gray, style_button,
                      style_primary_button, style_scroll_area,
                      style_tinted_button)
 
 # ---- 拖动排序的版式与节奏（数值参考 SortableJS / react-beautiful-dnd）----
 GRID_COLS = 2          # 每行 2 张卡片
 GRID_SPACING = 20      # 卡片间距（px）
-CARD_MIN_H = 86        # 卡片最小高度，实际取内容高度
+CARD_MIN_H = 96        # 卡片最小高度，实际取内容高度（名字 + 元信息两行后略增）
 MOVE_MS = 150          # 其他卡片让位动画时长（SortableJS 默认 150ms）
 DROP_MS = 170          # 松手落位动画时长（按距离微调）
 AUTOSCROLL_ZONE = 54   # 拖到上下边缘这个范围内开始自动滚动
@@ -211,7 +212,8 @@ class CaptureDialog(QDialog):
             row = QHBoxLayout()
             row.setSpacing(10)
             lab = BodyLabel(label_text)
-            theme.bind(lab, lambda: "color: %s; font-size: 13px;" % theme.TEXT_2)
+            theme.bind(lab, lambda: "color: %s; %s"
+                       % (theme.TEXT_2, theme.font_stack(theme.FS_BODY)))
             lab.setFixedWidth(64)
             row.addWidget(lab)
             row.addWidget(widget, 1)
@@ -245,11 +247,7 @@ class CaptureDialog(QDialog):
 
         self.log_view = QPlainTextEdit()
         self.log_view.setReadOnly(True)
-        self.log_view.setStyleSheet(
-            "QPlainTextEdit { background: %s; color: %s; font-family: %s;"
-            " font-size: 12px; border: none; border-radius: %dpx;"
-            " padding: 12px 14px; }"
-            % (theme.LOG_BG, theme.LOG_FG, theme.FONT_MONO, theme.RADIUS_CARD))
+        self.log_view.setStyleSheet(dark_log_qss())
         self.log_view.setMinimumHeight(220)
         root.addWidget(self.log_view, 1)
 
@@ -288,7 +286,7 @@ class CaptureDialog(QDialog):
     def _hint_qss(self):
         color = {"err": theme.ERR, "ok": theme.OK}.get(self._hint_state,
                                                        theme.TEXT_3)
-        return "color: %s; font-size: 12px;" % color
+        return "color: %s; %s" % (color, theme.font_stack(theme.FS_CAPTION))
 
     def _set_hint(self, text, state="normal"):
         """改提示文案与配色（normal 灰 / err 红 / ok 绿），主题切换后按状态重套。"""
@@ -344,7 +342,7 @@ class CaptureDialog(QDialog):
         if self._closing:
             return
         if code == 0:
-            self._append_log(">>> 捕获成功！点击关闭返回列表。")
+            self._append_log(">>> 捕获成功。点击关闭返回列表。")
             self._apply_result()
             InfoBar.success("捕获成功", "登录数据已保存到槽位",
                             parent=self.window(), position=InfoBarPosition.TOP_RIGHT,
@@ -453,19 +451,22 @@ class AccountDetailDialog(QDialog):
         root.setContentsMargins(20, 18, 20, 16)
         root.setSpacing(14)
 
-        # 头部：名称 + 服务器/槽位 + UID 状态
+        # 头部：序号圆标（真实运行顺序，此前写死 "1"）+ 名称 + 服务器/槽位 + UID 状态
         server = acc.get("server", "official")
         head = QHBoxLayout()
         head.setSpacing(12)
-        head.addWidget(IconBadge("1"))
+        try:
+            head.addWidget(IconBadge(str(self.cfg["accounts"].index(acc) + 1)))
+        except (ValueError, KeyError, AttributeError):
+            pass   # 账号已不在列表（极端时序）：徽章可缺，详情照常打开
         name_box = QVBoxLayout()
         name_box.setSpacing(2)
         name = SubtitleLabel(acc.get("label") or "?")
         _label_transparent(name)
         meta = BodyLabel("%s · 槽位 %s" % (SERVER_LABELS.get(server, server),
                                            acc.get("slot", "未设置")))
-        theme.bind(meta, lambda: "color: %s; font-size: 12px;"
-                   " background: transparent;" % theme.TEXT_2)
+        theme.bind(meta, lambda: "color: %s; %s background: transparent;"
+                   % (theme.TEXT_2, theme.font_stack(theme.FS_CAPTION)))
         name_box.addWidget(name)
         name_box.addWidget(meta)
         head.addLayout(name_box)
@@ -480,8 +481,8 @@ class AccountDetailDialog(QDialog):
         root.addWidget(line)
 
         sec = BodyLabel("常用功能")
-        theme.bind(sec, lambda: "color: %s; font-size: 13px; font-weight: 600;"
-                   " background: transparent;" % theme.TEXT_2)
+        theme.bind(sec, lambda: "color: %s; %s background: transparent;"
+                   % (theme.TEXT_2, theme.font_stack(theme.FS_BODY, "600")))
         root.addWidget(sec)
 
         grid = QGridLayout()
@@ -515,8 +516,8 @@ class AccountDetailDialog(QDialog):
         order_row = QHBoxLayout()
         order_row.setSpacing(10)
         order_lab = BodyLabel("运行顺序")
-        theme.bind(order_lab, lambda: "color: %s; font-size: 12.5px;"
-                   " background: transparent;" % theme.TEXT_2)
+        theme.bind(order_lab, lambda: "color: %s; %s background: transparent;"
+                   % (theme.TEXT_2, theme.font_stack(theme.FS_CAPTION)))
         order_row.addWidget(order_lab)
         self.up_btn = style_button(PushButton("↑ 上移"), small=True)
         self.up_btn.setToolTip("与上一个账号交换位置（运行顺序 = 列表顺序）")
@@ -532,8 +533,8 @@ class AccountDetailDialog(QDialog):
             "导出干员资料点上方按钮，立即导这一个号（与挂机互斥）。"
             "运行顺序 = 账号列表顺序，列表里按住卡片（或账号名）拖到目标位置即可调整。")
         self.hint.setWordWrap(True)
-        theme.bind(self.hint, lambda: "color: %s; font-size: 12px;"
-                   " background: transparent;" % theme.TEXT_3)
+        theme.bind(self.hint, lambda: "color: %s; %s background: transparent;"
+                   % (theme.TEXT_3, theme.font_stack(theme.FS_CAPTION)))
         root.addWidget(self.hint)
         root.addStretch(1)
 
@@ -572,7 +573,7 @@ class AccountDetailDialog(QDialog):
         if uid:
             self.uid_pill.set_state("ok", "已捕获 UID %s" % uid)
         else:
-            self.uid_pill.set_state("warn", "未捕获")
+            self.uid_pill.set_state("wait", "未捕获")
 
     def _on_capture(self):
         dlg = CaptureDialog(self.cfg, self.acc, page=self.page, parent=self)
@@ -641,7 +642,14 @@ class CardGridArea(QWidget):
 
 class AccountCard(Card):
     """两列网格中的账号卡片：表面只放「精确基建 / 启用」两个开关，
-    点击名字可直接改名，点击卡片空白处打开详细控制界面。"""
+    点击名字可直接改名，点击卡片空白处打开详细控制界面。
+
+    卡片整张可点击（开详情），所以悬停给一档「 CARD 混入 5% 文字色」的
+    提亮反馈——可点击的表面必须有悬停态，否则不知道能点。
+    """
+
+    def _hoverBackgroundColor(self):
+        return QColor(theme.mix(theme.CARD, theme.TEXT, 0.05))
 
     def __init__(self, cfg, acc, index, page=None, parent=None):
         super().__init__(parent=parent)
@@ -656,10 +664,11 @@ class AccountCard(Card):
         self._dragging = False    # 正在被拖动（拖动期间卡片透明，拖影跟着鼠标）
         server = acc.get("server", "official")
         self.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.vbox.setContentsMargins(12, 12, 12, 12)
+        self.vbox.setContentsMargins(theme.CARD_PAD_SM, theme.CARD_PAD_SM - 2,
+                                     theme.CARD_PAD_SM, theme.CARD_PAD_SM)
 
         row = QHBoxLayout()
-        row.setSpacing(8)
+        row.setSpacing(10)
         self.badge = IconBadge(str(index + 1))
         row.addWidget(self.badge)
         self.name_box = QVBoxLayout()
@@ -667,14 +676,22 @@ class AccountCard(Card):
         self.name_label = ClickLabel(acc.get("label") or "?")
         theme.bind(self.name_label,
                    lambda: "QLabel { background: transparent; color: %s;"
-                           " font-size: 20px; font-weight: 600; }" % theme.TEXT)
-        self.name_label.setToolTip(
-            "点击修改账号名称\n%s · 槽位 %s"
-            % (SERVER_LABELS.get(server, server), acc.get("slot", "未设置")))
+                           " %s }" % (theme.TEXT,
+                                      theme.font_stack(theme.FS_TITLE, "600")))
+        self.name_label.setToolTip("点击修改账号名称")
         self.name_label.setCursor(Qt.CursorShape.PointingHandCursor)
         self.name_label.clicked.connect(self._start_rename)
         self.name_label.drag_target = self   # 按住名字拖动也能调整顺序
         self.name_box.addWidget(self.name_label)
+        # 第二行：服务器 · 槽位元信息（此前只藏在 tooltip 里）
+        self.meta_label = QLabel("%s · 槽位 %s"
+                                 % (SERVER_LABELS.get(server, server),
+                                    acc.get("slot") or "未设置"))
+        theme.bind(self.meta_label,
+                   lambda: "QLabel { background: transparent; color: %s;"
+                           " %s }" % (theme.TEXT_2,
+                                      theme.font_stack(theme.FS_CAPTION)))
+        self.name_box.addWidget(self.meta_label)
         row.addLayout(self.name_box)
         row.addStretch(1)
 
@@ -697,6 +714,7 @@ class AccountCard(Card):
         self.sw.checkedChanged.connect(self._on_toggle)
         row.addWidget(self.sw, 0, Qt.AlignmentFlag.AlignVCenter)
         self.vbox.addLayout(row)
+        self.vbox.addSpacing(8)
 
         # 捕获状态（UID）在左（跟在名字下方，属账号元信息），
         # 「快速启动」在右：与顶行开关同一条右缘操作轴
@@ -722,7 +740,7 @@ class AccountCard(Card):
         if uid:
             self.uid_pill.set_state("ok", "已捕获 UID %s" % uid)
         else:
-            self.uid_pill.set_state("warn", "未捕获")
+            self.uid_pill.set_state("wait", "未捕获")
 
     # ---- 拖动排序：拖影、预览排列与落位动画都由 AccountsPage 负责 ----
     def set_index(self, index):
@@ -919,8 +937,8 @@ class AccountsPage(ScrollArea):
         bar.addWidget(self.add_btn)
         bar.addStretch(1)
         order_hint = BodyLabel("按住卡片（或账号名）拖动：其他账号会让位预览，松手即调整运行顺序")
-        theme.bind(order_hint, lambda: "color: %s; font-size: 12.5px;"
-                   " background: transparent;" % theme.TEXT_2)
+        theme.bind(order_hint, lambda: "color: %s; %s background: transparent;"
+                   % (theme.TEXT_2, theme.font_stack(theme.FS_CAPTION)))
         bar.addWidget(order_hint)
         action.vbox.addLayout(bar)
         root.addWidget(action)
@@ -928,9 +946,10 @@ class AccountsPage(ScrollArea):
         # 卡片区：绝对定位 + 动画，故不使用布局管理器
         self.grid_area = CardGridArea(self)
         self.grid_area.setFixedHeight(0)
-        self.empty_label = BodyLabel("暂无账号，点击上方「添加账号」开始。")
-        theme.bind(self.empty_label, lambda: "color: %s; font-size: 13px;"
-                   " background: transparent;" % theme.TEXT_3)
+        # 空态：居中构图（图标 + 标题 + 辅注）替代一行灰字；
+        # 属性名沿用 empty_label，relayout 的按 sizeHint 定位逻辑不变
+        self.empty_label = empty_state(
+            "暂无账号", "点击上方「添加账号」开始", icon=FluentIcon.PEOPLE)
         self.empty_label.setParent(self.grid_area)
         self.empty_label.hide()
         root.addWidget(self.grid_area)
@@ -1272,5 +1291,6 @@ class AccountsPage(ScrollArea):
         self.move_account(index, target + 1 if target > index else target)
 
     def resizeEvent(self, event):
-        """不做响应式重排：固定两列，窗口过窄时由横向滚动兜底。"""
+        """版式固定每行 2 张不随宽度重排：窗口最小宽度已由主窗口限制在
+        双列能完整显示的尺寸（见 MainWindow.setMinimumSize）。"""
         super().resizeEvent(event)
