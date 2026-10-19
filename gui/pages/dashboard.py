@@ -233,6 +233,7 @@ class ScheduleCard(Card):
         self._row_widgets = []
         self._edits = {}
         self._apply_worker = None   # 计划任务同步的后台线程（改完行立即生效）
+        self._apply_pending = False  # 同步期间又改过配置：结束后再同步一次
 
         # 列标题：与下方每行控件同宽对齐（44 班次 / 68 时间 / 75 启用 / 75 关机 / 110 账号 / 56 操作）；
         # 边距与行内边距一致（左右 10）、间距与行 spacing 一致（8），两列才严格对齐
@@ -375,18 +376,30 @@ class ScheduleCard(Card):
     def _sort_entries(self):
         self._entries().sort(key=lambda e: e.get("time", ""))
 
-    def _apply(self):
-        appconfig.save(self.cfg)
-        # 计划任务同步（Register/Set-ScheduledTask）会卡 1~40 秒，必须后台跑：
-        # 配置已保存，界面行不变，任务更新完成后回填提示与「下次运行」
-        if self._apply_worker is not None and self._apply_worker.isRunning():
-            return   # 上一次同步还没完：配置已落盘，由它按最新配置重试即可
+    def _start_apply_worker(self):
         self.add_btn.setEnabled(False)
         self._apply_worker = poller.SchedulerApplyWorker(self.cfg, self)
         self._apply_worker.done.connect(self._on_apply_done)
         self._apply_worker.start()
 
+    def _apply(self):
+        appconfig.save(self.cfg)
+        # 计划任务同步（Register/Set-ScheduledTask）会卡 1~40 秒，必须后台跑：
+        # 配置已保存，界面行不变，任务更新完成后回填提示与「下次运行」
+        if self._apply_worker is not None and self._apply_worker.isRunning():
+            # 上一次同步用的是提交时的配置快照；这次改动记 pending，
+            # 等它结束后按最新配置再同步一次，不能直接丢掉
+            self._apply_pending = True
+            return
+        self._start_apply_worker()
+
     def _on_apply_done(self, ok, msg, info):
+        if self._apply_pending:
+            self._apply_pending = False
+            # done 在 run() 末尾发出，此时旧 worker 的工作已结束（线程可能
+            # 尚未完全退出），直接起新 worker，不要再走 isRunning 判断
+            self._start_apply_worker()
+            return
         self.add_btn.setEnabled(True)
         if info is not None:
             self.refresh_scheduler(info)
@@ -561,6 +574,7 @@ class CollectScheduleCard(Card):
         self._row_widgets = []
         self._edits = {}
         self._apply_worker = None   # 计划任务同步的后台线程（改完行立即生效）
+        self._apply_pending = False  # 同步期间又改过配置：结束后再同步一次
 
         # 列标题：与下方每行控件同宽对齐（68 时间 / 75 启用 / 75 关机 / 56 操作）；
         # 边距与行内边距一致（左右 10）、间距与行 spacing 一致（8）
@@ -685,18 +699,26 @@ class CollectScheduleCard(Card):
     def _sort_entries(self):
         self._entries().sort(key=lambda e: e.get("time", ""))
 
-    def _apply(self):
-        appconfig.save(self.cfg)
-        # 计划任务同步（Register/Set-ScheduledTask）会卡 1~40 秒，必须后台跑；
-        # 上一次同步还没完时配置已落盘，由它按最新配置重试即可
-        if self._apply_worker is not None and self._apply_worker.isRunning():
-            return
+    def _start_apply_worker(self):
         self.add_btn.setEnabled(False)
         self._apply_worker = poller.SchedulerApplyWorker(self.cfg, self, collect=True)
         self._apply_worker.done.connect(self._on_apply_done)
         self._apply_worker.start()
 
+    def _apply(self):
+        appconfig.save(self.cfg)
+        # 计划任务同步（Register/Set-ScheduledTask）会卡 1~40 秒，必须后台跑；
+        # 上一次同步还没完时记 pending，结束后按最新配置再同步
+        if self._apply_worker is not None and self._apply_worker.isRunning():
+            self._apply_pending = True
+            return
+        self._start_apply_worker()
+
     def _on_apply_done(self, ok, msg, info):
+        if self._apply_pending:
+            self._apply_pending = False
+            self._start_apply_worker()
+            return
         self.add_btn.setEnabled(True)
         if info is not None:
             self.refresh_scheduler(info)

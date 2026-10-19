@@ -91,6 +91,7 @@ class SettingsPage(ScrollArea):
         self.cfg = cfg
         self._on_theme_change = on_theme_change
         self._apply_worker = None    # 计划任务同步后台线程（保存后）
+        self._apply_pending = False  # 同步期间又保存过：结束后再同步一次
         self._setup_worker = None    # MAA 服务器配置后台线程（可能复制整套目录）
         self._notify_worker = None   # 测试推送后台线程（HTTP 最长十几秒）
         self.view = QWidget()
@@ -467,15 +468,27 @@ class SettingsPage(ScrollArea):
                             position=InfoBarPosition.TOP_RIGHT, duration=6000)
         # 计划任务同步（1~40 秒）放后台，保存动作本身立即完成
         if self._apply_worker is not None and self._apply_worker.isRunning():
+            # 上一次同步用的是提交时的配置快照；这次保存记 pending，
+            # 等它结束后按最新配置再同步一次
+            self._apply_pending = True
             InfoBar.info("上一次计划任务同步仍在进行", "配置已保存，稍后自动按新配置同步",
                          parent=self.window(), position=InfoBarPosition.TOP_RIGHT,
                          duration=5000)
             return
+        self._start_apply_worker()
+
+    def _start_apply_worker(self):
         self._apply_worker = poller.SchedulerApplyWorker(self.cfg, self)
         self._apply_worker.done.connect(self._on_apply_done)
         self._apply_worker.start()
 
     def _on_apply_done(self, ok, msg, _info):
+        if self._apply_pending:
+            self._apply_pending = False
+            # done 在 run() 末尾发出，旧 worker 的工作已结束（线程可能尚未
+            # 完全退出），直接起新 worker
+            self._start_apply_worker()
+            return
         if ok:
             InfoBar.success("配置已保存", "计划任务已同步更新",
                             parent=self.window(), position=InfoBarPosition.TOP_RIGHT,

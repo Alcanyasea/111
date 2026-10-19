@@ -4,6 +4,8 @@
 计划任务查询（Get-ScheduledTask）和 ADB 设备检查（adb devices）偶尔会卡几秒，
 放在主线程会导致控制台「点击没反应」。这里用 QThread 后台跑，结果通过信号回传。
 """
+import copy
+
 from PySide6.QtCore import QThread, Signal
 
 from core import adb, scheduler
@@ -68,16 +70,22 @@ class SchedulerApplyWorker(QThread):
 
     def __init__(self, cfg, parent=None, collect=False):
         super().__init__(parent)
-        self.cfg = cfg
+        # 页面提交后可能继续修改同一个 dict（用户接着点保存）；深拷贝保证
+        # 本次后台同步使用提交那一刻的配置
+        self.cfg = copy.deepcopy(cfg)
         self.collect = collect
 
     def run(self):
         apply_fn = scheduler.apply_collect if self.collect else scheduler.apply
-        ok, msg = apply_fn(self.cfg)
-        info = None
-        if ok:
-            info = (scheduler.query_collect() if self.collect
-                    else scheduler.query())
+        try:
+            ok, msg = apply_fn(self.cfg)
+            info = None
+            if ok:
+                info = (scheduler.query_collect() if self.collect
+                        else scheduler.query())
+        except Exception as exc:  # 异常也必须发 done，否则页面按钮永远禁着
+            self.done.emit(False, str(exc), None)
+            return
         self.done.emit(ok, msg, info)
 
 
