@@ -422,7 +422,20 @@ while ((Get-Date) -lt $deadline) {
     if (($wordCount -gt 0)) { Start-Sleep 2 } else { Start-Sleep 3 }
 }
 if (-not $reachedLogin) {
-    LogLine ("ERROR: {0} 秒内无法确认登录状态" -f $ScreenTimeoutSec)
+    # 超时现场：保留最后一帧（复制成 fail_*，不覆盖工作图），并打印盲点次数
+    # 与更新标记，便于事后判断是卡加载、卡更新还是盲点被禁用导致空转
+    $elapsed = [int]((Get-Date) - $stageStart).TotalSeconds
+    $shotName = Split-Path $png -Leaf
+    $failNote = "(无可用截图)"
+    if (Test-Path $png) {
+        $failName = "fail_{0}_{1}.png" -f $(if ($Slot) { $Slot } else { $Server }), (Get-Date -Format "HHmmss")
+        try {
+            Copy-Item $png (Join-Path $debugDir $failName) -Force -ErrorAction Stop
+            $failNote = "debug\$failName"
+        } catch {}
+    }
+    LogLine ("ERROR: {0} 秒内无法确认登录状态（最后截图：debug\{1}，失败帧：{2}，盲点 {3} 次，updateSeen={4}，lastUpdateMarker='{5}'）" -f
+        $elapsed, $shotName, $failNote, $blindPokeCount, $updateSeen, $lastUpdateMarker)
     exit 1
 }
 
