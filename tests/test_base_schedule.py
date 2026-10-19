@@ -1,10 +1,14 @@
 # -*- coding: utf-8 -*-
 """base_schedule.py 纯函数与 apply_maa_config 测试（全部用临时目录隔离）。"""
+import argparse
+import contextlib
+import io
 import json
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "plugins" / "base_schedule"))
@@ -129,6 +133,75 @@ class ApplyMaaConfigTest(unittest.TestCase):
         bs.apply_maa_config(self.maa, self.plan, plan_index=1, log=lambda m: None)
         self.assertEqual(
             (self.maa / "config" / "gui.new.json").read_text(encoding="utf-8"), snap1)
+
+
+class CmdApplyTest(unittest.TestCase):
+    """cmd_apply 的成败判定：找不到 InfrastTask 不能报「已切换」。"""
+
+    def setUp(self):
+        self.root = Path(tempfile.mkdtemp())
+        self.maa = self.root / "MAA"
+        (self.maa / "config").mkdir(parents=True)
+        self.logs = []
+        self.cfg = {
+            "paths": {"maa_official_dir": str(self.maa),
+                      "log_file": str(self.root / "master_log.txt")},
+            "schedule": {"times": [{"time": "04:00", "enabled": True}]},
+            "accounts": [{
+                "id": "a1", "label": "测试号", "server": "official",
+                "slot": "official_1",
+                "base_schedule": {"enabled": True},
+            }],
+        }
+        self.old_plans = bs.PLANS_DIR
+        bs.PLANS_DIR = self.root / "plans"
+
+    def tearDown(self):
+        bs.PLANS_DIR = self.old_plans
+
+    def _write_gui_new(self, with_infrast):
+        queue = [{"$type": "AppTask"}]
+        if with_infrast:
+            queue.append({"$type": "InfrastTask", "Mode": "Rotation"})
+        data = {"Current": "Default",
+                "Configurations": {"Default": {"TaskQueue": queue}}}
+        (self.maa / "config" / "gui.new.json").write_text(
+            json.dumps(data, ensure_ascii=False), encoding="utf-8")
+
+    def _run(self, disable=False):
+        args = argparse.Namespace(config="ignored", account="a1", server=None,
+                                  disable=disable, batch=None)
+        buf = io.StringIO()
+        with mock.patch.object(bs, "load_config", return_value=self.cfg), \
+                mock.patch.object(bs, "_log_file",
+                                  side_effect=lambda _cfg, msg: self.logs.append(msg)), \
+                contextlib.redirect_stdout(buf):
+            code = bs.cmd_apply(args)
+        return code, buf.getvalue()
+
+    def test_missing_infrast_task_is_failure(self):
+        self._write_gui_new(with_infrast=False)
+        code, out = self._run()
+        self.assertEqual(code, 2)
+        self.assertNotIn("OK custom", out)
+        self.assertIn("ERROR infrast task missing in gui.new.json", out)
+        joined = "\n".join(self.logs)
+        self.assertIn("ERROR", joined)
+        self.assertIn("测试号", joined)
+        self.assertIn("Default", joined)
+
+    def test_with_infrast_task_still_succeeds(self):
+        self._write_gui_new(with_infrast=True)
+        code, out = self._run()
+        self.assertEqual(code, 0)
+        self.assertIn("OK custom", out)
+        self.assertNotIn("ERROR infrast task missing", out)
+
+    def test_disable_path_unaffected(self):
+        self._write_gui_new(with_infrast=True)
+        code, out = self._run(disable=True)
+        self.assertEqual(code, 0)
+        self.assertIn("OK rotation", out)
 
 
 if __name__ == "__main__":

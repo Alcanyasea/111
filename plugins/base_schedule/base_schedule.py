@@ -612,6 +612,15 @@ def cmd_apply(args):
                   "账号「%s」按失败处理，等待整轮重试" % label)
         print("ERROR maa config unreadable")
         return 1
+    if enabled and "gui.new.json" not in changed:
+        # 找不到 InfrastTask 时 apply_maa_config 只会 WARN，MAA 实际仍按原
+        # 基建配置跑 Rotation；必须按失败返回，不能给界面「已切换」的假成功
+        gui_new = Path(maa_dir) / "config" / "gui.new.json"
+        cur = (_read_maa_json(gui_new, lambda m: None) or {}).get("Current") or "Default"
+        _log_file(cfg, "ERROR: gui.new.json 当前配置「%s」中未找到 InfrastTask，"
+                  "账号「%s」切换未生效（MAA 仍按原基建配置运行）" % (cur, label))
+        print("ERROR infrast task missing in gui.new.json")
+        return 2
     if enabled:
         _log_file(cfg, "已切换 MAA 基建为自定义计划 %s（%s批，%s）"
                   % (plan_path.name, batch, ", ".join(changed) or "无改动"))
