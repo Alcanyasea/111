@@ -50,6 +50,22 @@ $pwshExe = Join-Path $root "gui\runtime\pwsh\pwsh.exe"
 if (-not (Test-Path $pwshExe)) { $pwshExe = "C:\Program Files\PowerShell\7\pwsh.exe" }
 if (-not (Test-Path $pwshExe)) { $pwshExe = "pwsh" }
 
+# 读取子进程重定向文件。子脚本的输出编码取决于启动环境：bat 里 chcp 65001
+# 启动是 UTF-8，GUI/计划任务继承 GBK 控制台。先按严格 UTF-8 解码，失败回退
+# GBK，两种情况中文都能还原（此前统一按 UTF-8 读，GBK 时日志全是 U+FFFD）
+function Read-ChildText([string]$Path) {
+    if (-not (Test-Path $Path)) { return @() }
+    $bytes = [System.IO.File]::ReadAllBytes($Path)
+    if ($bytes.Length -eq 0) { return @() }
+    try {
+        $text = [System.Text.UTF8Encoding]::new($false, $true).GetString($bytes)
+    } catch {
+        $text = [System.Text.Encoding]::GetEncoding(936).GetString($bytes)
+    }
+    $text = $text.TrimStart([char]0xFEFF)
+    return ($text -split "`r?`n")
+}
+
 function Run-Switch($s) {
     # $s 形如 "slot_switch.ps1 -Server official -Slot official_2"；返回子脚本退出码
     $parts = $s -split ' '
@@ -61,10 +77,27 @@ function Run-Switch($s) {
     # Redirect child process stdout to temp file to avoid encoding issues
     # with the console pipeline (2>&1 on child powershell mangles output)
     $tmpOut = "$scriptDir\switch_output.tmp"
-    $proc = Start-Process -FilePath $pwshExe `
-        -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$sp`" $extraArgs" `
-        -NoNewWindow -PassThru `
-        -RedirectStandardOutput $tmpOut
+    $tmpErr = "$scriptDir\switch_error.tmp"
+    # 清掉上一轮残留，避免读到旧输出（异常退出时可能没删干净）
+    Remove-Item $tmpOut, $tmpErr -Force -ErrorAction SilentlyContinue
+    # pwsh 7 在解释器不存在时抛 InvalidOperationException（不是返回 $null），
+    # 必须 try/catch，否则异常直接冒泡、主流程没有明确错误
+    $proc = $null
+    try {
+        $proc = Start-Process -FilePath $pwshExe `
+            -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$sp`" $extraArgs" `
+            -NoNewWindow -PassThru `
+            -RedirectStandardOutput $tmpOut `
+            -RedirectStandardError $tmpErr `
+            -ErrorAction SilentlyContinue
+    } catch {
+        $proc = $null
+    }
+    if (-not $proc) {
+        Log ("  [ERROR] 无法启动子脚本（解释器：" + $pwshExe + "）")
+        Remove-Item $tmpOut, $tmpErr -Force -ErrorAction SilentlyContinue
+        return 127
+    }
     # 强制 .NET 进程对象持有句柄：PS 5.1 的 -PassThru（不带 -Wait）若不先取 Handle，
     # 结束后 ExitCode 恒为空，登录校验/切号结果会被整体误判
     $null = $proc.Handle
@@ -94,20 +127,22 @@ function Run-Switch($s) {
         Log ("  [ERROR] 子脚本{0}，判定挂死已强制结束" -f $why)
         Log ("  [Switch script finished in {0}s, exit=timeout]" -f
             [math]::Round($sw.Elapsed.TotalSeconds, 1))
-        Remove-Item $tmpOut -Force -ErrorAction SilentlyContinue
+        Remove-Item $tmpOut, $tmpErr -Force -ErrorAction SilentlyContinue
         Start-Sleep 1
         return 124
     }
     # 无参 WaitForExit 刷新退出状态：保证 ExitCode 可读
     $proc.WaitForExit() | Out-Null
-    if (Test-Path $tmpOut) {
-        # 子脚本 stdout 实测为 UTF-8（含中文），Default(GBK) 读取会乱码
-        foreach ($l in (Get-Content $tmpOut -Encoding UTF8)) {
-            $trimmed = $l.Trim()
-            if ($trimmed.Length -gt 0) { Log "  $trimmed" }
-        }
-        Remove-Item $tmpOut -Force -ErrorAction SilentlyContinue
+    # stdout/stderr 都按 Read-ChildText 的 UTF-8→GBK 回退解码，读完即删
+    foreach ($l in (Read-ChildText $tmpOut)) {
+        $trimmed = $l.Trim()
+        if ($trimmed.Length -gt 0) { Log "  $trimmed" }
     }
+    foreach ($l in (Read-ChildText $tmpErr)) {
+        $trimmed = $l.Trim()
+        if ($trimmed.Length -gt 0) { Log "  [stderr] $trimmed" }
+    }
+    Remove-Item $tmpOut, $tmpErr -Force -ErrorAction SilentlyContinue
     $elapsed = [math]::Round($sw.Elapsed.TotalSeconds, 1)
     $code = $proc.ExitCode
     Log ("  [Switch script finished in " + $elapsed + "s, exit=" + $code + "]")

@@ -158,7 +158,7 @@ robocopy $RepoRoot $staging /E /NFL /NDL /NJH /NJS /NP `
     /XD .git .venv __pycache__ accounts debug plans dist tools .claude exports `
         .skill-sources .scratch .agents .codely-cli _testtmp _t2 run_history `
     /XF config.json config.json.bak config.json.daily.bak config.json.lost-* master_log.txt master.lock maa_done.signal `
-        switch_output.tmp _shot.png _shot.py *.pyc AGENTS.md .gitignore | Out-Null
+        switch_output.tmp switch_error.tmp _shot.png _shot.py *.pyc AGENTS.md .gitignore | Out-Null
 if ($LASTEXITCODE -ge 8) { throw "robocopy 失败（exit=$LASTEXITCODE）" }
 
 # ---------- 内置 Python 运行环境（含 GUI 依赖，安装时无需联网） ----------

@@ -227,7 +227,7 @@ function Clear-UnnecessaryData {
             Remove-Item -Force -ErrorAction SilentlyContinue
     }
     # 2) 残留临时文件（正常结束会自删，异常中断会残留）
-    foreach ($name in @("switch_output.tmp", "master.lock.tmp", "maa_done.signal")) {
+    foreach ($name in @("switch_output.tmp", "switch_error.tmp", "master.lock.tmp", "maa_done.signal")) {
         Remove-Item (Join-Path $scriptDir $name) -Force -ErrorAction SilentlyContinue
     }
     # 3) 测试遗留文件（调试时 dump 的登录缓存，含 token）

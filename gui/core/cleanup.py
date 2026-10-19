@@ -40,7 +40,7 @@ LOG_KEEP_SIZE = 524_288
 # 测试遗留文件（调试时 dump 到 scripts\ 根目录的登录缓存，含 token，不再需要）
 LEFTOVERS = ("_t1.xml", "_t2.xml", "_t3.bin")
 # 挂机结束应自删的临时文件（异常中断会残留）
-TMP_FILES = ("switch_output.tmp", "master.lock.tmp", "maa_done.signal")
+TMP_FILES = ("switch_output.tmp", "switch_error.tmp", "master.lock.tmp", "maa_done.signal")
 # 旧配置备份
 BACKUPS = (str(PROJECT_ROOT / "config.json.bak"),)
 
