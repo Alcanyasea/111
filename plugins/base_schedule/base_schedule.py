@@ -45,7 +45,6 @@ MAA 按宿舍 1→4 顺序处理且 autofill 会先消耗可用干员，因此�
 import argparse
 import hashlib
 import json
-import os
 import re
 import sys
 from datetime import datetime
@@ -433,10 +432,7 @@ def regenerate_for_account(cfg, acc):
         description="由 MAA 挂机控制台生成（%s）" % "、".join(names),
     )
     path = plan_path_for_slot((acc or {}).get("slot", (acc or {}).get("id", "account")))
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(doc, ensure_ascii=False, indent=2), encoding="utf-8")
-    os.replace(tmp, path)
+    _atomic_json_write(path, doc)
     return path
 
 

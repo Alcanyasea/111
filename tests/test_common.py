@@ -5,6 +5,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "plugins"))
@@ -41,6 +42,37 @@ class CommonTest(unittest.TestCase):
         common.atomic_json_write(target, data)
         self.assertEqual(json.loads(target.read_text(encoding="utf-8")), data)
         residue = [p.name for p in target.parent.iterdir() if ".tmp" in p.name]
+        self.assertEqual(residue, [])
+
+    def test_atomic_json_write_replace_failure_keeps_original(self):
+        """os.replace 失败时原文件不变，临时文件被清理。"""
+        target = self.root / "cfg.json"
+        target.write_text('{"old": 1}', encoding="utf-8")
+        before = target.read_text(encoding="utf-8")
+        with mock.patch.object(common.os, "replace",
+                               side_effect=OSError("simulated failure")):
+            with self.assertRaises(OSError):
+                common.atomic_json_write(target, {"new": 2})
+        self.assertEqual(target.read_text(encoding="utf-8"), before)
+        residue = [p.name for p in self.root.iterdir() if ".tmp" in p.name]
+        self.assertEqual(residue, [])
+
+    def test_atomic_json_write_unique_tmp_names(self):
+        """连续两次写入使用不同临时名，后写覆盖先写，不残留。"""
+        target = self.root / "cfg.json"
+        seen = []
+        real_replace = common.os.replace
+
+        def record(src, dst):
+            seen.append(Path(src).name)
+            real_replace(src, dst)
+
+        with mock.patch.object(common.os, "replace", side_effect=record):
+            common.atomic_json_write(target, {"v": 1})
+            common.atomic_json_write(target, {"v": 2})
+        self.assertEqual(len(set(seen)), 2)
+        self.assertEqual(json.loads(target.read_text(encoding="utf-8")), {"v": 2})
+        residue = [p.name for p in self.root.iterdir() if ".tmp" in p.name]
         self.assertEqual(residue, [])
 
     def test_log_file_appends_with_tag(self):

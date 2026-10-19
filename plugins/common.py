@@ -15,6 +15,7 @@ farm_guard / infrast_collect）里逐字复制、只有日志标签不同——�
 import json
 import os
 import shutil
+import tempfile
 from datetime import datetime
 from pathlib import Path
 
@@ -126,13 +127,27 @@ def maa_dir_for(cfg, server):
 
 
 def atomic_json_write(path, data):
-    """原子写入 JSON（临时文件 + os.replace，中文不转义）；自动建父目录。"""
+    """原子写入 JSON（同目录唯一临时文件 + fsync + os.replace）；自动建父目录。
+
+    固定 .tmp 名在并发时互踩、写完不 fsync 时掉电可能留下半截文件，
+    因此用 mkstemp 生成唯一临时名，落盘后再替换；失败时清理临时文件。
+    """
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2),
-                   encoding="utf-8")
-    os.replace(tmp, path)
+    fd, tmp_name = tempfile.mkstemp(
+        prefix=path.name + ".", suffix=".tmp", dir=str(path.parent))
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as f:
+            f.write(json.dumps(data, ensure_ascii=False, indent=2))
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_name, path)
+    except BaseException:
+        try:
+            os.unlink(tmp_name)
+        except OSError:
+            pass
+        raise
 
 
 def log_file(cfg, tag, msg):
