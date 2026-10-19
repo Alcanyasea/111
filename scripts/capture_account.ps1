@@ -128,7 +128,16 @@ function Write-FileRemote($localPath, $remotePath, $mode) {
     $tmp = "/data/local/tmp/ark_cap_push"
     & $adb -s $device push $localPath $tmp 2>$null | Out-Null
     $remoteDir = Split-Path $remotePath
-    & $adb -s $device shell "mkdir -p $remoteDir; cp $tmp $remotePath; chown $uidStr $remotePath; chmod $mode $remotePath; chcon $ctx $remotePath" 2>$null | Out-Null
+    # && 链 + 哨兵：任一步失败都短路并留下 __ARK_FAIL__，不会被最后一条
+    # 命令的退出码掩盖（原先 ; 串联只看 adb 客户端退出码）
+    $res = (& $adb -s $device shell "mkdir -p $remoteDir && cp $tmp $remotePath && chown $uidStr $remotePath && chmod $mode $remotePath && chcon $ctx $remotePath || echo __ARK_FAIL__" 2>&1) -join "`n"
+    if ($LASTEXITCODE -ne 0 -or $res -match '__ARK_FAIL__') {
+        $errText = ($res -replace '\s+', ' ').Trim()
+        if (-not $errText) { $errText = "(adb exit $LASTEXITCODE)" }
+        LogLine ("WARN: 写入设备失败 {0}：{1}" -f $remotePath, $errText)
+        return $false
+    }
+    return $true
 }
 
 function Restore-Backup($ppName) {
@@ -138,7 +147,15 @@ function Restore-Backup($ppName) {
     $ctx = (& $adb -s $device shell "stat -c %C /data/data/$pkg/shared_prefs" 2>$null | Select-Object -First 1)
     if (-not $uidStr -or $uidStr -notmatch '^\d+:\d+') { $uidStr = "10044:10044" }
     if (-not $ctx -or $ctx -notmatch '^u:') { $ctx = "u:object_r:app_data_file:s0" }
-    & $adb -s $device shell "cp /data/local/tmp/ark_cap/playerprefs.xml /data/data/$pkg/shared_prefs/$ppName; cp /data/local/tmp/ark_cap/sdk.xml /data/data/$pkg/shared_prefs/HypergryphSdkPreferences.xml; cp /data/local/tmp/ark_cap/lc.cache /data/data/$pkg/files/zx/lc.cache; chown $uidStr /data/data/$pkg/shared_prefs/$ppName /data/data/$pkg/shared_prefs/HypergryphSdkPreferences.xml /data/data/$pkg/files/zx/lc.cache; chmod 660 /data/data/$pkg/shared_prefs/$ppName /data/data/$pkg/shared_prefs/HypergryphSdkPreferences.xml; chmod 600 /data/data/$pkg/files/zx/lc.cache; chcon $ctx /data/data/$pkg/shared_prefs/$ppName /data/data/$pkg/shared_prefs/HypergryphSdkPreferences.xml /data/data/$pkg/files/zx/lc.cache; rm -rf /data/local/tmp/ark_cap" 2>$null | Out-Null
+    # && 链 + 哨兵：只有全部 cp/chown/chmod/chcon 成功才删除备份；
+    # 任一步失败会留下 __ARK_FAIL__，备份保留可重试（原先 ; 串联时
+    # 前面的 cp 失败仍会执行 rm -rf，备份直接丢掉）
+    $res = (& $adb -s $device shell "cp /data/local/tmp/ark_cap/playerprefs.xml /data/data/$pkg/shared_prefs/$ppName && cp /data/local/tmp/ark_cap/sdk.xml /data/data/$pkg/shared_prefs/HypergryphSdkPreferences.xml && cp /data/local/tmp/ark_cap/lc.cache /data/data/$pkg/files/zx/lc.cache && chown $uidStr /data/data/$pkg/shared_prefs/$ppName /data/data/$pkg/shared_prefs/HypergryphSdkPreferences.xml /data/data/$pkg/files/zx/lc.cache && chmod 660 /data/data/$pkg/shared_prefs/$ppName /data/data/$pkg/shared_prefs/HypergryphSdkPreferences.xml && chmod 600 /data/data/$pkg/files/zx/lc.cache && chcon $ctx /data/data/$pkg/shared_prefs/$ppName /data/data/$pkg/shared_prefs/HypergryphSdkPreferences.xml /data/data/$pkg/files/zx/lc.cache && rm -rf /data/local/tmp/ark_cap || echo __ARK_FAIL__" 2>&1) -join "`n"
+    if ($LASTEXITCODE -ne 0 -or $res -match '__ARK_FAIL__') {
+        $errText = ($res -replace '\s+', ' ').Trim()
+        if (-not $errText) { $errText = "(adb exit $LASTEXITCODE)" }
+        LogLine ("WARN: 恢复原登录态失败：{0}" -f $errText)
+    }
 }
 
 # ================= 开始 =================

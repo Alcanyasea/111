@@ -108,8 +108,14 @@ if ($slotDir -and (Test-Path $slotDir)) {
             $tmpDir = Split-Path $remoteTmp
             & $adb -s $device shell "mkdir -p $tmpDir; mkdir -p $remoteDir" 2>$null | Out-Null
             & $adb -s $device push $f.FullName $remoteTmp 2>$null | Out-Null
-            & $adb -s $device shell "cp $remoteTmp $remoteDst; chown $uidStr $remoteDst; chmod $mode $remoteDst; chcon $ctx $remoteDst" 2>$null | Out-Null
-            if ($LASTEXITCODE -eq 0) { $fileOk = $true; break }
+            # 复合命令用 && 链：任一步（cp/chown/chmod/chcon）失败都短路，
+            # 由哨兵写进输出。原先把 4 条命令用 ; 串起来，只看 adb 客户端
+            # 退出码，前面的 cp 失败也会被当成推送成功
+            $res = (& $adb -s $device shell "cp $remoteTmp $remoteDst && chown $uidStr $remoteDst && chmod $mode $remoteDst && chcon $ctx $remoteDst || echo __ARK_FAIL__" 2>&1) -join "`n"
+            if ($LASTEXITCODE -eq 0 -and $res -notmatch '__ARK_FAIL__') { $fileOk = $true; break }
+            $errText = ($res -replace '\s+', ' ').Trim()
+            if (-not $errText) { $errText = "(adb exit $LASTEXITCODE)" }
+            Write-Output ("$(Timestamp) [Switch] WARN: push attempt $attempt failed for $rel : $errText")
         }
         if ($fileOk) {
             $pushed++
