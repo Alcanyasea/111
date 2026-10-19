@@ -153,8 +153,10 @@ $staging = Join-Path $work "stage"
 New-Item -ItemType Directory -Path $staging -Force | Out-Null
 
 Write-Step "收集项目文件（排除 .git/.venv/config.json/账号数据/运行残留）..."
+# TODO: 长期方案改为 git ls-files 白名单收集，避免黑名单继续漏项（本次先补齐已知漏项）
 robocopy $RepoRoot $staging /E /NFL /NDL /NJH /NJS /NP `
     /XD .git .venv __pycache__ accounts debug plans dist tools .claude exports `
+        .skill-sources .scratch .agents .codely-cli _testtmp _t2 run_history `
     /XF config.json config.json.bak config.json.daily.bak config.json.lost-* master_log.txt master.lock maa_done.signal `
         switch_output.tmp _shot.png _shot.py *.pyc AGENTS.md .gitignore | Out-Null
 if ($LASTEXITCODE -ge 8) { throw "robocopy 失败（exit=$LASTEXITCODE）" }
