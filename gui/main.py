@@ -556,9 +556,11 @@ class MainWindow(FluentWindow):
         """关窗前收尾：轮询线程停净，导出与 token 自检转后台。"""
         for p in (self.poller, self.adb_poller):
             p.stop()
-            # 不带超时：底层查询超时已压到 12 秒，等到位再退，
-            # 避免 QThread 运行中被析构直接 abort
-            p.wait()
+            # 最多等 2 秒：底层查询虽已压到 12 秒，但网络/adb 卡死时不能
+            # 让用户关不掉窗口；未退出的线程转后台（模块级列表保证不被
+            # 析构，避免 QThread 运行中被销毁直接 abort）
+            if not p.wait(2000):
+                _detached_threads.append(p)
         # 导出子进程独立于控制台存活：断开工作线程父级，关窗不中断导出，
         # 结果仍写入 exports\（实时日志窗口随主窗口关闭）
         detached = self.dash.detach_export_worker()
