@@ -110,10 +110,14 @@ class Ocr:
 
     @staticmethod
     def _contour_score(prob, cnt):
-        h, w = prob.shape
-        mask = np.zeros((h, w), np.uint8)
-        cv2.drawContours(mask, [cnt], -1, 1, -1)
-        v = prob[mask > 0]
+        # mask 只建在轮廓 boundingRect 内（offset 平移进局部坐标系），
+        # 选中像素集合与整帧 mask 完全一致、均值逐位相同——已在 4 张真实
+        # 截图上对拍验证（框坐标/得分/文本全等）。每候选框建整帧 mask
+        # 是 det 阶段的主要内存分配开销
+        x, y, bw, bh = cv2.boundingRect(cnt)
+        mask = np.zeros((bh, bw), np.uint8)
+        cv2.drawContours(mask, [cnt], -1, 1, -1, offset=(-x, -y))
+        v = prob[y:y + bh, x:x + bw][mask > 0]
         return float(v.mean()) if v.size else 0.0
 
     # ---- rec：CRNN 识别单个文本框 ----
