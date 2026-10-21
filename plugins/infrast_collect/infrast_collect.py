@@ -105,7 +105,10 @@ def write_collect_plan():
         ],
     }
     path = PLUGIN_DIR / "collect_plan.json"
-    _atomic_json_write(path, plan)
+    # changed 模式：内容与现有文件一致就不重写（之前每次 apply 都刷文件，
+    # 造成 git 脏、mtime 变化，并覆盖用户对手工调整过的计划）
+    if _read_json(path) != plan:
+        _atomic_json_write(path, plan)
     return path
 
 
