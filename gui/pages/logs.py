@@ -53,7 +53,12 @@ class LogsPage(QWidget):
         # 不钉死宽度：窄窗口时由布局压到最小 150，避免工具栏溢出换行
         self.filter_edit.setMinimumWidth(150)
         self.filter_edit.setMaximumWidth(220)
-        self.filter_edit.textChanged.connect(self.refresh)
+        # 每敲一个字都全量重载 634KB 日志会卡输入：250ms 防抖，停顿后再刷新
+        self._filter_timer = QTimer(self)
+        self._filter_timer.setSingleShot(True)
+        self._filter_timer.setInterval(250)
+        self._filter_timer.timeout.connect(self.refresh)
+        self.filter_edit.textChanged.connect(lambda _t: self._filter_timer.start())
         bar.addStretch(1)
         bar.addWidget(self.filter_edit)
         autoscroll_label = BodyLabel("自动滚动")
@@ -69,12 +74,13 @@ class LogsPage(QWidget):
         # 日志视图
         self.view = TextEdit()
         self.view.setReadOnly(True)
-        self.view.setStyleSheet(
-            "TextEdit { background: %s; color: %s;"
-            " font-family: %s; font-size: %spx; border-radius: %dpx;"
-            " padding: 12px 14px; border: none; }"
-            % (theme.LOG_BG, theme.LOG_FG, theme.FONT_MONO, theme.FS_CAPTION,
-               theme.RADIUS_CARD))
+        theme.bind(
+            self.view,
+            lambda: "TextEdit { background: %s; color: %s;"
+                    " font-family: %s; font-size: %spx; border-radius: %dpx;"
+                    " padding: 12px 14px; border: none; }"
+                    % (theme.LOG_BG, theme.LOG_FG, theme.FONT_MONO,
+                       theme.FS_CAPTION, theme.RADIUS_CARD))
         root.addWidget(self.view, 1)
 
         self.refresh()
@@ -87,19 +93,18 @@ class LogsPage(QWidget):
         return Path(self.cfg["paths"]["log_file"])
 
     def _read_all(self):
-        """全量读尾部 MAX_LINES 行（初始化/截断后重载用），并记录渲染位置。"""
+        """读尾部 MAX_LINES 行（初始化/截断后重载用），并记录渲染位置。
+
+        走 logparse.read_text 的尾部读取（最多 512KB），不再每次把整份
+        日志（实测 634KB）读进内存；_offset 取文件实际大小用于增量追加。
+        """
         path = self._log_path()
         try:
-            with open(path, "rb") as f:
-                data = f.read()
-            self._offset = len(data)
-            self._pending = b""
+            self._offset = path.stat().st_size
         except OSError:
             self._offset = 0
-            self._pending = b""
-            return ""
-        text = data.decode("utf-8", errors="ignore")
-        return "\n".join(text.splitlines()[-MAX_LINES:])
+        self._pending = b""
+        return logparse.read_text(path, MAX_LINES)
 
     def _changed(self):
         path = self._log_path()
