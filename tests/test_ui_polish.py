@@ -8,8 +8,10 @@
 """
 import os
 import sys
+import types
 import unittest
 from pathlib import Path
+from unittest import mock
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -21,7 +23,8 @@ from PySide6.QtWidgets import QApplication, QLabel, QLineEdit  # noqa: E402
 
 import config as appconfig  # noqa: E402
 import theme  # noqa: E402
-from pages.dashboard import AccountCard as DashAccountCard, ScheduleCard  # noqa: E402
+from pages.dashboard import (AccountCard as DashAccountCard,  # noqa: E402
+                             CollectScheduleCard, ScheduleCard)
 from pages.accounts import AccountCard as GridAccountCard  # noqa: E402
 from widgets import (Card, apply_mono_font, big_number, empty_state,  # noqa: E402
                      refresh_card_shadows)
@@ -201,6 +204,146 @@ class IconBadgeTest(unittest.TestCase):
         b = IconBadge("2")
         self.addCleanup(b.deleteLater)
         self.assertIn(theme.ACCENT, b._theme_qss())
+
+
+class _InfoBarSpy:
+    """记录 dashboard 弹的提示条（level, title, content），不真正创建浮窗。"""
+
+    calls = []
+
+    @classmethod
+    def _record(cls, level, title, content="", **_kwargs):
+        cls.calls.append((level, title, content))
+
+    @classmethod
+    def success(cls, title, content="", **kwargs):
+        cls._record("success", title, content, **kwargs)
+
+    @classmethod
+    def warning(cls, title, content="", **kwargs):
+        cls._record("warning", title, content, **kwargs)
+
+    @classmethod
+    def info(cls, title, content="", **kwargs):
+        cls._record("info", title, content, **kwargs)
+
+    @classmethod
+    def error(cls, title, content="", **kwargs):
+        cls._record("error", title, content, **kwargs)
+
+
+class _FakeApplyWorker:
+    """替代 SchedulerApplyWorker：不跑真实 pwsh 计划任务同步，只记录是否被发起。"""
+
+    started = []   # 每次 start() 追加 collect 标志
+
+    def __init__(self, cfg, parent=None, collect=False):
+        self.collect = collect
+        self.done = types.SimpleNamespace(connect=lambda *_a: None)
+
+    def isRunning(self):
+        return False
+
+    def start(self):
+        _FakeApplyWorker.started.append(self.collect)
+
+
+class ScheduleToggleFeedbackTest(unittest.TestCase):
+    """班次/收菜计划的「启用」「关机」开关：切换后必须立即弹提示条。
+
+    开关本体只有深灰/浅灰一档色差（set_switch_checked_gray），用户无法
+    从开关本身确认是否生效；关机开关此前更是完全无提示。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+        theme.apply("light", "github")
+
+    def setUp(self):
+        import pages.dashboard as dash
+        self.dash = dash
+        _InfoBarSpy.calls = []
+        _FakeApplyWorker.started = []
+        # 绝不碰真实 config.json / 真实计划任务
+        self._save_patch = mock.patch.object(dash.appconfig, "save")
+        self._save_patch.start()
+        self.addCleanup(self._save_patch.stop)
+        self._worker_patch = mock.patch.object(
+            dash.poller, "SchedulerApplyWorker", _FakeApplyWorker)
+        self._worker_patch.start()
+        self.addCleanup(self._worker_patch.stop)
+        self._infobar_patch = mock.patch.object(dash, "InfoBar", _InfoBarSpy)
+        self._infobar_patch.start()
+        self.addCleanup(self._infobar_patch.stop)
+
+    def _shift_card(self):
+        cfg = {"schedule": {"times": [
+            {"time": "04:00", "enabled": True, "shutdown": True},
+            {"time": "16:00", "enabled": True, "shutdown": False},
+        ]}, "accounts": []}
+        card = ScheduleCard(cfg)
+        self.addCleanup(card.deleteLater)
+        return card
+
+    def _collect_card(self):
+        cfg = {"schedule": {"collect_times": [
+            {"time": "10:00", "enabled": True, "shutdown": False},
+        ]}}
+        card = CollectScheduleCard(cfg)
+        self.addCleanup(card.deleteLater)
+        return card
+
+    def test_shift_enabled_toggle_shows_toast_and_syncs(self):
+        card = self._shift_card()
+        entry = card._entries()[1]
+        card._on_enabled(entry, False)
+        self.assertEqual(entry["enabled"], False)
+        self.assertIn(("success", "已停用 16点 班次", "配置已保存，正在同步计划任务"),
+                      _InfoBarSpy.calls)
+        self.assertEqual(_FakeApplyWorker.started, [False])  # 发起挂机任务同步
+        self.dash.appconfig.save.assert_called()
+
+    def test_shift_shutdown_toggle_shows_toast_without_sync(self):
+        card = self._shift_card()
+        entry = card._entries()[1]
+        card._on_shutdown(entry, True)
+        self.assertIn(("success", "已开启 16点 班次关机",
+                       "只影响该班次结束后的收尾，已保存，无需同步计划任务"),
+                      _InfoBarSpy.calls)
+        self.assertEqual(entry["shutdown"], True)
+        self.assertEqual(_FakeApplyWorker.started, [])  # 关机不入触发，无需同步
+
+    def test_apply_done_success_toast_lists_trigger_times(self):
+        card = self._shift_card()
+        card._on_apply_done(True, "", {"exists": True, "enabled": True,
+                                       "times": ["04:00", "16:00"]})
+        self.assertIn(("success", "已更新计划任务", "班次触发：04:00、16:00"),
+                      _InfoBarSpy.calls)
+
+    def test_apply_done_toast_when_all_disabled(self):
+        card = self._shift_card()
+        card._on_apply_done(True, "", {"exists": True, "enabled": False,
+                                       "times": []})
+        self.assertIn(("success", "已更新计划任务",
+                       "全部班次已停用，计划任务已禁用"), _InfoBarSpy.calls)
+
+    def test_collect_toggles_show_toasts(self):
+        card = self._collect_card()
+        entry = card._entries()[0]
+        card._on_enabled(entry, False)
+        card._on_shutdown(entry, True)
+        titles = [c[1] for c in _InfoBarSpy.calls]
+        self.assertIn("已停用 10:00 收菜", titles)
+        self.assertIn("已开启 10:00 收菜关机", titles)
+        self.assertEqual(_FakeApplyWorker.started, [True])  # 仅启用开关发起收菜任务同步
+
+    def test_collect_apply_done_success_toast_lists_trigger_times(self):
+        card = self._collect_card()
+        card._on_apply_done(True, "", {"exists": True, "enabled": True,
+                                       "times": ["10:00"]})
+        self.assertIn(("success", "已更新收菜计划任务", "收菜触发：10:00"),
+                      _InfoBarSpy.calls)
 
 
 if __name__ == "__main__":

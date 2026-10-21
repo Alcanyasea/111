@@ -404,7 +404,10 @@ class ScheduleCard(Card):
         if info is not None:
             self.refresh_scheduler(info)
         if ok:
-            InfoBar.success("已更新计划任务", "", parent=self.window(),
+            times = (info or {}).get("times") or []
+            tip = ("班次触发：%s" % "、".join(times)) if times \
+                else "全部班次已停用，计划任务已禁用"
+            InfoBar.success("已更新计划任务", tip, parent=self.window(),
                             position=InfoBarPosition.TOP_RIGHT, duration=2500)
         else:
             InfoBar.warning("配置已保存，但计划任务未更新", msg, parent=self.window(),
@@ -447,6 +450,12 @@ class ScheduleCard(Card):
 
     def _on_enabled(self, entry, checked):
         entry["enabled"] = bool(checked)
+        # 开关只有深灰/浅灰一档色差，必须显式提示切换结果，否则用户无法确认生效
+        InfoBar.success(
+            "已%s %s 班次" % ("启用" if checked else "停用",
+                              appconfig.batch_name(entry["time"])),
+            "配置已保存，正在同步计划任务", parent=self.window(),
+            position=InfoBarPosition.TOP_RIGHT, duration=2500)
         self._apply()  # 触发列表变化，需同步计划任务
         self.refresh_from_cfg()
 
@@ -454,6 +463,12 @@ class ScheduleCard(Card):
         """某时间点「关机」开关：立即保存（无需同步计划任务）。"""
         entry["shutdown"] = bool(checked)
         appconfig.save(self.cfg)
+        InfoBar.success(
+            "已%s %s 班次关机" % ("开启" if checked else "关闭",
+                                  appconfig.batch_name(entry["time"])),
+            "只影响该班次结束后的收尾，已保存，无需同步计划任务",
+            parent=self.window(), position=InfoBarPosition.TOP_RIGHT,
+            duration=2500)
         self.refresh_from_cfg()
 
     def _acc_btn_text(self, entry):
@@ -723,7 +738,10 @@ class CollectScheduleCard(Card):
         if info is not None:
             self.refresh_scheduler(info)
         if ok:
-            InfoBar.success("已更新收菜计划任务", "", parent=self.window(),
+            times = (info or {}).get("times") or []
+            tip = ("收菜触发：%s" % "、".join(times)) if times \
+                else "全部收菜时间已停用，计划任务已禁用"
+            InfoBar.success("已更新收菜计划任务", tip, parent=self.window(),
                             position=InfoBarPosition.TOP_RIGHT, duration=2500)
         else:
             InfoBar.warning("配置已保存，但收菜计划任务未更新", msg,
@@ -767,6 +785,10 @@ class CollectScheduleCard(Card):
 
     def _on_enabled(self, entry, checked):
         entry["enabled"] = bool(checked)
+        InfoBar.success(
+            "已%s %s 收菜" % ("启用" if checked else "停用", entry["time"]),
+            "配置已保存，正在同步收菜计划任务", parent=self.window(),
+            position=InfoBarPosition.TOP_RIGHT, duration=2500)
         self._apply()  # 触发列表变化，需同步计划任务
         self.refresh_from_cfg()
 
@@ -774,6 +796,11 @@ class CollectScheduleCard(Card):
         """某时间点「关机」开关：立即保存（关机不入任务触发，无需同步计划任务）。"""
         entry["shutdown"] = bool(checked)
         appconfig.save(self.cfg)
+        InfoBar.success(
+            "已%s %s 收菜关机" % ("开启" if checked else "关闭", entry["time"]),
+            "只影响该时间点收菜结束后的收尾，已保存，无需同步计划任务",
+            parent=self.window(), position=InfoBarPosition.TOP_RIGHT,
+            duration=2500)
         self.refresh_from_cfg()
 
     def _on_delete(self, entry):
