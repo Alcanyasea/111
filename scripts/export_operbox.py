@@ -6,7 +6,7 @@
 # 用该服务器对应 MAA 的 MaaCore 跑「干员识别」任务，识别结果存成 JSON。
 # 输出：D:\1\exports\<slot>.json（每号一份）+ exports\summary.json（汇总，
 # 另在 exports\history\ 按时间戳归档一份）+
-# 原始回调留档：scripts\debug\operbox\<slot>.callbacks.json（排查用）
+# 原始回调留档：scripts\debug\operbox\<slot>.callbacks.json（仅失败时写，保留最近 3 份）
 #
 # 与挂机互斥：master.lock 存在且是活着的 powershell 时拒绝运行；
 # MAA.exe 正在运行（手动打开或控制台更新中）时同样拒绝，绝不抢杀。
@@ -170,6 +170,28 @@ def extract_operbox(events):
     return final
 
 
+def _write_callbacks(path, events):
+    """失败时留档原始回调：不缩进压缩体积，并只保留最近 3 份。
+
+    成功时回调 JSON 没有保留价值（单份实测 6.87MB，4 账号约 19MB），
+    由调用方只在失败分支调用。
+    """
+    try:
+        path = pathlib.Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(events, f, ensure_ascii=False, separators=(",", ":"))
+        files = sorted(path.parent.glob("*.callbacks.json"),
+                       key=lambda p: p.stat().st_mtime, reverse=True)
+        for old in files[3:]:
+            try:
+                old.unlink()
+            except OSError:
+                pass
+    except OSError as exc:
+        log("WARN: 写入回调留档失败（{}）".format(exc))
+
+
 def recognize(maa_dir, adb, address, client_type, out_path, callbacks_path,
               touch="maatouch", maa_timeout=900, connect_config="General"):
     """加载 MaaCore 跑 StartUp + OperBox，把干员识别结果写到 out_path。"""
@@ -225,19 +247,22 @@ def recognize(maa_dir, adb, address, client_type, out_path, callbacks_path,
         time.sleep(1)
     time.sleep(2)
 
-    with open(callbacks_path, "w", encoding="utf-8") as f:
-        json.dump(events, f, ensure_ascii=False, indent=1)
-
     errors = [e for e in events if e["name"] in ("TaskChainError", "InternalError", "InitFailed")]
+
+    def _fail(msg):
+        # 只有失败/数据不全时才留回调档（成功时单份 ~7MB 纯浪费）
+        _write_callbacks(callbacks_path, events)
+        return False, msg, 0, 0
+
     if timed_out:
-        return False, "MAA 干员识别超时（{} 秒）".format(maa_timeout), 0, 0
+        return _fail("MAA 干员识别超时（{} 秒）".format(maa_timeout))
     if errors:
-        return False, "MAA 任务链报错: {}".format(errors[-1]["details"]), 0, 0
+        return _fail("MAA 任务链报错: {}".format(errors[-1]["details"]))
     snap = extract_operbox(events)
     if not snap or not snap.get("all_opers"):
-        return False, "未从回调中捕获到干员数据（详见 {}）".format(callbacks_path), 0, 0
+        return _fail("未从回调中捕获到干员数据（详见 {}）".format(callbacks_path))
     if snap.get("done") is False:
-        return False, "MAA 识别提前结束（done=false），结果不完整（详见 {}）".format(callbacks_path), 0, 0
+        return _fail("MAA 识别提前结束（done=false），结果不完整（详见 {}）".format(callbacks_path))
 
     # 已拥有条目带 elite/level/potential，按 id 并进全名单
     own_detail = {o.get("id"): o for o in snap.get("own_opers", [])
