@@ -40,6 +40,7 @@ scripts/master.lock
 gui/console.lock
 scripts/master.lock.tmp
 scripts/switch_output.tmp
+scripts/switch_error.tmp
 
 # Generated base schedule plan files
 plugins/base_schedule/plans/
