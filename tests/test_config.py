@@ -135,6 +135,12 @@ class AppearancePaletteTest(unittest.TestCase):
     def test_default_neutral(self):
         self.assertEqual(appconfig.load()["appearance"]["palette"], "github")
 
+    def test_default_palette_is_valid(self):
+        # DEFAULTS 里的默认值必须本身合法（load() 的回退不能只靠规范化兜底）
+        import theme
+        self.assertIn(appconfig.DEFAULTS["appearance"]["palette"],
+                      theme.PALETTES)
+
     def test_invalid_palette_falls_back(self):
         appconfig.CONFIG_PATH.write_text(json.dumps({
             "appearance": {"theme": "dark", "palette": "不存在的配色"},

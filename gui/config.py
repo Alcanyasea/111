@@ -217,9 +217,9 @@ DEFAULTS = {
     },
     "appearance": {
         "theme": "light",      # 界面主题：light 明亮 / dark 暗夜
-        # 配色方案（背景色调，与明暗组合）：neutral 暖雾灰/sand 暖沙/moss 青瓷/
-        # mist 雾蓝/plum 藕荷；非法值由 load() 回退默认
-        "palette": "neutral",
+        # 配色方案（与明暗组合）：github / catppuccin / everforest / nord /
+        # tokyonight；合法值见 gui/theme.py 的 PALETTES，非法值由 load() 回退默认
+        "palette": "github",
     },
 }
 
@@ -422,7 +422,7 @@ def _norm_base_schedule_presets(acc):
 
 
 def _norm_appearance(cfg):
-    """规范化 appearance：配色方案非法（手改/降级）时回退默认暖雾灰。"""
+    """规范化 appearance：配色方案非法（手改/降级）时回退默认配色。"""
     import theme
     appearance = cfg.get("appearance")
     if not isinstance(appearance, dict):
