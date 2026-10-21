@@ -6,6 +6,7 @@
 import os
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -44,10 +45,19 @@ class LogsPageTest(unittest.TestCase):
         self.assertNotIn("line-%04d" % (4000 - MAX_LINES), text)
 
     def test_filter_is_debounced(self):
+        """两次输入间隔远小于防抖窗口：合并为一次重载，按最终关键字过滤。
+
+        不赌墙钟时序（CI 慢机器上 250ms 内外断言会抖）：改为给定时器
+        timeout 挂计数器，断言两次 textChanged 只触发一次、最终视图正确。
+        """
+        fired = []
+        self.page._filter_timer.timeout.connect(lambda: fired.append(None))
+        self.page.filter_edit.setText("line-40")
         self.page.filter_edit.setText("line-4000")
-        # 输入后未满 250ms：视图仍是旧内容（没有每敲一个字就全量重载）
-        self.assertIn("line-3999", self.page.view.toPlainText())
-        QTest.qWait(400)
+        deadline = time.time() + 5
+        while not fired and time.time() < deadline:
+            QTest.qWait(50)
+        self.assertEqual(len(fired), 1)   # 单次定时器：两次输入只重载一次
         text = self.page.view.toPlainText()
         self.assertIn("line-4000", text)
         self.assertNotIn("line-3999", text)
