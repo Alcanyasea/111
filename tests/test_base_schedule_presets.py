@@ -8,7 +8,9 @@ import os
 import sys
 import types
 import unittest
+import tempfile
 from pathlib import Path
+from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -17,7 +19,7 @@ sys.path.insert(0, str(ROOT / "gui"))
 
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
-import config as appconfig  # noqa: E402
+from tests.test_support import appconfig  # noqa: E402
 from pages import base_schedule_dialog as bsdlg_mod  # noqa: E402
 from pages.base_schedule_dialog import BaseScheduleDialog  # noqa: E402
 
@@ -61,6 +63,13 @@ class _FakeNameBox:
 
 
 class PresetDialogTest(unittest.TestCase):
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        p = patch.object(bsdlg_mod.bsplugin, "PLANS_DIR", Path(tmp.name) / "plans")
+        p.start()
+        self.addCleanup(p.stop)
+
     @classmethod
     def setUpClass(cls):
         cls.app = QApplication.instance() or QApplication([])
@@ -75,6 +84,30 @@ class PresetDialogTest(unittest.TestCase):
         dlg = BaseScheduleDialog(_cfg(), acc or _acc())
         self.addCleanup(dlg.deleteLater)
         return dlg
+
+    def test_legacy_preset_applies_to_minute_batch(self):
+        cfg = {"schedule": {"times": [{"time": "08:30", "enabled": True}]}}
+        acc = _acc(presets=[{"name": "旧预设", "schedule": {
+            "batches": {"8点": {"control": ["阿米娅"]}}}}])
+        acc["base_schedule"]["enabled"] = True
+        acc["base_schedule"]["batches"]["8点"] = {"control": ["煌"]}
+        dlg = BaseScheduleDialog(cfg, acc)
+        self.addCleanup(dlg.deleteLater)
+        dlg._refresh_presets(select_name="旧预设")
+        dlg._on_preset_apply()
+        self.assertEqual(dlg.data["8点30分"]["control"][0], "阿米娅")
+        self.assertEqual(dlg.plan_lab.text(), "当前方案：旧预设")
+
+    def test_minute_migration_save_keeps_legacy_batch_and_presets(self):
+        cfg = {"schedule": {"times": [{"time": "08:30", "enabled": True}]}}
+        acc = _acc()
+        acc["base_schedule"]["batches"] = {"8点": {"control": ["阿米娅"]}}
+        dlg = BaseScheduleDialog(cfg, acc)
+        self.addCleanup(dlg.deleteLater)
+        with patch.object(appconfig, "save"):
+            dlg._on_save()
+        self.assertEqual(acc["base_schedule"]["batches"]["8点30分"]["control"][0], "阿米娅")
+        self.assertIn("8点", acc["base_schedule"]["batches"])
 
     def test_empty_preset_list(self):
         dlg = self._dlg()
@@ -230,6 +263,66 @@ class PresetDialogTest(unittest.TestCase):
         self.assertEqual(dlg.layout_name, "333")
         self.assertEqual(dlg.data["4点"]["control"], [""] * 5)
         self.assertEqual(len(dlg.data["4点"]["manufacture"]), 3)
+
+    def test_plan_label_disabled_and_custom(self):
+        # 未启用精确基建：显示「未启用」；启用后没有匹配的预设 → 「自定义」
+        dlg = self._dlg()
+        self.assertIn("未启用", dlg.plan_lab.text())
+        dlg.bs["enabled"] = True
+        dlg._refresh_plan_label()
+        self.assertIn("自定义", dlg.plan_lab.text())
+
+    def test_plan_label_tracks_content(self):
+        # 「当前方案」实时跟随内容：存预设后显示方案名，手动改动退回「自定义」，
+        # 再应用该预设又显示方案名
+        real_save = appconfig.save
+        real_box = bsdlg_mod._PresetNameBox
+        appconfig.save = lambda cfg: None
+        bsdlg_mod._PresetNameBox = _FakeNameBox
+        self.addCleanup(setattr, appconfig, "save", real_save)
+        self.addCleanup(setattr, bsdlg_mod, "_PresetNameBox", real_box)
+        dlg = self._dlg()
+        dlg.bs["enabled"] = True
+        dlg.drones_switch.setChecked(True)
+        dlg._on_preset_save()                       # 把当前内容存成「新预设」
+        self.assertEqual(dlg.plan_lab.text(), "当前方案：新预设")
+        dlg.edit_map["4点"]["control"][0][0].setText("银灰")   # 手动改动 → 立即自定义
+        self.assertEqual(dlg.plan_lab.text(), "当前方案：自定义")
+        dlg._refresh_presets(select_name="新预设")
+        dlg._on_preset_apply()                      # 确认框已被 patch 为确认
+        self.assertEqual(dlg.plan_lab.text(), "当前方案：新预设")
+
+    def test_plan_label_ignores_other_preset(self):
+        # 已有一套内容不同的预设时，未匹配仍显示「自定义」，不借用预设名
+        preset = {"name": "别的方案",
+                  "schedule": {"layout": "333", "drones": {},
+                               "batches": {"4点": {"control": ["阿米娅"]}}}}
+        dlg = self._dlg(_acc(presets=[copy.deepcopy(preset)]))
+        dlg.bs["enabled"] = True
+        dlg._refresh_plan_label()
+        self.assertEqual(dlg.plan_lab.text(), "当前方案：自定义")
+
+    def test_plan_label_matches_drones_off_preset(self):
+        # 无人机关的预设：应用后开关保持关（旧版无条件置开会漂移出「自定义」），
+        # 保存并重开后仍能匹配回该预设
+        preset = {"name": "无人机关",
+                  "schedule": {"layout": "333",
+                               "drones": {"room": "manufacture", "index": 1,
+                                          "enable": False, "order": "pre"},
+                               "batches": {}}}
+        acc = _acc(presets=[copy.deepcopy(preset)])
+        acc["base_schedule"]["enabled"] = True
+        dlg = self._dlg(acc)
+        dlg._refresh_presets(select_name="无人机关")
+        dlg._on_preset_apply()                      # 确认框已被 patch 为确认
+        self.assertFalse(dlg.drones_switch.isChecked())
+        self.assertEqual(dlg.plan_lab.text(), "当前方案：无人机关")
+        real_save = appconfig.save
+        appconfig.save = lambda cfg: None
+        self.addCleanup(setattr, appconfig, "save", real_save)
+        dlg._on_save()
+        dlg2 = self._dlg(acc)
+        self.assertEqual(dlg2.plan_lab.text(), "当前方案：无人机关")
 
 
 if __name__ == "__main__":

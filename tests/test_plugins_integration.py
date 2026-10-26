@@ -6,6 +6,7 @@
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -31,7 +32,15 @@ def _run(plugin, *argv):
 class PluginsIntegrationTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.root = Path(tempfile.mkdtemp())
+        tmp = tempfile.TemporaryDirectory()
+        cls.addClassCleanup(tmp.cleanup)
+        cls.root = Path(tmp.name)
+        cls.plugin_dir = cls.root / "plugins"
+        # 只复制源代码，CLI 内相对 __file__ 生成的计划也只能落在临时目录。
+        for source in PLUGIN_DIR.rglob("*.py"):
+            target = cls.plugin_dir / source.relative_to(PLUGIN_DIR)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(source, target)
         cls.maa = cls.root / "MAA"
         (cls.maa / "config").mkdir(parents=True)
         gui_new = {
@@ -88,7 +97,7 @@ class PluginsIntegrationTest(unittest.TestCase):
         return self._gui_new()["Configurations"]["Default"]["TaskQueue"]
 
     def test_01_farm_guard(self):
-        code, out = _run(PLUGIN_DIR / "farm_guard" / "farm_guard.py", "apply",
+        code, out = _run(self.plugin_dir / "farm_guard" / "farm_guard.py", "apply",
                          "--config", str(self.cfg_path), "--account", "a1",
                          "--server", "official")
         self.assertEqual(code, 0, out)
@@ -96,7 +105,7 @@ class PluginsIntegrationTest(unittest.TestCase):
         self.assertEqual(self._gui_new().get("Current"), "Default")
 
     def test_02_fight_stage(self):
-        code, out = _run(PLUGIN_DIR / "fight_stage" / "fight_stage.py", "apply",
+        code, out = _run(self.plugin_dir / "fight_stage" / "fight_stage.py", "apply",
                          "--config", str(self.cfg_path), "--account", "a1",
                          "--server", "official")
         self.assertEqual(code, 0, out)
@@ -110,7 +119,7 @@ class PluginsIntegrationTest(unittest.TestCase):
         cfg["accounts"][0]["second_fight_plan"] = ["CE-6", "LS-6"]
         self.cfg_path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2),
                                  encoding="utf-8")
-        code, out = _run(PLUGIN_DIR / "fight_stage" / "fight_stage.py", "apply",
+        code, out = _run(self.plugin_dir / "fight_stage" / "fight_stage.py", "apply",
                          "--config", str(self.cfg_path), "--account", "a1",
                          "--server", "official")
         self.assertEqual(code, 0, out)
@@ -118,7 +127,7 @@ class PluginsIntegrationTest(unittest.TestCase):
         self.assertEqual(fights[1].get("StagePlan"), ["CE-6", "LS-6", "1-7"])
 
     def test_03_fiammetta(self):
-        code, out = _run(PLUGIN_DIR / "fiammetta" / "fiammetta.py", "apply",
+        code, out = _run(self.plugin_dir / "fiammetta" / "fiammetta.py", "apply",
                          "--config", str(self.cfg_path), "--account", "a1",
                          "--server", "official")
         self.assertEqual(code, 0, out)
@@ -128,7 +137,7 @@ class PluginsIntegrationTest(unittest.TestCase):
         self.assertEqual(infrasts[0].get("FiammettaTarget1"), "清流")
 
     def test_04_base_schedule_apply(self):
-        code, out = _run(PLUGIN_DIR / "base_schedule" / "base_schedule.py",
+        code, out = _run(self.plugin_dir / "base_schedule" / "base_schedule.py",
                          "apply", "--config", str(self.cfg_path),
                          "--account", "a1", "--server", "official")
         self.assertEqual(code, 0, out)
@@ -155,7 +164,7 @@ class PluginsIntegrationTest(unittest.TestCase):
         return gj["Configurations"]["Default"].get("Infrast.InfrastMode")
 
     def test_05_infrast_collect_and_restore(self):
-        code, out = _run(PLUGIN_DIR / "infrast_collect" / "infrast_collect.py",
+        code, out = _run(self.plugin_dir / "infrast_collect" / "infrast_collect.py",
                          "apply", "--config", str(self.cfg_path),
                          "--account", "a1", "--server", "official")
         self.assertEqual(code, 0, out)
@@ -184,7 +193,7 @@ class PluginsIntegrationTest(unittest.TestCase):
             self.assertIs(dorm["sort"], False)
             self.assertIs(dorm["skip"], False)
             self.assertEqual(dorm["operators"], [])
-        code, out = _run(PLUGIN_DIR / "infrast_collect" / "infrast_collect.py",
+        code, out = _run(self.plugin_dir / "infrast_collect" / "infrast_collect.py",
                          "restore", "--config", str(self.cfg_path))
         self.assertEqual(code, 0, out)
         self.assertEqual(self._gui_new().get("Current"), "Default")

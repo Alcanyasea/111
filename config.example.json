@@ -13,41 +13,7 @@
         "launch_wait_sec": 120,
         "game_update_min": 90
     },
-    "accounts": [
-        {
-            "id": "official1",
-            "label": "官服 1",
-            "server": "official",
-            "enabled": true,
-            "slot": "official_1",
-            "username": "",
-            "password": "",
-            "second_fight_plan": [],
-            "second_fight_use_optional": true
-        },
-        {
-            "id": "official2",
-            "label": "官服 2",
-            "server": "official",
-            "enabled": true,
-            "slot": "official_2",
-            "username": "",
-            "password": "",
-            "second_fight_plan": [],
-            "second_fight_use_optional": true
-        },
-        {
-            "id": "bilibili",
-            "label": "B 服",
-            "server": "bilibili",
-            "enabled": true,
-            "slot": "bilibili_1",
-            "username": "",
-            "password": "",
-            "second_fight_plan": [],
-            "second_fight_use_optional": true
-        }
-    ],
+    "accounts": [],
     "behavior": {
         "close_emulator": true,
         "morning_shutdown": true,

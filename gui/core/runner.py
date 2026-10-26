@@ -8,6 +8,9 @@ GUI 手动启动时传 -NoShutdown：手动运行不触发自动关机（无论�
 """
 import json
 import subprocess
+import ctypes
+from contextlib import contextmanager
+from ctypes import wintypes
 from pathlib import Path
 
 from core import proc
@@ -24,6 +27,29 @@ MASTER_PROC_NAMES = ("powershell.exe", "pwsh.exe")
 
 # 启动 master.ps1 的 GUI 侧句柄：保住 Popen 与输出文件引用，避免 GC 告警
 _proc_ref = None
+
+
+@contextmanager
+def maintenance_lock(path):
+    """复用 master 的文件共享锁，覆盖检查到清理完成之间的整个窗口。
+
+    ReadWrite + FileShare.Read 与 master_lib.ps1 的 OpenOrCreate 一致。
+    不改写诊断内容、不删除锁文件；退出时 OS 释放句柄，master 可直接接管。
+    """
+    api = ctypes.WinDLL("kernel32", use_last_error=True)
+    api.CreateFileW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD,
+                               wintypes.LPVOID, wintypes.DWORD, wintypes.DWORD,
+                               wintypes.HANDLE]
+    api.CreateFileW.restype = wintypes.HANDLE
+    api.CloseHandle.argtypes = [wintypes.HANDLE]
+    api.CloseHandle.restype = wintypes.BOOL
+    handle = api.CreateFileW(str(path), 0xC0000000, 1, None, 4, 0x80, None)
+    if handle == ctypes.c_void_p(-1).value:
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        yield
+    finally:
+        api.CloseHandle(handle)
 
 
 def _run(args, timeout=15):

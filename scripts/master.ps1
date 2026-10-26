@@ -369,6 +369,8 @@ if ($scheduleEntries.Count -gt 0) {
     if ($null -eq $pick) { $pick = $sorted[$sorted.Count - 1] }
     $hh = [int]$pick.time.Substring(0, 2)
     $bsBatch = if ($hh -eq 0) { "24点" } else { "$($hh)点" }
+    $mm = [int]$pick.time.Substring(3, 2)
+    if ($mm -ne 0) { $bsBatch += ('{0:00}分' -f $mm) }
     $shutdownEnabled = [bool]$pick.shutdown
 } else {
     $isFourOClockRun = ((Get-Date).Hour -ge 4 -and (Get-Date).Hour -lt 16)

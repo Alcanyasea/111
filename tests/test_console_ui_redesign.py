@@ -16,7 +16,7 @@ sys.path.insert(0, str(ROOT / "gui"))
 
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
-import config as appconfig  # noqa: E402
+from tests.test_support import appconfig  # noqa: E402
 import theme  # noqa: E402
 from pages.settings import PaletteSwatch, SettingsPage  # noqa: E402
 from widgets import Pill, _rgba  # noqa: E402

@@ -5,6 +5,9 @@
 （如 8点/12点/24点），制造站/贸易站每台可先选择产品类别（赤金/原石碎片/作战记录），
 再逐个设施/槽位填写干员名；保存后写入 config.json 并调用插件重新生成
 MAA 自定义计划 JSON（master.ps1 启动 MAA 前会自动应用）。
+
+预设行右侧有「当前方案」标签：把弹窗里的排班实时与账号各预设比对
+（布局、无人机、重叠批次），一致则显示预设名，否则显示「自定义」。
 """
 import copy
 import json
@@ -107,11 +110,13 @@ class BaseScheduleDialog(QDialog):
         self.batch_labels = _batch_labels(cfg)
         self.bs = bsplugin.normalize(acc.get("base_schedule"), self.batches)
         self.layout_name = self.bs["layout"]
-        self.data = {
-            b: copy.deepcopy(self.bs["batches"][b]) for b in self.batches
-        }
+        # 只展示当前班次，但保留旧名称和停用班次，避免迁移后保存丢失原排班。
+        self.data = copy.deepcopy(self.bs["batches"])
         self.edit_map = {}
         self.pages = {}
+        # 程序化改内容（应用预设 / 导入排班文件）期间为 True：控件信号会乱入，
+        # 「当前方案」刷新此时直接忽略，填完后再统一刷一次
+        self._loading = False
 
         self.setWindowTitle("精确基建派驻 - %s" % acc.get("label", ""))
         self.setModal(True)
@@ -152,6 +157,14 @@ class BaseScheduleDialog(QDialog):
         self.preset_del_btn.clicked.connect(self._on_preset_delete)
         preset_row.addWidget(self.preset_del_btn)
         preset_row.addStretch(1)
+        self.plan_lab = BodyLabel("")
+        self.plan_lab.setToolTip(
+            "显示当前弹窗里的排班对应哪套预设方案：与某预设完全一致（布局、无人机、"
+            "各重叠批次）时显示其名称，否则显示「自定义」；未启用精确基建时显示"
+            "「未启用」。手动改动任意内容会立即重新判定。")
+        theme.bind(self.plan_lab,
+                   lambda: "color: %s; font-size: 12px;" % theme.TEXT_2)
+        preset_row.addWidget(self.plan_lab)
         root.addLayout(preset_row)
 
         top = QHBoxLayout()
@@ -181,6 +194,8 @@ class BaseScheduleDialog(QDialog):
         self.drones_switch = set_switch_checked_gray(SwitchButton())
         self.drones_switch.setText("启用")
         self.drones_switch.setChecked(bool(self.bs.get("drones", {}).get("enable")))
+        self.drones_switch.checkedChanged.connect(
+            lambda *_: self._refresh_plan_label())
         drones_row.addWidget(self.drones_switch)
         drones_row.addSpacing(8)
         drones_row.addWidget(BodyLabel("目标"))
@@ -191,8 +206,10 @@ class BaseScheduleDialog(QDialog):
         idx = self.drones_room_combo.findData(room)
         self.drones_room_combo.setCurrentIndex(idx if idx >= 0 else 0)
         self.drones_room_combo.currentIndexChanged.connect(self._refresh_drones_index)
+        self.drones_room_combo.currentIndexChanged.connect(self._refresh_plan_label)
         drones_row.addWidget(self.drones_room_combo)
         self.drones_index_combo = ComboBox()
+        self.drones_index_combo.currentIndexChanged.connect(self._refresh_plan_label)
         drones_row.addWidget(self.drones_index_combo)
         drones_row.addWidget(BodyLabel("时机"))
         self.drones_order_combo = ComboBox()
@@ -201,6 +218,7 @@ class BaseScheduleDialog(QDialog):
         order = self.bs.get("drones", {}).get("order", "pre")
         oidx = self.drones_order_combo.findData(order)
         self.drones_order_combo.setCurrentIndex(oidx if oidx >= 0 else 0)
+        self.drones_order_combo.currentIndexChanged.connect(self._refresh_plan_label)
         drones_row.addWidget(self.drones_order_combo)
         drones_row.addStretch(1)
         root.addLayout(drones_row)
@@ -216,8 +234,12 @@ class BaseScheduleDialog(QDialog):
         fia_row.addSpacing(8)
         fia_row.addWidget(BodyLabel("恢复目标"))
         self.fia_combo = ComboBox()
+        # 「（不指定）」占位：批次没填恢复目标时显示它而不是默认顶着「清流」，
+        # 否则读回时会把没选过的「清流」当真实选择写进数据，配置/预设互相漂移
+        self.fia_combo.addItem("（不指定）", userData="")
         for name in FIAMMETTA_TARGETS:
             self.fia_combo.addItem(name, userData=name)
+        self.fia_combo.currentIndexChanged.connect(self._refresh_plan_label)
         tip = ("开启后，换班开始前会把恢复目标与满心情的菲亚梅塔放进宿舍互换心情"
                "（菲亚梅塔随后留在宿舍恢复），之后再按计划换班。\n"
                "每个批次单独设置：可以是有的批次开、有的批次不开。\n"
@@ -234,6 +256,8 @@ class BaseScheduleDialog(QDialog):
         root.addLayout(fia_row)
         self.fia_switch.checkedChanged.connect(
             lambda _=None: self._refresh_fiammetta())
+        self.fia_switch.checkedChanged.connect(
+            lambda _=None: self._refresh_plan_label())
         self._fia_batch = self.batches[0]
         self._load_fiammetta(self._fia_batch)
 
@@ -275,6 +299,7 @@ class BaseScheduleDialog(QDialog):
         self.save_btn.clicked.connect(self._on_save)
         self._refresh_presets()
         self._refresh_hint()
+        self._refresh_plan_label()
 
     # ---------- 界面构建 ----------
 
@@ -297,14 +322,82 @@ class BaseScheduleDialog(QDialog):
             "换班开始前会先把恢复目标与满心情的菲亚梅塔放进宿舍互换心情"
             "（菲亚梅塔随后留在宿舍恢复），再执行换班。")
 
-    @staticmethod
-    def _make_edits(values, placeholders):
+    # ---------- 当前方案标识 ----------
+
+    def _drones_state(self):
+        """顶部无人机行的当前状态（取值口径与 _collect_bs 一致）。"""
+        return {
+            "room": self.drones_room_combo.currentData(),
+            "index": int(self.drones_index_combo.currentData() or 1),
+            "enable": self.drones_switch.isChecked(),
+            "order": self.drones_order_combo.currentData(),
+        }
+
+    def _matching_preset_name(self):
+        """与当前弹窗内容完全一致的预设名（无匹配返回 ""）。
+
+        一致 = 布局、无人机相同，且预设覆盖的各批次（与当前批次集重叠的部分）
+        逐干员一致；预设没覆盖的批次不参与比较（应用预设时它们也保留现状）。
+        两边都先过 bsplugin.normalize，保证比较口径一致。多个预设相同时取列表
+        里靠前的那个。
+        """
+        for p in self._presets():
+            if not isinstance(p, dict):
+                continue
+            ps = p.get("schedule")
+            if not isinstance(ps, dict) or not isinstance(ps.get("batches"), dict):
+                continue
+            norm = bsplugin.normalize(
+                {"layout": ps.get("layout"), "drones": ps.get("drones"),
+                 "batches": ps["batches"]}, self.batches)
+            if norm["layout"] != self.layout_name:
+                continue
+            if norm["drones"] != self._drones_state():
+                continue
+            # 旧批次仅作为历史保留，不应影响当前界面的预设匹配。
+            common = [b for b in self.batches if b in norm["batches"]]
+            if common and all(norm["batches"][b] == self.data[b]
+                              for b in common):
+                return str(p.get("name") or "")
+        return ""
+
+    def _refresh_plan_label(self, *_):
+        """刷新「当前方案」标签：实时反映弹窗内容与哪套预设一致。"""
+        if (getattr(self, "_loading", False)
+                or not hasattr(self, "plan_lab")
+                or len(self.edit_map) < len(self.batches)):
+            return  # __init__ / 程序化填充未完成，控件信号乱入直接忽略
+        # 先把界面各批次读回 self.data（与 _collect_bs 同口径），再参与比对
+        for b in self.batches:
+            self._capture(b)
+        self._capture_fiammetta(self._fia_batch)
+        if not self.bs.get("enabled"):
+            text, tip = "当前方案：未启用", (
+                "该账号未启用精确基建：运行时使用 MAA 自带基建换班，"
+                "这里的排班内容即使保存也不会生效。")
+        else:
+            name = self._matching_preset_name()
+            if name:
+                text = "当前方案：" + name
+                tip = ("当前弹窗里的排班与预设「%s」完全一致"
+                       "（布局、无人机与各重叠批次）。" % name)
+            else:
+                text, tip = "当前方案：自定义", (
+                    "当前弹窗里的排班与该账号任何一套预设都不完全一致"
+                    "（手动改过、导入过排班文件，或还没保存过预设）。\n"
+                    "要回到某套方案：在下拉里选中它点「应用」，再点"
+                    "「保存并生成计划」。")
+        self.plan_lab.setText(text)
+        self.plan_lab.setToolTip(tip)
+
+    def _make_edits(self, values, placeholders):
         edits = []
         for i, val in enumerate(values):
             e = LineEdit()
             e.setText(str(val))
             if i < len(placeholders):
                 e.setPlaceholderText(placeholders[i])
+            e.textChanged.connect(self._refresh_plan_label)
             edits.append(e)
         return edits
 
@@ -493,41 +586,46 @@ class BaseScheduleDialog(QDialog):
         ps = preset.get("schedule") if isinstance(preset, dict) else None
         if not isinstance(ps, dict):
             return
-        # 与导入同流程：先把当前界面读回 self.data（预设未覆盖到的批次保留现状）
-        for b in self.batches:
-            self._capture(b)
-        self._capture_fiammetta(self._fia_batch)
+        self._loading = True
+        try:
+            # 与导入同流程：先把当前界面读回 self.data（预设未覆盖到的批次保留现状）
+            for b in self.batches:
+                self._capture(b)
+            self._capture_fiammetta(self._fia_batch)
 
-        layout = ps.get("layout")
-        if layout in ("333",):
-            self.layout_name = "333"
-        elif layout in ("423", "243"):
-            self.layout_name = "243"
-        self.layout_combo.blockSignals(True)
-        self.layout_combo.setCurrentIndex(0 if self.layout_name == "333" else 1)
-        self.layout_combo.blockSignals(False)
+            layout = ps.get("layout")
+            if layout in ("333",):
+                self.layout_name = "333"
+            elif layout in ("423", "243"):
+                self.layout_name = "243"
+            self.layout_combo.blockSignals(True)
+            self.layout_combo.setCurrentIndex(0 if self.layout_name == "333" else 1)
+            self.layout_combo.blockSignals(False)
 
-        pb = ps.get("batches") if isinstance(ps.get("batches"), dict) else {}
-        merged, matched = {}, []
-        for b in self.batches:
-            if b in pb:
-                merged[b] = copy.deepcopy(pb[b])
-                matched.append(b)
-            else:
-                merged[b] = self.data[b]
-        drones = ps.get("drones") if isinstance(ps.get("drones"), dict) else {}
-        norm = bsplugin.normalize(
-            {"layout": self.layout_name, "drones": drones, "batches": merged},
-            self.batches)
-        self.data = norm["batches"]
+            pb = ps.get("batches") if isinstance(ps.get("batches"), dict) else {}
+            merged, matched = copy.deepcopy(self.data), []
+            for b in self.batches:
+                source = bsplugin.batch_data(pb, b)
+                if source is not None:
+                    merged[b] = copy.deepcopy(source)
+                    matched.append(b)
+                else:
+                    merged[b] = self.data[b]
+            drones = ps.get("drones") if isinstance(ps.get("drones"), dict) else {}
+            norm = bsplugin.normalize(
+                {"layout": self.layout_name, "drones": drones, "batches": merged},
+                self.batches)
+            self.data = norm["batches"]
 
-        if drones:
             self._set_drones_widgets(drones)
 
-        self._rebuild_pages()
-        self._refresh_drones_index()
-        self._load_fiammetta(self._fia_batch)
-        self._refresh_hint()
+            self._rebuild_pages()
+            self._refresh_drones_index()
+            self._load_fiammetta(self._fia_batch)
+            self._refresh_hint()
+        finally:
+            self._loading = False
+        self._refresh_plan_label()
 
         lines = ["已填入预设「%s」（%s 布局）。" % (preset.get("name", ""),
                                                self.layout_name)]
@@ -580,6 +678,7 @@ class BaseScheduleDialog(QDialog):
             box.exec()
             return
         self._refresh_presets(select_name=name)
+        self._refresh_plan_label()
         InfoBar.success(
             "预设已保存",
             "预设「%s」已保存到账号「%s」，仅该账号可用（不与其他账号互通）。"
@@ -610,6 +709,7 @@ class BaseScheduleDialog(QDialog):
             box.exec()
             return
         self._refresh_presets()
+        self._refresh_plan_label()
         InfoBar.success("预设已删除", "预设「%s」已删除。" % name,
                         parent=self, position=InfoBarPosition.TOP, duration=4000)
 
@@ -636,27 +736,32 @@ class BaseScheduleDialog(QDialog):
             return
 
         # 先把当前页面各批次读回 self.data，未覆盖到的批次保留未保存的修改
-        for b in self.batches:
-            self._capture(b)
-        self._capture_fiammetta(self._fia_batch)
-        self.layout_name = result["layout"]
-        self.layout_combo.blockSignals(True)
-        self.layout_combo.setCurrentIndex(0 if self.layout_name == "333" else 1)
-        self.layout_combo.blockSignals(False)
-        for b, data in result["batches"].items():
-            if b in self.data:
-                self.data[b] = data
-        # 统一按文件布局规范化：旧批次多余站台裁剪、旧数组格式转新格式
-        norm = bsplugin.normalize(
-            {"layout": self.layout_name, "batches": self.data}, self.batches)
-        self.data = norm["batches"]
+        self._loading = True
+        try:
+            for b in self.batches:
+                self._capture(b)
+            self._capture_fiammetta(self._fia_batch)
+            self.layout_name = result["layout"]
+            self.layout_combo.blockSignals(True)
+            self.layout_combo.setCurrentIndex(0 if self.layout_name == "333" else 1)
+            self.layout_combo.blockSignals(False)
+            for b, data in result["batches"].items():
+                if b in self.data:
+                    self.data[b] = data
+            # 统一按文件布局规范化：旧批次多余站台裁剪、旧数组格式转新格式
+            norm = bsplugin.normalize(
+                {"layout": self.layout_name, "batches": self.data}, self.batches)
+            self.data = norm["batches"]
 
-        self._apply_import_globals(result)
+            self._apply_import_globals(result)
 
-        self._rebuild_pages()
-        self._refresh_drones_index()
-        self._load_fiammetta(self._fia_batch)
-        self._refresh_hint()
+            self._rebuild_pages()
+            self._refresh_drones_index()
+            self._load_fiammetta(self._fia_batch)
+            self._refresh_hint()
+        finally:
+            self._loading = False
+        self._refresh_plan_label()
 
         summary = []
         if result.get("title"):
@@ -710,18 +815,27 @@ class BaseScheduleDialog(QDialog):
             self.drones_switch.setChecked(False)
 
     def _set_drones_widgets(self, drones):
-        """把一份无人机配置填到顶部控件（导入排班文件 / 应用预设共用）。"""
-        idx = self.drones_room_combo.findData(drones.get("room"))
+        """把一份无人机配置填到顶部控件（导入排班文件 / 应用预设共用）。
+
+        应用预设也走这里：预设里无人机是关的（或没写）时开关要如实落到「关」，
+        不能像旧版那样无条件开——否则应用越多次，配置与预设漂移得越远，
+        「当前方案」也就再也匹配不回预设。
+        """
+        drones = drones if isinstance(drones, dict) else {}
+        room = drones.get("room", "manufacture")
+        idx = self.drones_room_combo.findData(room)
         if idx >= 0:
             self.drones_room_combo.setCurrentIndex(idx)
         self._refresh_drones_index()
-        d_idx = self.drones_index_combo.findData(drones.get("index"))
-        if d_idx >= 0:
-            self.drones_index_combo.setCurrentIndex(d_idx)
-        o_idx = self.drones_order_combo.findData(drones.get("order"))
-        if o_idx >= 0:
-            self.drones_order_combo.setCurrentIndex(o_idx)
-        self.drones_switch.setChecked(True)
+        if "index" in drones:
+            d_idx = self.drones_index_combo.findData(drones.get("index"))
+            if d_idx >= 0:
+                self.drones_index_combo.setCurrentIndex(d_idx)
+        if "order" in drones:
+            o_idx = self.drones_order_combo.findData(drones.get("order"))
+            if o_idx >= 0:
+                self.drones_order_combo.setCurrentIndex(o_idx)
+        self.drones_switch.setChecked(bool(drones.get("enable", False)))
 
     def _refresh_drones_index(self, *_):
         """按目标设施与布局刷新无人机站号下拉（制造 3/4 台，贸易 2/3 台）。"""
@@ -749,6 +863,7 @@ class BaseScheduleDialog(QDialog):
         self._rebuild_pages()
         self._refresh_drones_index()
         self._refresh_hint()
+        self._refresh_plan_label()
 
     def _refresh_fiammetta(self):
         """菲亚梅塔目标下拉只在「本批次」开关打开时可编辑。"""
@@ -800,6 +915,7 @@ class BaseScheduleDialog(QDialog):
             combo.addItem(text, userData=data)
         idx = combo.findData(row.get("product"))
         combo.setCurrentIndex(idx if idx >= 0 else 0)
+        combo.currentIndexChanged.connect(self._refresh_plan_label)
         edits = self._make_edits(row.get("operators", []), ["干员 1", "干员 2", "干员 3"])
         return {"combo": combo, "edits": edits}
 

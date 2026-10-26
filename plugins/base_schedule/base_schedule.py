@@ -76,17 +76,29 @@ DEFAULT_TRADING_PRODUCT = "LMD"
 
 
 def batch_name(time):
-    """HH:MM → 班次名：04:00 → 4点，00:00 → 24点。"""
+    """整点沿用旧键；非整点保留分钟，与 GUI/主脚本一致。"""
     m = re.fullmatch(r"([01]\d|2[0-3]):[0-5]\d", str(time))
     if not m:
         return str(time)
     hour = int(m.group(1))
-    return "%d点" % (24 if hour == 0 else hour)
+    name = "%d点" % (24 if hour == 0 else hour)
+    minute = int(str(time)[3:])
+    return name if minute == 0 else "%s%02d分" % (name, minute)
+
+
+def batch_data(batches, name):
+    """优先精确名称；旧版非整点只存小时键，缺少新键时沿用旧数据。"""
+    value = batches.get(name)
+    if name not in batches and isinstance(name, str):
+        legacy = re.fullmatch(r"(\d+点)\d{2}分", name)
+        if legacy:
+            value = batches.get(legacy.group(1))
+    return value if isinstance(value, dict) else None
 
 
 def schedule_entries(cfg):
     """config.schedule.times 中启用的时间点（升序、去重）。"""
-    sched = cfg.get("schedule") if isinstance(cfg, dict) else {}
+    sched = (cfg.get("schedule") or {}) if isinstance(cfg, dict) else {}
     times = sched.get("times") if isinstance(sched.get("times"), list) else []
     out, seen = [], set()
     for it in times:
@@ -264,9 +276,7 @@ def normalize(bs, batches=None):
     global_fia = bs.get("fiammetta") if isinstance(bs.get("fiammetta"), dict) else None
 
     for b in names:
-        src = batches_src.get(b)
-        if not isinstance(src, dict):
-            src = {}
+        src = batch_data(batches_src, b) or {}
         out["batches"][b] = {
             "control": single(src, "control", 5),
             "meeting": single(src, "meeting", 2),

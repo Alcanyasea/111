@@ -586,7 +586,12 @@ class SettingsPage(ScrollArea):
         box.cancelButton.setText("取消")
         if not box.exec():
             return
-        freed, ok_count, fail_count = cleanup.perform(items)
+        try:
+            freed, ok_count, fail_count = cleanup.perform(items, self.cfg)
+        except cleanup.CleanupBlockedError as exc:
+            InfoBar.warning("清理已取消", str(exc), parent=self.window(),
+                            position=InfoBarPosition.TOP_RIGHT, duration=4000)
+            return
         now = datetime.now().strftime("%Y-%m-%d %H:%M")
         self.cfg.setdefault("cleanup", {})["last_run"] = now
         appconfig.save(self.cfg)

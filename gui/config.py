@@ -21,18 +21,24 @@ CONFIG_PATH = PROJECT_ROOT / "config.json"
 LAST_LOAD_WARNING = ""
 
 
+class ConfigLoadError(OSError):
+    """无法安全加载配置；调用方必须停止启动，不能保存默认值覆盖原文件。"""
+
+
 def batch_name(time):
-    """HH:MM → 班次名：04:00 → 4点，00:00 → 24点。"""
+    """整点沿用旧键；非整点保留分钟，避免同一小时内的排班互相覆盖。"""
     m = re.fullmatch(r"([01]\d|2[0-3]):[0-5]\d", str(time))
     if not m:
         return str(time)
     hour = int(m.group(1))
-    return "%d点" % (24 if hour == 0 else hour)
+    name = "%d点" % (24 if hour == 0 else hour)
+    minute = int(str(time)[3:])
+    return name if minute == 0 else "%s%02d分" % (name, minute)
 
 
 def schedule_batches(cfg):
     """当前配置里的班次名（按时间升序）；缺配置时回退 4点/16点。"""
-    sched = cfg.get("schedule") if isinstance(cfg, dict) else {}
+    sched = (cfg.get("schedule") or {}) if isinstance(cfg, dict) else {}
     times = sched.get("times") if isinstance(sched.get("times"), list) else []
     order = []
     seen = set()
@@ -159,24 +165,12 @@ DEFAULTS = {
         "game_update_min": 90,    # 游戏更新检测最长等待（分钟）
     },
     "accounts": [
-        # 账号数组（顺序即运行顺序）。slot = scripts\accounts\<slot> 登录数据目录
-        # 旧版 {official1: bool, ...} 对象形式由 _migrate_accounts() 自动迁移
+        # 账号数组（顺序即运行顺序）。slot = scripts\accounts\<slot> 登录数据目录。
+        # 默认为空：新机器首次打开控制台没有任何账号，用户在「账号管理」
+        # 用几个加几个；master.ps1 对空账号数组会拒绝运行（防跑错号）。
+        # 旧版 {official1: bool, ...} 对象形式由 _migrate_accounts() 自动迁移，
+        # 迁移结果仍保留官服1/官服2/B服三个历史账号。
         # base_schedule_presets = 该账号专属的基建排班预设（账号之间不互通）
-        {"id": "official1", "label": "官服 1", "server": "official",
-         "enabled": True, "slot": "official_1",
-         "username": "", "password": "",
-         "base_schedule": default_base_schedule(),
-         "base_schedule_presets": []},
-        {"id": "official2", "label": "官服 2", "server": "official",
-         "enabled": True, "slot": "official_2",
-         "username": "", "password": "",
-         "base_schedule": default_base_schedule(),
-         "base_schedule_presets": []},
-        {"id": "bilibili", "label": "B 服", "server": "bilibili",
-         "enabled": True, "slot": "bilibili_1",
-         "username": "", "password": "",
-         "base_schedule": default_base_schedule(),
-         "base_schedule_presets": []},
     ],
     "behavior": {
         "close_emulator": True,   # 完成后关模拟器
@@ -376,7 +370,7 @@ def _migrate_schedule(cfg):
             if isinstance(accs, list):
                 entry["accounts"] = [str(x) for x in accs if str(x).strip()]
             times.append(entry)
-    if not times:
+    if not times and sched.get("times") != []:
         times = deepcopy(DEFAULTS["schedule"]["times"])
     sched["times"] = times
     sched.pop("morning", None)
@@ -442,24 +436,32 @@ def load() -> dict:
     global LAST_LOAD_WARNING
     LAST_LOAD_WARNING = ""
     cfg = deepcopy(DEFAULTS)
-    if CONFIG_PATH.exists():
+    try:
+        with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+            raw = json.load(f)
+        if not isinstance(raw, dict):
+            raise ValueError("配置根节点必须是对象")
+        cfg = _deep_merge(cfg, raw)
+    except FileNotFoundError:
+        pass  # 首次使用尚无配置，可以使用默认值。
+    except (ValueError, UnicodeError) as exc:
+        backup = CONFIG_PATH.with_name(
+            "config.json.corrupt-%s" % datetime.now().strftime("%Y%m%d_%H%M%S_%f"))
         try:
-            with open(CONFIG_PATH, "r", encoding="utf-8") as f:
-                cfg = _deep_merge(cfg, json.load(f))
-        except json.JSONDecodeError as exc:
-            backup = CONFIG_PATH.with_name(
-                "config.json.corrupt-%s" % datetime.now().strftime("%Y%m%d_%H%M%S"))
-            try:
-                CONFIG_PATH.replace(backup)
-                LAST_LOAD_WARNING = (
-                    "config.json 解析失败（%s），已备份为 %s 并使用默认配置启动。\n"
-                    "原文件里的账号列表可在备份文件中找回。" % (exc, backup.name))
-            except OSError:
-                LAST_LOAD_WARNING = (
-                    "config.json 解析失败（%s），本次使用默认配置启动；"
-                    "备份失败，请勿在「运行设置」点保存以免覆盖原文件。" % exc)
-        except OSError:
-            pass  # 读取失败（占用等）不阻塞 GUI 启动，保留原文件
+            CONFIG_PATH.replace(backup)
+        except OSError as backup_error:
+            raise ConfigLoadError(
+                "配置损坏且无法备份，已停止启动以保护原文件。\n"
+                "请解除文件占用或检查访问权限后重启控制台。\n%s" % CONFIG_PATH
+            ) from backup_error
+        LAST_LOAD_WARNING = (
+            "config.json 解析失败（%s），已备份为 %s 并使用默认配置启动。\n"
+            "原文件里的账号列表可在备份文件中找回。" % (exc, backup.name))
+    except OSError as exc:
+        raise ConfigLoadError(
+            "无法读取配置，已停止启动以避免覆盖账号和设置。\n"
+            "请解除文件占用或检查访问权限后重启控制台。\n%s" % CONFIG_PATH
+        ) from exc
     _migrate_accounts(cfg)
     _migrate_schedule(cfg)
     _migrate_global_presets(cfg)

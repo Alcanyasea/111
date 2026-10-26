@@ -9,7 +9,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "gui"))
 
-import config as appconfig  # noqa: E402
+from tests.test_support import appconfig  # noqa: E402
 
 
 class ConfigSaveLoadTest(unittest.TestCase):
@@ -23,7 +23,8 @@ class ConfigSaveLoadTest(unittest.TestCase):
 
     def test_defaults_and_roundtrip(self):
         cfg = appconfig.load()
-        self.assertEqual(cfg["accounts"][0]["id"], "official1")
+        # 新机器默认没有任何账号（用几个加几个），旧版三账号迁移另行覆盖
+        self.assertEqual(cfg["accounts"], [])
         appconfig.save(cfg)
         self.assertEqual(appconfig.load(), cfg)
 
@@ -79,8 +80,7 @@ class DetectMaaDirTest(unittest.TestCase):
         self.assertIsNone(appconfig.detect_maa_official_dir(self.root / "不存在"))
 
     def test_defaults_use_detection_when_base_has_maa(self):
-        # DEFAULTS 构建于 import 时（扫真实 D:\软件\MAA），这里只验证两键
-        # 恒一致且指向 MAA.exe，不依赖本机装没装 MAA
+        # 导入时探测已隔离；这里只验证两键恒一致且指向 MAA.exe。
         self.assertEqual(appconfig.DEFAULTS["paths"]["maa_official_dir"],
                          str(Path(appconfig.DEFAULTS["paths"]["maa_official"]).parent))
         self.assertTrue(

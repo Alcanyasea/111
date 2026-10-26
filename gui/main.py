@@ -18,7 +18,7 @@ from PySide6.QtCore import (QEasingCurve, QPoint, QParallelAnimationGroup,
                             QPropertyAnimation, Qt, QTimer)
 from PySide6.QtGui import QColor, QFont, QIcon, QLinearGradient, QPainter, QPixmap
 from PySide6.QtWidgets import (QApplication, QGraphicsOpacityEffect,
-                               QHBoxLayout, QLabel, QMenu, QSystemTrayIcon,
+                               QHBoxLayout, QLabel, QMenu, QMessageBox, QSystemTrayIcon,
                                QVBoxLayout, QWidget)
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
 
@@ -491,7 +491,10 @@ class MainWindow(FluentWindow):
             return
         items = cleanup.scan(self.cfg)
         if items:
-            freed, ok_count, _ = cleanup.perform(items)
+            try:
+                freed, ok_count, _ = cleanup.perform(items, self.cfg)
+            except cleanup.CleanupBlockedError:
+                return  # 不记清理时间，等下次空闲时重试。
             if ok_count:
                 InfoBar.info("已自动清理", "清除 %d 项，释放 %s"
                              % (ok_count, cleanup.format_size(freed)),
@@ -822,7 +825,13 @@ def main():
     _single_server = QLocalServer()
     _single_server.listen(_SINGLE_KEY)
     _single_server.newConnection.connect(_on_second_instance)
-    _win = MainWindow()
+    try:
+        _win = MainWindow()
+    except appconfig.ConfigLoadError as exc:
+        QMessageBox.critical(None, "无法安全读取配置", str(exc))
+        _single_server.close()
+        _release_single_instance()
+        return 1
     _win.show()
     # MAA 更新途中控制台被强杀/断电时，临时配置修改（RunDirectly=false 等）
     # 不会被 finally 恢复，之后每轮挂机会等完成信号全部超时。启动时按恢复

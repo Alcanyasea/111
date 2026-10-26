@@ -316,7 +316,7 @@ class ScheduleCard(Card):
         lab = BodyLabel(appconfig.batch_name(entry["time"]))
         theme.bind(lab, lambda: "color: %s; %s"
                    % (theme.TEXT_2, theme.font_stack(theme.FS_BODY)))
-        lab.setFixedWidth(40)
+        lab.setFixedWidth(max(40, lab.fontMetrics().horizontalAdvance(lab.text()) + 4))
         edit = LineEdit()
         edit.setFixedWidth(68)
         edit.setClearButtonEnabled(False)

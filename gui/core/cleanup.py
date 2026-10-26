@@ -181,7 +181,28 @@ def _trim_log(path):
         return 0
 
 
-def perform(items):
+class CleanupBlockedError(OSError):
+    """挂机已启动或无法取得维护锁，清理未执行。"""
+
+
+def perform(items, cfg=None):
+    """取得挂机同款排他句柄后清理；失败时不删除任何数据。"""
+    lock_file = LOCK_FILE
+    if cfg:
+        lock_file = Path(cfg.get("paths", {}).get("script_dir") or SCRIPT_DIR) / "master.lock"
+    if runner.is_running():
+        raise CleanupBlockedError("挂机正在运行，请等流程结束后再清理。")
+    try:
+        with runner.maintenance_lock(lock_file):
+            # 即使扫描时是陈旧锁，此刻也正由维护句柄持有，不能删除。
+            safe_items = [it for it in items
+                          if Path(it["path"]).resolve() != lock_file.resolve()]
+            return _perform_unlocked(safe_items)
+    except OSError as exc:
+        raise CleanupBlockedError("无法取得清理锁，可能已有任务启动，请稍后重试。") from exc
+
+
+def _perform_unlocked(items):
     """执行清理，返回 (释放字节数, 成功项数, 失败项数)。"""
     freed = 0
     ok = 0
@@ -189,9 +210,6 @@ def perform(items):
     for it in items:
         kind = it["kind"]
         path = Path(it["path"])
-        # 手动清理有确认弹窗间隔，期间挂机可能刚启动：活动锁绝不删
-        if path == LOCK_FILE and runner.is_running():
-            continue
         if kind == "log":
             n = _trim_log(it["path"])
             if n > 0:

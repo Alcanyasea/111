@@ -16,7 +16,7 @@ sys.path.insert(0, str(ROOT / "gui"))
 
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
-import config as appconfig  # noqa: E402
+from tests.test_support import appconfig  # noqa: E402
 from pages.stage_plan_dialog import FALLBACK_STAGE, StagePlanDialog  # noqa: E402
 
 

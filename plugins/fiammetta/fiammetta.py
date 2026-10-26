@@ -75,7 +75,7 @@ def maa_settings(cfg, acc):
     name, names = active_batch(cfg)
 
     def batch_fia(b):
-        v = batches.get(b)
+        v = bsplugin.batch_data(batches, b) if bsplugin else batches.get(b)
         v = v.get("fiammetta") if isinstance(v, dict) else None
         # 该批次还没单独设置时，沿用早期写在精确基建全局的那一份
         return v if isinstance(v, dict) else global_fia
