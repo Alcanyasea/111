@@ -55,8 +55,36 @@ if (-not (Test-Path $pwshExe)) { $pwshExe = "pwsh" }
 # GBK，两种情况中文都能还原（此前统一按 UTF-8 读，GBK 时日志全是 U+FFFD）
 function Read-ChildText([string]$Path) {
     if (-not (Test-Path $Path)) { return @() }
-    $bytes = [System.IO.File]::ReadAllBytes($Path)
-    if ($bytes.Length -eq 0) { return @() }
+    # 子脚本退出后句柄可能仍被孙进程持有（adb server 等守护进程会继承重定向
+    # 句柄），ReadAllBytes 的共享模式此时撞 sharing violation：切换日志丢失、
+    # tmp 残留（2026-10-27 实测）。显式以「允许他人读写删」共享模式打开并短
+    # 重试；彻底失败只告警返回空，绝不抛异常打断主流程的退出码处理。
+    $bytes = $null
+    for ($attempt = 1; $attempt -le 4; $attempt++) {
+        try {
+            $fs = [System.IO.File]::Open($Path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite -bor [System.IO.FileShare]::Delete)
+            try {
+                $len = [int]$fs.Length
+                $bytes = [byte[]]::new($len)
+                $read = 0
+                while ($read -lt $len) {
+                    $n = $fs.Read($bytes, $read, $len - $read)
+                    if ($n -le 0) { break }
+                    $read += $n
+                }
+            } finally {
+                $fs.Dispose()
+            }
+            break
+        } catch {
+            if ($attempt -eq 4) {
+                Log ("  [WARN] 子进程输出读取失败（文件仍被占用，已重试 3 次）: " + (Split-Path $Path -Leaf))
+                return @()
+            }
+            Start-Sleep -Milliseconds 800
+        }
+    }
+    if ($null -eq $bytes -or $bytes.Length -eq 0) { return @() }
     try {
         $text = [System.Text.UTF8Encoding]::new($false, $true).GetString($bytes)
     } catch {

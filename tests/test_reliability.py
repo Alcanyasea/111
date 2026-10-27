@@ -165,5 +165,83 @@ class CleanupReliabilityTest(unittest.TestCase):
         self.assertEqual(lock.read_text(encoding="ascii"), "999999|123")
 
 
+class ReadChildTextResilienceTest(unittest.TestCase):
+    """master_plugins.ps1 的 Read-ChildText：切换子脚本退出后，重定向输出文件
+    可能仍被孙进程（adb server 等继承句柄的守护进程）持有，读取不得抛异常、
+    不得丢已落盘内容（2026-10-27 实测：异常导致切换日志丢失 + tmp 残留）。
+    仅用临时文件；用语法树单独摘出函数定义执行，不加载 master 脚本链。"""
+
+    LOAD_FN = (
+        "$log = [System.Collections.Generic.List[string]]::new()\n"
+        "function Log { param($m) $log.Add($m) }\n"
+        "$ast = [System.Management.Automation.Language.Parser]::ParseFile("
+        "$env:MAA_TEST_PLUGIN_PS1, [ref]$null, [ref]$null)\n"
+        "$fn = $ast.FindAll({ param($a) $a -is "
+        "[System.Management.Automation.Language.FunctionDefinitionAst] "
+        "-and $a.Name -eq 'Read-ChildText' }, $true)[0]\n"
+        ". ([scriptblock]::Create($fn.Extent.Text))\n"
+    )
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+        self.path = self.root / "switch_output.tmp"
+
+    def _run(self, body):
+        result = subprocess.run(
+            [pwsh_exe(), "-NoProfile", "-Command", self.LOAD_FN + body],
+            env=dict(os.environ, MAA_TEST_PLUGIN_PS1=str(
+                ROOT / "scripts" / "master_plugins.ps1"),
+                MAA_TEST_TMP=str(self.path)),
+            capture_output=True, timeout=60,
+            creationflags=CREATE_NO_WINDOW)
+        if result.returncode != 0:
+            self.fail(f"pwsh exit {result.returncode}: "
+                      f"{result.stderr.decode('utf-8', 'replace')}")
+
+    def test_read_succeeds_while_writer_still_holds_handle(self):
+        # 复刻 Start-Process 重定向的句柄状态：写访问 + 共享读。旧实现
+        # （ReadAllBytes）在此场景直接抛 sharing violation。
+        self._run(
+            '[IO.File]::WriteAllText($env:MAA_TEST_TMP, "line1`r`nline2")\n'
+            "$w = [IO.File]::Open($env:MAA_TEST_TMP, 'Open', 'Write', 'Read')\n"
+            "try {\n"
+            "    $lines = @(Read-ChildText $env:MAA_TEST_TMP)\n"
+            "    if ($lines.Count -ne 2 -or $lines[0] -ne 'line1' "
+            "-or $lines[1] -ne 'line2') { exit 21 }\n"
+            "} finally { $w.Dispose() }\n"
+            "exit 0\n")
+
+    def test_exclusive_lock_returns_empty_with_warn_instead_of_throwing(self):
+        self._run(
+            '[IO.File]::WriteAllText($env:MAA_TEST_TMP, "data")\n'
+            "$h = [IO.File]::Open($env:MAA_TEST_TMP, 'Open', 'Read', 'None')\n"
+            "try {\n"
+            "    $lines = @(Read-ChildText $env:MAA_TEST_TMP)\n"
+            "    if ($lines.Count -ne 0) { exit 22 }\n"
+            "    if (-not ($log | Where-Object { $_ -like '*WARN*' })) "
+            "{ exit 23 }\n"
+            "} finally { $h.Dispose() }\n"
+            "exit 0\n")
+
+    def test_utf8_bom_gbk_and_empty_decoding_unchanged(self):
+        self._run(
+            "[IO.File]::WriteAllBytes($env:MAA_TEST_TMP, "
+            "[Text.Encoding]::UTF8.GetPreamble() + "
+            '[Text.Encoding]::UTF8.GetBytes("中文`r`n第二行"))\n'
+            "$l = @(Read-ChildText $env:MAA_TEST_TMP)\n"
+            "if ($l.Count -ne 2 -or $l[0] -ne '中文' -or $l[1] -ne '第二行') "
+            "{ exit 31 }\n"
+            "[IO.File]::WriteAllBytes($env:MAA_TEST_TMP, "
+            '[Text.Encoding]::GetEncoding(936).GetBytes("中文GBK"))\n'
+            "$l = @(Read-ChildText $env:MAA_TEST_TMP)\n"
+            "if ($l.Count -ne 1 -or $l[0] -ne '中文GBK') { exit 32 }\n"
+            "[IO.File]::WriteAllBytes($env:MAA_TEST_TMP, [byte[]]@())\n"
+            "$l = @(Read-ChildText $env:MAA_TEST_TMP)\n"
+            "if ($l.Count -ne 0) { exit 33 }\n"
+            "exit 0\n")
+
+
 if __name__ == "__main__":
     unittest.main()
