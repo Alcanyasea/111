@@ -1,4 +1,5 @@
 import json
+import hashlib
 import secrets
 import sqlite3
 import time
@@ -31,6 +32,7 @@ class Store:
             db.close()
 
     def create_device(self, device_id, name, token_hash):
+        token_hash = hashlib.sha256(str(token_hash).encode("utf-8")).hexdigest()
         with self._db() as db:
             db.execute("INSERT OR REPLACE INTO devices(id,name,token_hash,revoked,created_at) VALUES(?,?,?,?,?)", (device_id, name, token_hash, 0, int(time.time())))
 

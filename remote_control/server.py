@@ -59,7 +59,8 @@ class ControlHTTPServer(ThreadingHTTPServer):
 
             def _agent(self, device_id):
                 device = parent.store.get_device(device_id)
-                return bool(device and not device["revoked"] and hmac.compare_digest(device["token_hash"], self._token()))
+                token_hash = hashlib.sha256(self._token().encode("utf-8")).hexdigest()
+                return bool(device and not device["revoked"] and hmac.compare_digest(device["token_hash"], token_hash))
 
             def do_GET(self):
                 if self.path == "/api/v1/health": return self._json(200, {"ok": True})
