@@ -22,6 +22,10 @@ class RolePolicy:
     def is_owner(self, user_id):
         return str(user_id) == self.owner_id
 
+    def bound_account(self, user_id):
+        """Return the one account assigned to an editor, or None."""
+        return self.editor_accounts.get(str(user_id))
+
     def account_for(self, user_id, account_id):
         user_id, account_id = str(user_id), str(account_id)
         if self.is_owner(user_id):

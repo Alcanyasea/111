@@ -1,4 +1,5 @@
 import json
+import copy
 from pathlib import Path
 
 from .telegram_base_schedule import DraftStore, InviteStore, RolePolicy, TelegramAPI, build_schedule_patch
@@ -10,6 +11,18 @@ class BaseScheduleBot:
 
     def _account_label(self, account_id):
         return next((a.get("label") or account_id for a in self.cfg.get("accounts") or [] if str(a.get("id")) == str(account_id)), account_id)
+
+    def _save_account_patch(self, account_id, patch):
+        """Save a candidate config atomically, then update the in-memory config."""
+        candidate = copy.deepcopy(self.cfg)
+        account = next(a for a in candidate.get("accounts") or [] if str(a.get("id")) == str(account_id))
+        account["base_schedule"] = patch["base_schedule"]
+        import sys
+        sys.path.insert(0, str(self.project_root / "gui"))
+        import config as appconfig
+        appconfig.save(candidate)
+        self.cfg.clear()
+        self.cfg.update(candidate)
 
     def handle_message(self, message):
         user_id = str(((message.get("from") or {}).get("id")))
@@ -35,12 +48,7 @@ class BaseScheduleBot:
             draft_id = text.split(None, 1)[1].strip()
             try:
                 draft = self.drafts.take(draft_id, user_id, self.policy.owner_id)
-                account = next(a for a in self.cfg.get("accounts") or [] if str(a.get("id")) == draft["account_id"])
-                account["base_schedule"] = draft["patch"]["base_schedule"]
-                import sys
-                sys.path.insert(0, str(self.project_root / "gui"))
-                import config as appconfig
-                appconfig.save(self.cfg)
+                self._save_account_patch(draft["account_id"], draft["patch"])
                 self.api.send(chat_id, "已发布到账号「%s」。" % self._account_label(draft["account_id"]))
             except Exception as exc:
                 self.api.send(chat_id, "发布失败：%s" % str(exc))
@@ -50,11 +58,20 @@ class BaseScheduleBot:
             try:
                 filename = str(document.get("file_name") or "").lower()
                 if not filename.endswith(".json"): raise ValueError("只接受 .json 基建排班文件")
-                account_id = str((message.get("caption") or "").strip())
-                self.policy.account_for(user_id, account_id)
+                if self.policy.is_owner(user_id):
+                    account_id = str((message.get("caption") or "").strip())
+                    self.policy.account_for(user_id, account_id)
+                else:
+                    account_id = self.policy.bound_account(user_id)
+                    if not account_id:
+                        raise PermissionError("账号权限不足")
                 patch, summary = build_schedule_patch(self.cfg, account_id, self.api.download_document(document["file_id"]), self.project_root)
-                draft_id = self.drafts.create(user_id, account_id, patch, summary)
-                self.api.send(chat_id, "%s\n草稿 ID：%s\n%s" % (summary, draft_id, "请所有者发送 /publish " + draft_id))
+                if self.policy.is_owner(user_id):
+                    draft_id = self.drafts.create(user_id, account_id, patch, summary)
+                    self.api.send(chat_id, "%s\n草稿 ID：%s\n%s" % (summary, draft_id, "请所有者发送 /publish " + draft_id))
+                else:
+                    self._save_account_patch(account_id, patch)
+                    self.api.send(chat_id, summary + "\n已直接写入本地配置。")
             except Exception as exc:
                 self.api.send(chat_id, "上传失败：%s" % str(exc))
 

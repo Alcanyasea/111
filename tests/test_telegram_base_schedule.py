@@ -1,7 +1,9 @@
 import json
+import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from remote_control.telegram_base_schedule import RolePolicy, build_schedule_patch, DraftStore, InviteStore
 from remote_control.telegram_bot import BaseScheduleBot
@@ -44,7 +46,7 @@ class TelegramBaseScheduleTests(unittest.TestCase):
             draft = store.take(draft_id, "1", "1")
             self.assertEqual(draft["account_id"], "a1")
 
-    def test_editor_uploads_bound_account_but_cannot_publish(self):
+    def test_editor_uploads_bound_account_directly(self):
         class Api:
             def __init__(self): self.sent = []
             def send(self, chat, text): self.sent.append(text)
@@ -54,11 +56,20 @@ class TelegramBaseScheduleTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             project = Path(__file__).parents[1]
             api = Api(); bot = BaseScheduleBot(api, self.cfg, project, DraftStore(Path(td) / "d.json"), RolePolicy("1", {"2": "a1"}))
-            msg = {"from": {"id": 2}, "chat": {"id": 2}, "caption": "a1", "document": {"file_name": "base.json", "file_id": "f"}}
-            bot.handle_message(msg)
-            self.assertIn("草稿 ID", api.sent[-1])
-            bot.handle_message({"from": {"id": 2}, "chat": {"id": 2}, "text": "/publish nope"})
-            self.assertIn("只有所有者", api.sent[-1])
+            msg = {"from": {"id": 2}, "chat": {"id": 2}, "caption": "a2", "document": {"file_name": "base.json", "file_id": "f"}}
+            sys.path.insert(0, str(project / "gui"))
+            try:
+                import config as appconfig
+                with patch.object(appconfig, "save") as save:
+                    bot.handle_message(msg)
+            finally:
+                sys.path.remove(str(project / "gui"))
+            self.assertTrue(self.cfg["accounts"][0]["base_schedule"]["enabled"])
+            self.assertFalse(self.cfg["accounts"][1]["base_schedule"]["enabled"])
+            save.assert_called_once_with(self.cfg)
+            self.assertNotIn("草稿 ID", api.sent[-1])
+            self.assertIn("官服1", api.sent[-1])
+            self.assertFalse((Path(td) / "d.json").exists())
 
     def test_owner_invite_code_binds_one_user_once(self):
         with tempfile.TemporaryDirectory() as td:

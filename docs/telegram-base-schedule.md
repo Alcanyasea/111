@@ -2,7 +2,7 @@
 
 本功能只同步精确基建人员方案。它不启动/停止挂机，不处理账号密码、token、槽位、日志或其他配置。
 
-所有者使用 `--owner-id` 配置自己的 Telegram 用户 ID；另一位使用 `--editor-id` 配置，并通过 `--editor-account` 绑定到一个账号。编辑者上传 JSON 时，把目标账号 ID 放在 Telegram 文件说明（caption）里。机器人会识别一图流/MAA 自定义基建 JSON，生成草稿并返回预览；只有所有者发送 `/publish 草稿ID` 才会写入本地配置。
+所有者使用 `--owner-id` 配置自己的 Telegram 用户 ID；另一位使用 `--editor-id` 配置，并通过 `--editor-account` 绑定到一个账号。机器人会识别一图流/MAA 自定义基建 JSON。编辑者上传后会直接写入绑定账号；文件说明（caption）里的账号 ID 对编辑者无效，因此她不能借此操作其他账号。所有者上传仍生成草稿并返回预览，只有所有者发送 `/publish 草稿ID` 才会写入本地配置。
 
 启动示例：
 
