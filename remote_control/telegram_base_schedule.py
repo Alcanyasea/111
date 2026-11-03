@@ -151,6 +151,12 @@ class TelegramAPI:
     def send(self, chat_id, text):
         return self.call("sendMessage", {"chat_id": str(chat_id), "text": text})
 
+    def set_my_commands(self, commands, scope=None):
+        data = {"commands": json.dumps(commands, ensure_ascii=False)}
+        if scope is not None:
+            data["scope"] = json.dumps(scope, ensure_ascii=False)
+        return self.call("setMyCommands", data)
+
     def updates(self, offset=None):
         data = {"timeout": 25, "allowed_updates": json.dumps(["message"])}
         if offset is not None: data["offset"] = offset

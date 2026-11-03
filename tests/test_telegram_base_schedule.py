@@ -91,5 +91,19 @@ class TelegramBaseScheduleTests(unittest.TestCase):
             bot.handle_message({"from": {"id": "2"}, "chat": {"id": "2"}, "text": "/bind " + code})
             self.assertEqual(policy.editor_accounts["2"], "a1")
 
+    def test_command_menu_separates_owner_commands_from_editor_commands(self):
+        class Api:
+            def __init__(self): self.menus = []
+            def set_my_commands(self, commands, scope=None): self.menus.append((commands, scope))
+
+        api = Api()
+        bot = BaseScheduleBot(api, self.cfg, Path("."), DraftStore(Path(tempfile.mkdtemp()) / "d.json"), RolePolicy("1", {"2": "a1"}))
+        bot.configure_commands()
+        self.assertEqual(len(api.menus), 2)
+        default, owner = api.menus
+        self.assertEqual([item["command"] for item in default[0]], ["start", "upload", "bind"])
+        self.assertEqual([item["command"] for item in owner[0]], ["start", "upload", "invite", "publish"])
+        self.assertEqual(owner[1], {"type": "chat", "chat_id": "1"})
+
 
 if __name__ == "__main__": unittest.main()

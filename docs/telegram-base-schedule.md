@@ -18,4 +18,6 @@ python -m remote_control.telegram_bot `
 
 你发送 `/invite` 生成绑定码，另一位发送 `/bind 绑定码` 即可自动绑定到 A；绑定码 10 分钟有效且只能使用一次。
 
+机器人启动时会自动设置命令菜单。编辑者可从菜单选择 `/start`、`/upload`、`/bind`；所有者额外拥有 `/invite` 和 `/publish`。选择 `/upload` 后直接发送基建 JSON 文件即可。
+
 草稿文件只放在本地，不上传到 VPS。建议把机器人作为 Windows 计划任务/后台进程运行，使用环境变量保存 Bot Token；配置改动沿用 `config.json` 的原子写入和每日备份。

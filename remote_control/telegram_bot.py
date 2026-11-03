@@ -24,6 +24,20 @@ class BaseScheduleBot:
         self.cfg.clear()
         self.cfg.update(candidate)
 
+    def configure_commands(self):
+        """Install compact menus; owner gets publishing and invite commands."""
+        editor_commands = [
+            {"command": "start", "description": "查看机器人状态"},
+            {"command": "upload", "description": "上传基建配置 JSON"},
+            {"command": "bind", "description": "使用绑定码关联账号"},
+        ]
+        owner_commands = editor_commands[:2] + [
+            {"command": "invite", "description": "生成编辑者绑定码"},
+            {"command": "publish", "description": "发布草稿到本地配置"},
+        ]
+        self.api.set_my_commands(editor_commands)
+        self.api.set_my_commands(owner_commands, {"type": "chat", "chat_id": self.policy.owner_id})
+
     def handle_message(self, message):
         user_id = str(((message.get("from") or {}).get("id")))
         chat_id = message.get("chat", {}).get("id", user_id)
@@ -31,6 +45,9 @@ class BaseScheduleBot:
         if text == "/start":
             allowed = self.policy.is_owner(user_id) or user_id in self.policy.editor_accounts
             self.api.send(chat_id, "基建配置机器人已就绪。" if allowed else "你没有权限使用此机器人。")
+            return
+        if text == "/upload":
+            self.api.send(chat_id, "请直接发送基建排班 JSON 文件。编辑者会写入绑定账号；所有者会生成草稿。")
             return
         if text == "/invite":
             if not self.policy.is_owner(user_id): self.api.send(chat_id, "只有所有者可以生成绑定码。"); return
@@ -104,7 +121,9 @@ def main():
     if not editor_account:
         p.error("需要 --editor-account 或 --editor-account-label")
     policy = RolePolicy(args.owner_id, {x: editor_account for x in args.editor_id})
-    BaseScheduleBot(TelegramAPI(token), appconfig.load(), args.project, DraftStore(args.drafts), policy, InviteStore(args.invites), editor_account).run()
+    bot = BaseScheduleBot(TelegramAPI(token), appconfig.load(), args.project, DraftStore(args.drafts), policy, InviteStore(args.invites), editor_account)
+    bot.configure_commands()
+    bot.run()
 
 
 if __name__ == "__main__": main()
