@@ -3,7 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from remote_control.telegram_base_schedule import RolePolicy, build_schedule_patch, DraftStore
+from remote_control.telegram_base_schedule import RolePolicy, build_schedule_patch, DraftStore, InviteStore
 from remote_control.telegram_bot import BaseScheduleBot
 
 
@@ -59,6 +59,26 @@ class TelegramBaseScheduleTests(unittest.TestCase):
             self.assertIn("草稿 ID", api.sent[-1])
             bot.handle_message({"from": {"id": 2}, "chat": {"id": 2}, "text": "/publish nope"})
             self.assertIn("只有所有者", api.sent[-1])
+
+    def test_owner_invite_code_binds_one_user_once(self):
+        with tempfile.TemporaryDirectory() as td:
+            store = InviteStore(Path(td) / "invites.json")
+            code = store.create("a1", ttl=600)
+            self.assertEqual(store.redeem(code, "editor-1"), "a1")
+            with self.assertRaises(ValueError): store.redeem(code, "editor-2")
+
+    def test_owner_generates_code_and_recipient_binds_automatically(self):
+        class Api:
+            def __init__(self): self.sent = []
+            def send(self, chat, text): self.sent.append(text)
+        with tempfile.TemporaryDirectory() as td:
+            api = Api(); policy = RolePolicy("1"); invites = InviteStore(Path(td) / "i.json")
+            from remote_control.telegram_bot import BaseScheduleBot
+            bot = BaseScheduleBot(api, self.cfg, Path(td), DraftStore(Path(td) / "d.json"), policy, invites, "a1")
+            bot.handle_message({"from": {"id": "1"}, "chat": {"id": "1"}, "text": "/invite"})
+            code = api.sent[-1].splitlines()[-1]
+            bot.handle_message({"from": {"id": "2"}, "chat": {"id": "2"}, "text": "/bind " + code})
+            self.assertEqual(policy.editor_accounts["2"], "a1")
 
 
 if __name__ == "__main__": unittest.main()

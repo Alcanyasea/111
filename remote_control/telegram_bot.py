@@ -1,12 +1,12 @@
 import json
 from pathlib import Path
 
-from .telegram_base_schedule import DraftStore, RolePolicy, TelegramAPI, build_schedule_patch
+from .telegram_base_schedule import DraftStore, InviteStore, RolePolicy, TelegramAPI, build_schedule_patch
 
 
 class BaseScheduleBot:
-    def __init__(self, api, cfg, project_root, drafts, policy):
-        self.api, self.cfg, self.project_root, self.drafts, self.policy = api, cfg, Path(project_root), drafts, policy
+    def __init__(self, api, cfg, project_root, drafts, policy, invites=None, invite_account=None):
+        self.api, self.cfg, self.project_root, self.drafts, self.policy, self.invites, self.invite_account = api, cfg, Path(project_root), drafts, policy, invites, invite_account
 
     def _account_label(self, account_id):
         return next((a.get("label") or account_id for a in self.cfg.get("accounts") or [] if str(a.get("id")) == str(account_id)), account_id)
@@ -18,6 +18,16 @@ class BaseScheduleBot:
         if text == "/start":
             allowed = self.policy.is_owner(user_id) or user_id in self.policy.editor_accounts
             self.api.send(chat_id, "基建配置机器人已就绪。" if allowed else "你没有权限使用此机器人。")
+            return
+        if text == "/invite":
+            if not self.policy.is_owner(user_id): self.api.send(chat_id, "只有所有者可以生成绑定码。"); return
+            code = self.invites.create(self.invite_account)
+            self.api.send(chat_id, "绑定码（10分钟内有效、只能使用一次）：\n" + code); return
+        if text.startswith("/bind "):
+            try:
+                account_id = self.invites.redeem(text.split(None, 1)[1], user_id); self.policy.editor_accounts[user_id] = account_id
+                self.api.send(chat_id, "绑定成功，只能管理账号「%s」。" % self._account_label(account_id))
+            except Exception as exc: self.api.send(chat_id, "绑定失败：%s" % exc)
             return
         if text.startswith("/publish "):
             if not self.policy.is_owner(user_id):
@@ -59,8 +69,12 @@ class BaseScheduleBot:
 def main():
     import argparse
     p = argparse.ArgumentParser(description="Telegram 精确基建配置机器人")
-    p.add_argument("--token", required=True); p.add_argument("--owner-id", required=True); p.add_argument("--editor-id", action="append", default=[]); p.add_argument("--editor-account", default=None); p.add_argument("--editor-account-label", default=None); p.add_argument("--project", required=True); p.add_argument("--drafts", required=True)
+    p.add_argument("--token", default=None); p.add_argument("--token-env", default="MAA_TELEGRAM_TOKEN"); p.add_argument("--owner-id", required=True); p.add_argument("--editor-id", action="append", default=[]); p.add_argument("--editor-account", default=None); p.add_argument("--editor-account-label", default=None); p.add_argument("--project", required=True); p.add_argument("--drafts", required=True); p.add_argument("--invites", required=True)
     args = p.parse_args()
+    import os
+    token = args.token or os.environ.get(args.token_env)
+    if not token:
+        p.error("需要 --token 或环境变量 " + args.token_env)
     import sys
     sys.path.insert(0, str(Path(args.project) / "gui"))
     import config as appconfig
@@ -73,7 +87,7 @@ def main():
     if not editor_account:
         p.error("需要 --editor-account 或 --editor-account-label")
     policy = RolePolicy(args.owner_id, {x: editor_account for x in args.editor_id})
-    BaseScheduleBot(TelegramAPI(args.token), appconfig.load(), args.project, DraftStore(args.drafts), policy).run()
+    BaseScheduleBot(TelegramAPI(token), appconfig.load(), args.project, DraftStore(args.drafts), policy, InviteStore(args.invites), editor_account).run()
 
 
 if __name__ == "__main__": main()

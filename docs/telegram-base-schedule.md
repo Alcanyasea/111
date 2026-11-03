@@ -10,10 +10,12 @@
 python -m remote_control.telegram_bot `
   --token "$env:MAA_TELEGRAM_TOKEN" `
   --owner-id 123456789 `
-  --editor-id 987654321 `
   --editor-account-label A `
+  --invites D:\1\.telegram\invites.json `
   --project D:\1 `
   --drafts D:\1\.telegram\drafts.json
 ```
+
+你发送 `/invite` 生成绑定码，另一位发送 `/bind 绑定码` 即可自动绑定到 A；绑定码 10 分钟有效且只能使用一次。
 
 草稿文件只放在本地，不上传到 VPS。建议把机器人作为 Windows 计划任务/后台进程运行，使用环境变量保存 Bot Token；配置改动沿用 `config.json` 的原子写入和每日备份。

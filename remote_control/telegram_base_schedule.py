@@ -108,6 +108,28 @@ class DraftStore:
         return draft
 
 
+class InviteStore:
+    def __init__(self, path):
+        self.path = Path(path); self.path.parent.mkdir(parents=True, exist_ok=True)
+
+    def _read(self):
+        if not self.path.exists(): return {}
+        try:
+            value = json.loads(self.path.read_text(encoding="utf-8")); return value if isinstance(value, dict) else {}
+        except (OSError, ValueError): return {}
+
+    def _write(self, value):
+        tmp = self.path.with_suffix(".tmp-%d" % os.getpid()); tmp.write_text(json.dumps(value), encoding="utf-8"); os.replace(tmp, self.path)
+
+    def create(self, account_id, ttl=600):
+        invites = self._read(); code = secrets.token_urlsafe(6).upper(); invites[code] = {"account_id": str(account_id), "expires_at": int(time.time()) + int(ttl), "used": False}; self._write(invites); return code
+
+    def redeem(self, code, user_id):
+        invites = self._read(); item = invites.get(str(code).strip().upper())
+        if not item or item.get("used") or int(item.get("expires_at", 0)) < int(time.time()): raise ValueError("绑定码无效或已过期")
+        item["used"] = True; item["user_id"] = str(user_id); invites[str(code).strip().upper()] = item; self._write(invites); return item["account_id"]
+
+
 class TelegramAPI:
     def __init__(self, token, opener=urlopen):
         self.base = "https://api.telegram.org/bot" + token
