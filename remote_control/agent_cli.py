@@ -21,9 +21,18 @@ def main(argv=None):
         state = LocalState(project_root)
         executor = CommandExecutor(cfg, runner, None, state)
         client = AgentClient(args.url, args.device, args.token)
-        client.register(state.read_snapshot())
+        delay = 1
         while True:
-            item = client.poll(); command = item.get("command") or (item if item.get("id") else None)
+            try:
+                client.register(state.read_snapshot()); delay = 1; break
+            except OSError:
+                time.sleep(delay); delay = min(delay * 2, 60)
+        while True:
+            try:
+                item = client.poll(); delay = 1
+            except OSError:
+                time.sleep(delay); delay = min(delay * 2, 60); continue
+            command = item.get("command") or (item if item.get("id") else None)
             if command:
                 result = executor.execute(command)
                 client.post_result(command["id"], command.get("lease", ""), result)

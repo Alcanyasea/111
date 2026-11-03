@@ -27,7 +27,7 @@ class CommandExecutor:
 
     def execute(self, command):
         payload = command.get("payload", command); kind = payload.get("kind")
-        if kind in {"run", "collect"} and self.runner.is_running(): return {"state": "failed", "error": "busy"}
+        if kind in {"run", "collect", "switch_account"} and self.runner.is_running(): return {"state": "failed", "error": "busy"}
         try:
             if kind == "run": self.runner.start(self.cfg)
             elif kind == "collect": self.runner.start_collect(self.cfg)
@@ -37,4 +37,4 @@ class CommandExecutor:
             elif kind == "refresh_status": pass
             else: return {"state": "failed", "error": "unknown command"}
             return {"state": "succeeded", "result": {"kind": kind}}
-        except Exception as exc: return {"state": "failed", "error": str(exc)}
+        except Exception: return {"state": "failed", "error": "execution_failed"}

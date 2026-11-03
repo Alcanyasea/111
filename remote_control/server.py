@@ -47,6 +47,9 @@ class ControlHTTPServer(ThreadingHTTPServer):
                 data = json.dumps(payload, ensure_ascii=False).encode()
                 self.send_response(status); self.send_header("Content-Type", "application/json; charset=utf-8"); self.send_header("Content-Length", str(len(data))); self.end_headers(); self.wfile.write(data)
 
+            def _empty(self, status):
+                self.send_response(status); self.send_header("Content-Length", "0"); self.end_headers()
+
             def _body(self):
                 length = int(self.headers.get("Content-Length", "0")); return json.loads(self.rfile.read(length) or b"{}")
 
@@ -72,7 +75,7 @@ class ControlHTTPServer(ThreadingHTTPServer):
                 parts = self.path.strip("/").split("/")
                 if self.path == "/api/v1/devices":
                     if not self._admin(): return self._json(401, {"error": "unauthorized"})
-                    return self._json(200, {"devices": []})
+                    return self._json(200, {"devices": parent.store.list_devices()})
                 if len(parts) == 5 and parts[:3] == ["api", "v1", "devices"] and parts[4] == "snapshot":
                     if not self._admin(): return self._json(401, {"error": "unauthorized"})
                     return self._json(200, parent.store.get_snapshot(parts[3]) or {})
@@ -80,7 +83,7 @@ class ControlHTTPServer(ThreadingHTTPServer):
                     device_id = parts[3]
                     if not self._agent(device_id): return self._json(401, {"error": "unauthorized"})
                     item = parent.store.claim_command(device_id)
-                    return self._json(200, item or {"command": None})
+                    return self._json(200, item) if item else self._empty(204)
                 return self._json(404, {"error": "not_found"})
 
             def do_POST(self):
@@ -100,15 +103,22 @@ class ControlHTTPServer(ThreadingHTTPServer):
                     return self._json(201, {"device_id": device_id, "agent_token": agent_token})
                 if len(parts) == 5 and parts[:3] == ["api", "v1", "devices"] and parts[4] == "register":
                     if not self._agent(parts[3]): return self._json(401, {"error": "unauthorized"})
-                    parent.store.save_snapshot(parts[3], body); return self._json(200, {"ok": True})
+                    from .protocol import redact_status
+                    parent.store.save_snapshot(parts[3], redact_status(body)); return self._json(200, {"ok": True})
                 if len(parts) == 6 and parts[:3] == ["api", "v1", "devices"] and parts[4] == "commands" and parts[5] == "result":
                     device_id = parts[3]
                     if not self._agent(device_id): return self._json(401, {"error": "unauthorized"})
-                    ok = parent.store.finish_command(body.get("command_id", ""), body.get("lease", ""), body.get("state", "failed"), body.get("result", {}))
+                    from .protocol import redact_status
+                    state = body.get("state", "failed")
+                    if state not in {"succeeded", "failed", "cancelled"}: return self._json(400, {"error": "invalid_state"})
+                    ok = parent.store.finish_command(body.get("command_id", ""), body.get("lease", ""), state, redact_status(body.get("result", {})), device_id=device_id)
                     return self._json(200 if ok else 409, {"ok": ok})
                 if len(parts) == 5 and parts[:3] == ["api", "v1", "devices"] and parts[4] == "commands":
                     if not self._admin(): return self._json(401, {"error": "unauthorized"})
                     device_id = parts[3]
+                    device = parent.store.get_device(device_id)
+                    if not device: return self._json(404, {"error": "device_not_found"})
+                    if device["revoked"]: return self._json(409, {"error": "device_revoked"})
                     try:
                         payload = command_payload(body["kind"], body.get("args", {}), body["idempotency_key"], int(body["expires_at"]))
                     except (KeyError, ValueError, ProtocolError) as exc:

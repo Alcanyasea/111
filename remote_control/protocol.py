@@ -1,5 +1,6 @@
 import copy
 import re
+import time
 
 ALLOWED_COMMANDS = {"run", "collect", "stop", "switch_account", "patch_config", "refresh_status"}
 SECRET_KEYS = {"password", "token", "access_token", "uid", "username"}
@@ -27,9 +28,16 @@ def command_payload(kind, args, idempotency_key, expires_at):
         raise ProtocolError("unknown command")
     if not isinstance(args, dict) or not isinstance(idempotency_key, str) or not idempotency_key.strip():
         raise ProtocolError("invalid command fields")
-    if not isinstance(expires_at, int) or expires_at <= 0:
+    if not isinstance(expires_at, int) or expires_at < int(time.time()) or expires_at > int(time.time()) + 86400:
         raise ProtocolError("invalid expiry")
-    return {"kind": kind, "args": _safe_value(copy.deepcopy(args)), "idempotency_key": idempotency_key.strip(), "expires_at": expires_at}
+    safe_args = _safe_value(copy.deepcopy(args))
+    if kind in {"run", "collect", "stop", "refresh_status"} and safe_args:
+        raise ProtocolError("command does not accept arguments")
+    if kind == "switch_account" and (set(safe_args) != {"slot"} or not re.fullmatch(r"[A-Za-z0-9_.-]{1,80}", str(safe_args["slot"]))):
+        raise ProtocolError("invalid account slot")
+    if kind == "patch_config" and (set(safe_args) != {"base_revision", "patch"} or not isinstance(safe_args["base_revision"], int) or not isinstance(safe_args["patch"], dict)):
+        raise ProtocolError("invalid config patch")
+    return {"kind": kind, "args": safe_args, "idempotency_key": idempotency_key.strip(), "expires_at": expires_at}
 
 
 def redact_config(cfg):
@@ -38,7 +46,7 @@ def redact_config(cfg):
         if not isinstance(acc, dict):
             continue
         slot = str(acc.get("slot") or "")
-        out["accounts"].append({"id": str(acc.get("id") or ""), "label": str(acc.get("label") or ""), "server": str(acc.get("server") or "official"), "enabled": bool(acc.get("enabled", True)), "slot_present": bool(slot) and False})
+        out["accounts"].append({"id": str(acc.get("id") or ""), "label": str(acc.get("label") or ""), "server": str(acc.get("server") or "official"), "enabled": bool(acc.get("enabled", True)), "slot_present": bool(acc.get("slot_present", False))})
     sched = cfg.get("schedule")
     if isinstance(sched, dict):
         out["schedule"] = {"times": copy.deepcopy(sched.get("times") or []), "collect_times": copy.deepcopy(sched.get("collect_times") or [])}

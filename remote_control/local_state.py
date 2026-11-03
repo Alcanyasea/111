@@ -37,15 +37,36 @@ class LocalState:
 
     def read_snapshot(self):
         from .protocol import redact_config
-        return redact_config(self._read())
+        cfg = self._read(); snapshot = redact_config(cfg)
+        for source, target in zip(cfg.get("accounts") or [], snapshot.get("accounts") or []):
+            slot = str(source.get("slot") or "") if isinstance(source, dict) else ""
+            target["slot_present"] = bool(slot) and (self.root / "scripts" / "accounts" / slot).is_dir()
+        return snapshot
 
     def apply_patch(self, patch, base_revision):
         with self.acquire_write_lock():
             cfg = self._read(); current = int(cfg.get("remote_revision", 0) or 0)
             if current != int(base_revision): raise RevisionConflict("configuration revision changed")
-            if not isinstance(patch, dict) or any(k in {"password", "token", "username", "uid", "slot"} for k in patch): raise ValueError("secret patch rejected")
+            self._validate_patch(patch)
             self.backup_config(); cfg.update(patch); cfg["remote_revision"] = current + 1
             tmp = self.config_path.with_suffix(".json.remote-tmp")
             tmp.write_text(json.dumps(cfg, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
             os.replace(tmp, self.config_path)
             return cfg["remote_revision"]
+
+    @staticmethod
+    def _validate_patch(patch):
+        if not isinstance(patch, dict): raise ValueError("patch must be an object")
+        allowed_top = {"accounts", "schedule", "remote_revision"}
+        if any(k not in allowed_top for k in patch): raise ValueError("field is not remotely editable")
+        forbidden = {"password", "token", "username", "uid", "slot", "paths", "script_dir", "log_file"}
+        account_fields = {"id", "label", "server", "enabled", "second_fight_plan", "second_fight_use_optional", "base_schedule", "base_schedule_presets"}
+        def walk(value, key=""):
+            if key in forbidden: raise ValueError("secret or path field rejected")
+            if isinstance(value, dict):
+                for name, child in value.items():
+                    if name not in account_fields and key == "accounts": raise ValueError("account field is not remotely editable")
+                    walk(child, str(name))
+            elif isinstance(value, list):
+                for child in value: walk(child, key)
+        walk(patch)

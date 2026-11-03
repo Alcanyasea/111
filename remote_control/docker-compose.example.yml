@@ -1,6 +1,8 @@
 services:
   maa-control:
-    build: .
+    build:
+      context: ..
+      dockerfile: remote_control/Dockerfile
     command: python -m remote_control.server_cli --db /data/control.sqlite --bind 0.0.0.0 --port 8765 --password-env MAA_CONTROL_PASSWORD
     environment:
       MAA_CONTROL_PASSWORD: change-me

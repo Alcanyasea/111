@@ -41,6 +41,10 @@ class Store:
             row = db.execute("SELECT * FROM devices WHERE id=?", (device_id,)).fetchone()
             return dict(row) if row else None
 
+    def list_devices(self):
+        with self._db() as db:
+            return [dict(row) for row in db.execute("SELECT id,name,revoked,created_at FROM devices ORDER BY created_at,id")]
+
     def revoke_device(self, device_id):
         with self._db() as db:
             db.execute("UPDATE devices SET revoked=1 WHERE id=?", (device_id,))
@@ -63,6 +67,7 @@ class Store:
             if not dev or dev[0]:
                 return None
             db.execute("UPDATE commands SET state='expired' WHERE device_id=? AND state='queued' AND expires_at<=?", (device_id, now))
+            db.execute("UPDATE commands SET state='queued',lease=NULL,lease_until=NULL WHERE device_id=? AND state IN ('claimed','running') AND lease_until<=?", (device_id, now))
             row = db.execute("SELECT * FROM commands WHERE device_id=? AND state='queued' ORDER BY created_at,id LIMIT 1", (device_id,)).fetchone()
             if not row:
                 return None
@@ -73,9 +78,12 @@ class Store:
             result.update({"state": "claimed", "lease": lease, "lease_until": until, "payload": json.loads(row["payload"])})
             return result
 
-    def finish_command(self, command_id, lease, state, result):
+    def finish_command(self, command_id, lease, state, result, now=None, device_id=None):
         with self._db() as db:
-            cur = db.execute("UPDATE commands SET state=?,result=? WHERE id=? AND lease=? AND state IN ('claimed','running')", (state, json.dumps(result), command_id, lease))
+            if device_id is None:
+                cur = db.execute("UPDATE commands SET state=?,result=? WHERE id=? AND lease=? AND lease_until>? AND state IN ('claimed','running')", (state, json.dumps(result), command_id, lease, int(time.time() if now is None else now)))
+            else:
+                cur = db.execute("UPDATE commands SET state=?,result=? WHERE id=? AND device_id=? AND lease=? AND lease_until>? AND state IN ('claimed','running')", (state, json.dumps(result), command_id, device_id, lease, int(time.time() if now is None else now)))
             return cur.rowcount == 1
 
     def save_snapshot(self, device_id, payload):

@@ -483,12 +483,8 @@ def save(cfg: dict):
     """
     CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
     try:
-        from core.remote_revision import backup_config, config_write_lock, next_revision
-        with config_write_lock(CONFIG_PATH):
-            if CONFIG_PATH.exists():
-                backup_config(CONFIG_PATH)
-            next_revision(cfg)
-            _save_atomic(cfg)
+        from core.remote_revision import save_cfg
+        save_cfg(CONFIG_PATH, cfg)
     except ImportError:
         _save_atomic(cfg)
 
