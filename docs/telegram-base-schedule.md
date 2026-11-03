@@ -11,7 +11,7 @@ python -m remote_control.telegram_bot `
   --token "$env:MAA_TELEGRAM_TOKEN" `
   --owner-id 123456789 `
   --editor-id 987654321 `
-  --editor-account official_1 `
+  --editor-account-label A `
   --project D:\1 `
   --drafts D:\1\.telegram\drafts.json
 ```

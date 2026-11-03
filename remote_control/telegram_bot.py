@@ -59,12 +59,20 @@ class BaseScheduleBot:
 def main():
     import argparse
     p = argparse.ArgumentParser(description="Telegram 精确基建配置机器人")
-    p.add_argument("--token", required=True); p.add_argument("--owner-id", required=True); p.add_argument("--editor-id", action="append", default=[]); p.add_argument("--editor-account", required=True); p.add_argument("--project", required=True); p.add_argument("--drafts", required=True)
+    p.add_argument("--token", required=True); p.add_argument("--owner-id", required=True); p.add_argument("--editor-id", action="append", default=[]); p.add_argument("--editor-account", default=None); p.add_argument("--editor-account-label", default=None); p.add_argument("--project", required=True); p.add_argument("--drafts", required=True)
     args = p.parse_args()
     import sys
     sys.path.insert(0, str(Path(args.project) / "gui"))
     import config as appconfig
-    policy = RolePolicy(args.owner_id, {x: args.editor_account for x in args.editor_id})
+    editor_account = args.editor_account
+    if not editor_account and args.editor_account_label:
+        matches = [a for a in appconfig.load().get("accounts") or [] if str(a.get("label") or "") == args.editor_account_label]
+        if len(matches) != 1:
+            p.error("账号名称未唯一匹配：%s" % args.editor_account_label)
+        editor_account = str(matches[0].get("id"))
+    if not editor_account:
+        p.error("需要 --editor-account 或 --editor-account-label")
+    policy = RolePolicy(args.owner_id, {x: editor_account for x in args.editor_id})
     BaseScheduleBot(TelegramAPI(args.token), appconfig.load(), args.project, DraftStore(args.drafts), policy).run()
 
 
