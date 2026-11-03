@@ -74,6 +74,8 @@
 
 仓库现在提供轻量的服务器控制平面与 Windows 本地 Agent：服务器只保存命令和脱敏状态，MuMu/MAA、账号密码和槽位数据仍在本机执行。部署说明见 [`docs/remote-control.md`](docs/remote-control.md)；示例服务文件位于 `remote_control/`。首次配对以本地配置为准，手机端不能录入密码或登录 token。
 
+如果只需要远程管理精确基建人员方案，使用 Telegram 方案：见 [`docs/telegram-base-schedule.md`](docs/telegram-base-schedule.md)。它只接受基建 JSON，另一位用户只能管理绑定账号，上传后由所有者发布。
+
 **打开方式（任选）**：
 - 桌面快捷方式「MAA 挂机控制台」（已创建，带图标）
 - 双击 `D:\1\启动控制台.bat`
