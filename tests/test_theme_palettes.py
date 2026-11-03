@@ -90,11 +90,18 @@ class ApplyTest(unittest.TestCase):
         # 拖起 GUI 框架）。独立子进程验证，避免被同进程其他测试的 import 干扰。
         import subprocess
         code = (
-            "import sys; sys.path.insert(0, r'%s'); "
-            "import config; config.load(); "
-            "assert 'PySide6' not in sys.modules, 'theme pulled in Qt'"
-        ) % (ROOT / "gui")
-        subprocess.run([sys.executable, "-c", code], check=True)
+            "import sys, tempfile\n"
+            "from pathlib import Path\n"
+            "from unittest.mock import patch\n"
+            "sys.path.insert(0, sys.argv[1])\n"
+            "with patch.object(Path, 'iterdir', return_value=iter(())):\n"
+            "    import config\n"
+            "with tempfile.TemporaryDirectory() as tmp:\n"
+            "    config.CONFIG_PATH = Path(tmp) / 'config.json'\n"
+            "    config.load()\n"
+            "assert 'PySide6' not in sys.modules, 'theme pulled in Qt'\n"
+        )
+        subprocess.run([sys.executable, "-c", code, str(ROOT / "gui")], check=True)
 
 
 if __name__ == "__main__":

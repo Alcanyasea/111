@@ -24,7 +24,7 @@ from PySide6.QtWidgets import QApplication, QLabel, QLineEdit  # noqa: E402
 from tests.test_support import appconfig  # noqa: E402
 import theme  # noqa: E402
 from pages.dashboard import (AccountCard as DashAccountCard,  # noqa: E402
-                             CollectScheduleCard, ScheduleCard)
+                             CollectScheduleCard, LastRunStrip, ScheduleCard)
 from pages.accounts import AccountCard as GridAccountCard  # noqa: E402
 from widgets import (Card, apply_mono_font, big_number, empty_state,  # noqa: E402
                      refresh_card_shadows)
@@ -160,6 +160,54 @@ class AccountCardHoverTest(unittest.TestCase):
         self.assertNotEqual(normal, hover)
         self.assertEqual(hover,
                          QColor(theme.mix(theme.CARD, theme.TEXT, 0.05)).getRgb())
+
+
+class LastRunStripTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+        theme.apply("light", "github")
+
+    def _run(self, accounts):
+        return {"start": "2026-10-30 04:00:00", "total_min": 3.0,
+                "emulator_closed": False, "final": None,
+                "accounts": accounts}
+
+    def _strip_with(self, accounts):
+        strip = LastRunStrip()
+        self.addCleanup(strip.deleteLater)
+        strip.refresh(self._run(accounts))
+        return strip
+
+    def test_mixed_results_show_success_failure_and_skipped_counts(self):
+        strip = self._strip_with([
+            {"name": "成功", "ok": True, "skipped": False, "dur": 1.0},
+            {"name": "失败", "ok": False, "skipped": False, "dur": 2.0},
+            {"name": "停用", "ok": True, "skipped": True, "dur": None},
+        ])
+        text = strip.passed_val.text()
+        self.assertIn("1/3 成功", text)
+        self.assertIn("1 失败", text)
+        self.assertIn("1 跳过", text)
+
+    def test_no_skipped_keeps_original_text(self):
+        strip = self._strip_with([
+            {"name": "成功", "ok": True, "skipped": False, "dur": 1.0},
+            {"name": "成功2", "ok": True, "skipped": False, "dur": 1.0},
+        ])
+        text = strip.passed_val.text()
+        self.assertEqual(text, "2/2 成功")
+        self.assertNotIn("跳过", text)
+
+    def test_all_skipped_shows_zero_success_and_skipped_count(self):
+        strip = self._strip_with([
+            {"name": "停用1", "ok": True, "skipped": True, "dur": None},
+            {"name": "停用2", "ok": True, "skipped": True, "dur": None},
+        ])
+        text = strip.passed_val.text()
+        self.assertIn("0/2 成功", text)
+        self.assertIn("2 跳过", text)
+        self.assertNotIn("失败", text)
 
 
 class KvBigNumberTest(unittest.TestCase):
@@ -303,6 +351,18 @@ class ScheduleToggleFeedbackTest(unittest.TestCase):
                       _InfoBarSpy.calls)
         self.assertEqual(_FakeApplyWorker.started, [False])  # 发起挂机任务同步
         self.dash.appconfig.save.assert_called()
+
+    def test_shift_time_edit_rejects_unicode_digits(self):
+        # master.ps1 只认 ASCII：GUI 若放行 0٤:00 会写出无法执行的计划任务
+        card = self._shift_card()
+        entry = card._entries()[1]
+        edit = card._edits[id(entry)]
+        edit.setText("0٤:00")
+        card._on_time(entry, edit)
+        self.assertEqual(entry["time"], "16:00")
+        self.assertEqual(edit.text(), "16:00")
+        self.assertIn(("warning", "时间格式应为 HH:MM", "已还原为 16:00"),
+                      _InfoBarSpy.calls)
 
     def test_shift_shutdown_toggle_shows_toast_without_sync(self):
         card = self._shift_card()

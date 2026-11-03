@@ -304,6 +304,20 @@ class HistoryPage(QWidget):
             box.addSpacing(6)
         box.addSpacing(2)
 
+        # 失败现场：master.ps1 把失败账号的截图/日志归档到 run_history\<stamp>\<槽位>\
+        # （debug 目录每轮开头会清空，所以这里是唯一能回看失败帧的地方）
+        ev = self._evidence_dir(rec)
+        if ev is not None:
+            row = QHBoxLayout()
+            row.setSpacing(8)
+            btn = style_button(PushButton("打开失败现场"), small=True)
+            btn.clicked.connect(lambda _=False, d=ev: self._open_path(d))
+            row.addWidget(btn)
+            row.addWidget(_label("失败账号的截图与调试日志", size=theme.FS_CAPTION,
+                                 color="TEXT_3"))
+            row.addStretch(1)
+            box.addLayout(row)
+
     def _account_row(self, a):
         skipped = bool(a.get("skipped"))
         ok = bool(a.get("ok")) and not skipped
@@ -329,14 +343,29 @@ class HistoryPage(QWidget):
 
     # ---------- 操作 ----------
 
-    def _open_dir(self):
-        d = self._history_dir()
+    def _evidence_dir(self, rec):
+        """本轮失败现场目录（run_history/<yyyyMMdd_HHmmss>/），不存在返回 None。
+        新记录直接使用 master.ps1 写入的 stamp；旧记录回退到 start 推导。"""
+        stamp = str(rec.get("stamp") or "")
+        if not re.fullmatch(r"\d{8}_\d{6}", stamp):
+            try:
+                stamp = datetime.strptime(
+                    str(rec.get("start")), "%Y-%m-%d %H:%M:%S").strftime("%Y%m%d_%H%M%S")
+            except (TypeError, ValueError):
+                return None
+        d = self._history_dir() / stamp
+        return d if d.is_dir() else None
+
+    def _open_path(self, d):
         try:
             d.mkdir(parents=True, exist_ok=True)
             os.startfile(str(d))
         except OSError as exc:
             InfoBar.warning("无法打开目录", str(exc), parent=self.window(),
                             position=InfoBarPosition.TOP_RIGHT, duration=4000)
+
+    def _open_dir(self):
+        self._open_path(self._history_dir())
 
     def _on_clear(self):
         if runner.is_running():

@@ -19,6 +19,8 @@ import tempfile
 from datetime import datetime
 from pathlib import Path
 
+from project_paths import relocate_project_paths
+
 DEFAULT_CONFIG = Path(__file__).resolve().parents[1] / "config.json"
 
 
@@ -31,6 +33,7 @@ def load_config(path):
     try:
         with open(path, "r", encoding="utf-8") as f:
             cfg = json.load(f)
+        relocate_project_paths(cfg, path)
     except (OSError, json.JSONDecodeError):
         cfg = {}
     try:

@@ -14,7 +14,24 @@
 function Read-AppConfigJson([string]$Path) {
     if (-not $Path -or -not (Test-Path $Path)) { return $null }
     try {
-        return [System.IO.File]::ReadAllText($Path, [System.Text.Encoding]::UTF8) |
+        $cfg = [System.IO.File]::ReadAllText($Path, [System.Text.Encoding]::UTF8) |
             ConvertFrom-Json
+        # 与 plugins/project_paths.py 一致：旧目录即使还在，也不能调用旧副本。
+        # 只修正内存中的项目内部路径，保留外部软件和自定义日志位置。
+        if ($cfg -is [pscustomobject]) {
+            if ($cfg.paths -isnot [pscustomobject]) {
+                $cfg | Add-Member -NotePropertyName paths -NotePropertyValue ([pscustomobject]@{}) -Force
+            }
+            $scripts = Join-Path (Split-Path -Parent ([IO.Path]::GetFullPath($Path))) 'scripts'
+            $oldScripts = $cfg.paths.script_dir
+            $oldLog = $cfg.paths.log_file
+            if (-not $oldLog -or ($oldScripts -and
+                    [IO.Path]::GetFullPath($oldLog) -eq
+                    [IO.Path]::GetFullPath((Join-Path $oldScripts 'master_log.txt')))) {
+                $cfg.paths | Add-Member -NotePropertyName log_file -NotePropertyValue (Join-Path $scripts 'master_log.txt') -Force
+            }
+            $cfg.paths | Add-Member -NotePropertyName script_dir -NotePropertyValue $scripts -Force
+        }
+        return $cfg
     } catch { return $null }
 }

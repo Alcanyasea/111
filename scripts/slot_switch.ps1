@@ -53,6 +53,12 @@ if ($Server -eq "bilibili") {
 $slotDir = ""
 if ($Slot) { $slotDir = Join-Path $accountsDir $Slot }
 
+# 中断或回滚失败留下的快照必须先恢复，禁止将新旧混合凭据推入设备。
+if ($slotDir -and (Test-Path -LiteralPath (Join-Path $slotDir '.refresh-backup\recovery-required.txt'))) {
+    Write-Output '[Switch] ERROR: 槽位快照尚未恢复，请从 .refresh-backup 恢复原件后移除 recovery-required.txt'
+    exit 1
+}
+
 Write-Output ("$(Timestamp) [Switch] -> {0} (slot: {1})" -f $serverName, $(if ($Slot) { $Slot } else { "(无槽位,仅切换客户端)" }))
 
 # ---- adb root（MuMu 自带；失败则后面推送会失败并报错）----

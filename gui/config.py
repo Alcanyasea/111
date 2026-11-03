@@ -9,10 +9,15 @@ GUI 与 PowerShell 脚本（master.ps1 / slot_switch.ps1 等）共享这份配�
 import json
 import os
 import re
+import sys
 import time
 from copy import deepcopy
 from datetime import datetime
 from pathlib import Path
+
+# 纯路径规则放在插件公共目录，插件独立运行时也无需依赖 GUI。
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "plugins"))
+from project_paths import relocate_project_paths
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 CONFIG_PATH = PROJECT_ROOT / "config.json"
@@ -27,7 +32,7 @@ class ConfigLoadError(OSError):
 
 def batch_name(time):
     """整点沿用旧键；非整点保留分钟，避免同一小时内的排班互相覆盖。"""
-    m = re.fullmatch(r"([01]\d|2[0-3]):[0-5]\d", str(time))
+    m = re.fullmatch(r"([01][0-9]|2[0-3]):[0-5][0-9]", str(time))
     if not m:
         return str(time)
     hour = int(m.group(1))
@@ -46,7 +51,7 @@ def schedule_batches(cfg):
         if not isinstance(it, dict):
             continue
         t = str(it.get("time", "")).strip()
-        if t in seen or not re.fullmatch(r"([01]\d|2[0-3]):[0-5]\d", t):
+        if t in seen or not re.fullmatch(r"([01][0-9]|2[0-3]):[0-5][0-9]", t):
             continue
         seen.add(t)
         order.append((t, batch_name(t)))
@@ -314,7 +319,7 @@ def _norm_collect_times(sched):
         if not isinstance(it, dict):
             continue
         t = str(it.get("time", "")).strip()
-        if re.fullmatch(r"([01]\d|2[0-3]):[0-5]\d", t):
+        if re.fullmatch(r"([01][0-9]|2[0-3]):[0-5][0-9]", t):
             collects.append({"time": t, "enabled": bool(it.get("enabled", True)),
                              "shutdown": bool(it.get("shutdown", False))})
     sched["collect_times"] = collects
@@ -341,7 +346,7 @@ def _migrate_schedule(cfg):
         item = sched.get(key)
         if isinstance(item, dict):
             t = str(item.get("time", "")).strip()
-            if re.fullmatch(r"([01]\d|2[0-3]):[0-5]\d", t):
+            if re.fullmatch(r"([01][0-9]|2[0-3]):[0-5][0-9]", t):
                 old.append({
                     "time": t,
                     "enabled": bool(item.get("enabled", True)),
@@ -360,7 +365,7 @@ def _migrate_schedule(cfg):
         if not isinstance(it, dict):
             continue
         t = str(it.get("time", "")).strip()
-        if re.fullmatch(r"([01]\d|2[0-3]):[0-5]\d", t):
+        if re.fullmatch(r"([01][0-9]|2[0-3]):[0-5][0-9]", t):
             entry = {
                 "time": t,
                 "enabled": bool(it.get("enabled", True)),
@@ -435,13 +440,13 @@ def load() -> dict:
     """
     global LAST_LOAD_WARNING
     LAST_LOAD_WARNING = ""
-    cfg = deepcopy(DEFAULTS)
+    cfg = relocate_project_paths(deepcopy(DEFAULTS), CONFIG_PATH)
     try:
         with open(CONFIG_PATH, "r", encoding="utf-8") as f:
             raw = json.load(f)
         if not isinstance(raw, dict):
             raise ValueError("配置根节点必须是对象")
-        cfg = _deep_merge(cfg, raw)
+        cfg = _deep_merge(cfg, relocate_project_paths(raw, CONFIG_PATH))
     except FileNotFoundError:
         pass  # 首次使用尚无配置，可以使用默认值。
     except (ValueError, UnicodeError) as exc:

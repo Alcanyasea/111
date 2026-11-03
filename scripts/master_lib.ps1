@@ -97,9 +97,11 @@ $fiammettaPy = Join-Path $root "plugins\fiammetta\fiammetta.py"
 $infrastCollectPy = Join-Path $root "plugins\infrast_collect\infrast_collect.py"
 $notifyPy = Join-Path $root "plugins\notify\notify.py"
 $runHistoryDir = Join-Path $scriptDir "run_history"
-# 本轮运行历史元数据（Save-RunHistory 使用；MAIN 里按模式改写 $runMode）
-$runStartTs = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
-$runStamp = Get-Date -Format "yyyyMMdd_HHmmss"
+# 本轮运行历史元数据（Save-RunHistory 使用；MAIN 里按模式改写 $runMode）。
+# 两个字段必须来自同一个采样，避免跨秒时历史 JSON 与失败现场目录不一致。
+$runNow = Get-Date
+$runStartTs = $runNow.ToString("yyyy-MM-dd HH:mm:ss")
+$runStamp = $runNow.ToString("yyyyMMdd_HHmmss")
 $runMode = "farm"
 
 # ---- 读取 GUI 配置（项目根 config.json），字段缺失时回退上面的默认值 ----
@@ -203,12 +205,13 @@ function Start-MuMu {
 
 function Stop-StaleMaa([string]$maaDir) {
     # 启动前清理：只杀「本 MAA 目录」下的残留实例（上次崩溃/异常遗留）。按进程
-    # 可执行文件路径前缀匹配，不按名字全局杀——用户手动开的别的 MAA（人工
+    # 可执行文件路径的目录边界匹配，不按名字全局杀——用户手动开的别的 MAA（人工
     # 排障/查看）不能误杀；同目录的手动 MAA 与脚本会写同一份配置，必须清
+    $maaDirPrefix = $maaDir.TrimEnd([char[]]@('\', '/')) + '\'
     Get-Process -Name "MAA" -ErrorAction SilentlyContinue | ForEach-Object {
         try {
             $p = $_.Path
-            if ($p -and $p.StartsWith($maaDir, [System.StringComparison]::OrdinalIgnoreCase)) {
+            if ($p -and $p.StartsWith($maaDirPrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
                 Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue
             }
         } catch { }   # Path 读不到（权限/刚好退出）的实例不碰

@@ -77,7 +77,7 @@ DEFAULT_TRADING_PRODUCT = "LMD"
 
 def batch_name(time):
     """整点沿用旧键；非整点保留分钟，与 GUI/主脚本一致。"""
-    m = re.fullmatch(r"([01]\d|2[0-3]):[0-5]\d", str(time))
+    m = re.fullmatch(r"([01][0-9]|2[0-3]):[0-5][0-9]", str(time))
     if not m:
         return str(time)
     hour = int(m.group(1))
@@ -105,7 +105,7 @@ def schedule_entries(cfg):
         if not isinstance(it, dict) or not it.get("enabled", True):
             continue
         t = str(it.get("time", "")).strip()
-        if t in seen or not re.fullmatch(r"([01]\d|2[0-3]):[0-5]\d", t):
+        if t in seen or not re.fullmatch(r"([01][0-9]|2[0-3]):[0-5][0-9]", t):
             continue
         seen.add(t)
         out.append({"time": t, "shutdown": bool(it.get("shutdown", False))})
@@ -654,7 +654,7 @@ def cmd_generate(args):
 
 
 def _import_time(t):
-    return isinstance(t, str) and bool(re.fullmatch(r"([01]\d|2[0-3]):[0-5]\d", t))
+    return isinstance(t, str) and bool(re.fullmatch(r"([01][0-9]|2[0-3]):[0-5][0-9]", t))
 
 
 def _cfg_schedule_times(cfg):

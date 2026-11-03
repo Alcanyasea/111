@@ -358,7 +358,10 @@ while ((Get-Date) -lt $deadline) {
         $posCount++
         if ($posCount -ge 2) {
             LogLine ("[screen] 检测到主界面（{0}），已登录" -f $igName)
-            Update-SlotData $dialogHandled | Out-Null
+            if (-not (Update-SlotData $dialogHandled)) {
+                LogLine "ERROR: 登录成功但槽位数据刷新失败"
+                exit 1
+            }
             exit 0
         }
         Start-Sleep 1
@@ -397,7 +400,10 @@ while ((Get-Date) -lt $deadline) {
     if ($frame.templates.StartToWakeUp.matched -or $frame.ocr.wake.matched) {
         $src = "文字"; if ($frame.templates.StartToWakeUp.matched) { $src = "模板" }
         LogLine ("[screen] 标题画面（开始唤醒可见-{0}），视为已登录，直接放行交给 MAA" -f $src)
-        Update-SlotData $dialogHandled | Out-Null
+        if (-not (Update-SlotData $dialogHandled)) {
+            LogLine "ERROR: 登录成功但槽位数据刷新失败"
+            exit 1
+        }
         exit 0
     }
     # 无可识别动作时的盲点兜底（屏幕中央）。节奏分档：有文字画面（剧情对白/
@@ -609,6 +615,9 @@ if ($expectUid -and ($devUid -ne $expectUid)) {
     LogLine ("ERROR: 登录成功但 uid 与槽位不一致（device={0}, slot={1}）——凭据与槽位不匹配，拒绝刷新" -f $devUid, $expectUid)
     exit 1
 }
-Update-SlotData $true | Out-Null
+if (-not (Update-SlotData $true)) {
+    LogLine "ERROR: 登录成功但槽位数据刷新失败"
+    exit 1
+}
 LogLine "=== Login check SUCCESS ==="
 exit 0

@@ -45,7 +45,7 @@ def account_specs(cfg):
         })
     return specs
 
-TIME_RE = re.compile(r"^([01]\d|2[0-3]):([0-5]\d)$")
+TIME_RE = re.compile(r"^([01][0-9]|2[0-3]):([0-5][0-9])$")
 
 
 def fmt_ts(ts):
@@ -889,14 +889,17 @@ class LastRunStrip(Card):
             dot.setToolTip(tip)
             self.dots_layout.addWidget(dot)
         if accounts:
-            passed = sum(1 for a in accounts if a.get("ok"))
-            failed = len(accounts) - passed
+            passed = sum(1 for a in accounts if a.get("ok") and not a.get("skipped"))
+            failed = sum(1 for a in accounts if not a.get("ok") and not a.get("skipped"))
+            skipped = sum(1 for a in accounts if a.get("skipped"))
             if failed:
-                self.passed_val.setText(
-                    '<span style="color:%s">%d/%d 成功 · %d 失败</span>'
-                    % (theme.ERR, passed, len(accounts), failed))
+                text = ('<span style="color:%s">%d/%d 成功 · %d 失败</span>'
+                        % (theme.ERR, passed, len(accounts), failed))
             else:
-                self.passed_val.setText("%d/%d 成功" % (passed, len(accounts)))
+                text = "%d/%d 成功" % (passed, len(accounts))
+            if skipped:
+                text += " · %d 跳过" % skipped
+            self.passed_val.setText(text)
             self.dots_host.show()
             self.passed_val.show()
         else:

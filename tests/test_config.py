@@ -106,6 +106,7 @@ class CollectTimesMigrationTest(unittest.TestCase):
             "schedule": {"collect_times": [
                 {"time": "8:00", "enabled": True},   # 小时非零填充 → 剔除
                 {"time": "25:00", "enabled": True},  # 越界 → 剔除
+                {"time": "0٤:00", "enabled": True},  # Unicode 数字 → 剔除
                 {"time": "12:30", "enabled": 1},     # enabled 强转 bool
                 {"time": "23:00", "enabled": True,
                  "shutdown": True},                  # 关机开关保留
@@ -238,6 +239,21 @@ class BaseSchedulePresetsTest(unittest.TestCase):
         }), encoding="utf-8")
         cfg = appconfig.load()
         self.assertEqual(cfg["accounts"][0]["base_schedule_presets"], own)
+
+
+class ScheduleTimeValidationTest(unittest.TestCase):
+    """班次时间必须是 ASCII HH:MM（与 master.ps1 的 [0-9] 校验同口径）。"""
+
+    def test_batch_name_rejects_unicode_digits(self):
+        self.assertEqual(appconfig.batch_name("0٤:00"), "0٤:00")
+        self.assertEqual(appconfig.batch_name("04:00"), "4点")
+
+    def test_schedule_batches_skips_unicode_digits(self):
+        cfg = {"schedule": {"times": [
+            {"time": "0٤:00"},
+            {"time": "16:00"},
+        ]}}
+        self.assertEqual(appconfig.schedule_batches(cfg), ["16点"])
 
 
 if __name__ == "__main__":

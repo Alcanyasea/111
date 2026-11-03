@@ -279,7 +279,10 @@ while ((Get-Date) -lt $deadline) {
             $settleWatching = $true
         } elseif (((Get-Date) - $startupGoneAt).TotalSeconds -ge 10) {
             LogLine "[screen] 开屏已跳过且未出现登录界面，视为已登录，直接放行交给 MAA"
-            Update-SlotData $dialogHandled | Out-Null
+            if (-not (Update-SlotData $dialogHandled)) {
+                LogLine "ERROR: 登录成功但槽位数据刷新失败"
+                exit 1
+            }
             exit 0
         } else {
             $settleWatching = $true
@@ -293,7 +296,10 @@ while ((Get-Date) -lt $deadline) {
         $posCount++
         if ($posCount -ge 2) {
             LogLine ("[screen] 检测到主界面（{0}），已登录" -f $igName)
-            Update-SlotData $dialogHandled | Out-Null
+            if (-not (Update-SlotData $dialogHandled)) {
+                LogLine "ERROR: 登录成功但槽位数据刷新失败"
+                exit 1
+            }
             exit 0
         }
         Start-Sleep 1

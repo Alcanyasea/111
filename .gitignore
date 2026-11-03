@@ -1,5 +1,5 @@
 # Python virtual environment
-gui/.venv/
+gui/.venv*
 
 # Local Claude workspace data
 .claude/
@@ -52,6 +52,11 @@ build/dist/
 # Local tool cache
 .codely-cli/
 .skill-sources/
+
+# Local agent/runtime state (not project artifacts)
+.telegram/
+.workbuddy/
+.zcode/
 
 # Generated collect plan (infrast_collect 插件每次 apply 重新生成)
 plugins/infrast_collect/collect_plan.json

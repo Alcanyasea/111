@@ -74,6 +74,46 @@ def ensure_maa_dir(cfg, server):
         SERVER_NAMES[_other_server(server)], target)
 
 
+def _fix_scheme(conf, adb, device, signal, server, name, label, changes):
+    """按服务器修正单个方案（Default 或当前方案）的连接与任务设置。"""
+    gui = conf.setdefault("Gui", {})
+    conn = gui.setdefault("ConnectSettings", {})
+    if str(conn.get("AdbPath", "")) != adb:
+        conn["AdbPath"] = adb
+        changes.append("ADB 路径" + label)
+    if str(conn.get("Address", "")) != device:
+        conn["Address"] = device
+        changes.append("ADB 地址" + label)
+
+    rt = gui.setdefault("RuntimeSettings", {})
+    if rt.get("ClientType") != CLIENT_TYPES[server]:
+        rt["ClientType"] = CLIENT_TYPES[server]
+        changes.append("客户端类型(%s)%s" % (name, label))
+    if str(rt.get("PostRunScript", "")) != signal:
+        rt["PostRunScript"] = signal
+        changes.append("结束脚本 signal_done.bat" + label)
+
+    su = gui.setdefault("StartUpSettings", {})
+    if su.get("RunDirectly") is not True:
+        su["RunDirectly"] = True
+        changes.append("RunDirectly 直接运行" + label)
+
+    queue = conf.get("TaskQueue")
+    if isinstance(queue, list):
+        present = {t.get("$type") for t in queue if isinstance(t, dict)}
+        for tname in KEY_TASKS:
+            if tname in present:
+                for t in queue:
+                    if isinstance(t, dict) and t.get("$type") == tname \
+                            and not t.get("IsEnable", True):
+                        t["IsEnable"] = True
+                        changes.append("启用 %s%s" % (TASK_NAMES[tname], label))
+        missing = [t for t in KEY_TASKS if t not in present]
+        if missing:
+            changes.append("任务队列缺少 %s（未自动创建）%s" % (
+                "、".join(TASK_NAMES[t] for t in missing), label))
+
+
 def apply_server_config(cfg, server):
     """一键配置某服 MAA。返回 (ok: bool, message: str)。"""
     name = SERVER_NAMES.get(server, server)
@@ -101,47 +141,22 @@ def apply_server_config(cfg, server):
         return False, "读取 %s 失败：%s" % (gui_new, exc)
 
     cur = data.get("Current") or "Default"
-    conf = (data.get("Configurations") or {}).get(cur)
+    cfgs = data.get("Configurations")
+    conf = cfgs.get(cur) if isinstance(cfgs, dict) else None
     if not isinstance(conf, dict):
         return False, "「%s」gui.new.json 中找不到当前配置「%s」" % (name, cur)
 
     changes = []
-    gui = conf.setdefault("Gui", {})
-    conn = gui.setdefault("ConnectSettings", {})
-    if str(conn.get("AdbPath", "")) != adb:
-        conn["AdbPath"] = adb
-        changes.append("ADB 路径")
-    if str(conn.get("Address", "")) != device:
-        conn["Address"] = device
-        changes.append("ADB 地址")
+    _fix_scheme(conf, adb, device, signal, server, name, "", changes)
 
-    rt = gui.setdefault("RuntimeSettings", {})
-    if rt.get("ClientType") != CLIENT_TYPES[server]:
-        rt["ClientType"] = CLIENT_TYPES[server]
-        changes.append("客户端类型(%s)" % name)
-    if str(rt.get("PostRunScript", "")) != signal:
-        rt["PostRunScript"] = signal
-        changes.append("结束脚本 signal_done.bat")
-
-    su = gui.setdefault("StartUpSettings", {})
-    if su.get("RunDirectly") is not True:
-        su["RunDirectly"] = True
-        changes.append("RunDirectly 直接运行")
-
-    queue = conf.get("TaskQueue")
-    if isinstance(queue, list):
-        present = {t.get("$type") for t in queue if isinstance(t, dict)}
-        for tname in KEY_TASKS:
-            if tname in present:
-                for t in queue:
-                    if isinstance(t, dict) and t.get("$type") == tname \
-                            and not t.get("IsEnable", True):
-                        t["IsEnable"] = True
-                        changes.append("启用 %s" % TASK_NAMES[tname])
-        missing = [t for t in KEY_TASKS if t not in present]
-        if missing:
-            changes.append("任务队列缺少 %s（未自动创建）" % "、".join(
-                TASK_NAMES[t] for t in missing))
+    # 任务自检（plugins/farm_guard）每次运行都会把 Current 归位 Default，
+    # 所以 Default 方案必须和当前方案一样被修正。只改当前方案时，Default 会
+    # 一直停留在另一服的客户端类型：B 服 MAA 曾因此 am start 官服包，
+    # 把正在跑的 B 服顶掉（表现为"跑着跑着跳回官服"）。
+    default_conf = cfgs.get("Default") if isinstance(cfgs, dict) else None
+    if isinstance(default_conf, dict) and default_conf is not conf:
+        _fix_scheme(default_conf, adb, device, signal, server, name,
+                    "（Default 方案）", changes)
 
     try:
         _write_json(gui_new, data)

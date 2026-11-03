@@ -1,4 +1,4 @@
-﻿# ============================================================
+# ============================================================
 # 登录检查共用设备/槽位库 — login_check.ps1（官服）与
 # login_check_bilibili.ps1（B服）共用
 # 这些函数原本只在 login_check.ps1 里；B服拆出独立校验脚本后收敛到这里
@@ -110,7 +110,10 @@ function Update-SlotData([bool]$ExpectVoiceKeys) {
     # - 公告弹窗关掉后会写入按 uid 缓存的 key_home_annouce* 版本号。
     # 不拉回的话，下次切号会用旧槽位数据覆盖设备，弹窗每次重新出现。
     # 写入前校验设备 uid 与槽位 uid 一致（防跑错号）。
-    if (-not $slotDir) { return $false }
+    if (-not $slotDir) {
+        LogLine "INFO: 未配置槽位，跳过槽位刷新"
+        return $true
+    }
     $pp = Get-PlayerPrefsName
     if (-not $pp) { LogLine "WARN: 无法获取 playerprefs 文件名，跳过槽位刷新"; return $false }
     $devUid = ""
@@ -139,27 +142,16 @@ function Update-SlotData([bool]$ExpectVoiceKeys) {
         }
         Start-Sleep 5
     }
-    $dstShared = Join-Path $slotDir "shared_prefs"
-    $dstFiles = Join-Path $slotDir "files\zx"
-    New-Item -ItemType Directory -Force $dstShared, $dstFiles | Out-Null
-    & $adb -s $device pull ("/data/data/{0}/shared_prefs/{1}" -f $pkg, $pp) (Join-Path $dstShared $pp) 2>$null | Out-Null
-    & $adb -s $device pull "/data/data/$pkg/shared_prefs/HypergryphSdkPreferences.xml" (Join-Path $dstShared "HypergryphSdkPreferences.xml") 2>$null | Out-Null
-    # lc.cache 是可选缓存：登录后游戏可能还没写它（首次启动实测 zx 目录下无此文件）
-    & $adb -s $device pull "/data/data/$pkg/files/zx/lc.cache" (Join-Path $dstFiles "lc.cache") 2>$null | Out-Null
-    if (-not (Test-Path (Join-Path $dstFiles "lc.cache"))) { LogLine "WARN: 设备暂无 lc.cache（登录后尚未生成，忽略）" }
-    # 引导已看过标记：把清单里缺失的全部补写进槽位 playerprefs，
-    # 各界面首次提示不再弹出（清单与说明见上方 $guideViewedKeys）
-    $n = Ensure-GuideViewed (Join-Path $dstShared $pp)
-    if ($n -lt 0) {
-        LogLine "WARN: 未能补写引导已看过标记（槽位数据可能不完整）"
-    } elseif ($n -gt 0) {
-        LogLine ("[slot] 补写引导已看过标记 {0} 条（首次进入提示不再弹出）" -f $n)
+    try {
+        . (Join-Path $PSScriptRoot 'slot_snapshot.ps1')
+        $updatedUid = Sync-SlotSnapshot $adb $device $pkg $slotDir $pp
+        LogLine ("[slot] 槽位数据已刷新（uid={0}），原件已备份" -f $updatedUid)
+        return $true
+    } catch {
+        LogLine ('WARN: 槽位刷新失败，保留原数据: ' + $_.Exception.Message)
+        return $false
     }
-    $devUid | Out-File $uidFile -Encoding ascii -NoNewline
-    LogLine ("[slot] 槽位数据已刷新（uid={0}）" -f $devUid)
-    return $true
 }
-
 # ============================================================
 # 登录表单录入（login_check.ps1 与 capture_account.ps1 共用，v4.1 从两份
 # 逐字拷贝收敛到这里；依赖调用方作用域的 $adb / $device 与库内 Invoke-Tap）

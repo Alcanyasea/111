@@ -126,12 +126,12 @@ def scan(cfg=None):
     if size > LOG_MAX_SIZE:
         items.append({"path": str(log_file), "kind": "log", "size": size - LOG_KEEP_SIZE})
 
-    # Python 字节码缓存（跳过 .venv，虚拟环境属运行环境不清理）
+    # Python 字节码缓存（跳过 .venv 及其备份/别名目录，虚拟环境属运行环境不清理）
     for root in CACHE_ROOTS:
         if not root.is_dir():
             continue
         for dirpath, dirnames, _ in os.walk(root):
-            if dirpath == str(root) + os.sep + ".venv":
+            if Path(dirpath).name.startswith(".venv"):
                 dirnames[:] = []
                 continue
             if Path(dirpath).name == "__pycache__":

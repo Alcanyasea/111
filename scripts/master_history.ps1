@@ -28,6 +28,7 @@ function Save-RunHistory($fatalReason) {
         $obj = [ordered]@{
             version   = 1
             start     = $runStartTs
+            stamp     = $runStamp
             end       = (Get-Date -Format "yyyy-MM-dd HH:mm:ss")
             mode      = $runMode
             batch     = $bsBatch
@@ -40,7 +41,7 @@ function Save-RunHistory($fatalReason) {
         if ($fatalReason) {
             $obj.failed = 1   # 没跑起来（如模拟器启动失败）也留痕，历史页可见
         } else {
-            $obj.passed = @($results | Where-Object { $_.OK }).Count
+            $obj.passed = @($results | Where-Object { $_.OK -and $null -ne $_.Minutes }).Count
             $obj.failed = @($results | Where-Object { -not $_.OK }).Count
         }
         $json = ConvertTo-Json -InputObject $obj -Depth 5
@@ -55,6 +56,20 @@ function Save-RunHistory($fatalReason) {
             $i++
             if ($f.LastWriteTime -lt $cutoff -or $i -gt 400) {
                 Remove-Item $f.FullName -Force -ErrorAction SilentlyContinue
+                # 同名的失败现场目录（run_history\<stamp>\）跟着删：证据不独立计时，
+                # 否则历史 JSON 清完了、几百 MB 截图还留在盘上
+                $stampName = $f.BaseName -replace '^run_', ''
+                $evidenceDir = Join-Path $runHistoryDir $stampName
+                if (Test-Path -LiteralPath $evidenceDir) {
+                    Remove-Item $evidenceDir -Recurse -Force -ErrorAction SilentlyContinue
+                }
+            }
+        }
+        # 兜底：历史 JSON 被手动删过、只剩证据目录时按目录时间单独清。
+        # 只认 <yyyyMMdd_HHmmss> 形式的目录名，不碰 run_history 下将来可能新增的其它目录
+        foreach ($d in @(Get-ChildItem $runHistoryDir -Directory -ErrorAction SilentlyContinue)) {
+            if ($d.Name -match '^\d{8}_\d{6}$' -and $d.LastWriteTime -lt $cutoff) {
+                Remove-Item $d.FullName -Recurse -Force -ErrorAction SilentlyContinue
             }
         }
     } catch {

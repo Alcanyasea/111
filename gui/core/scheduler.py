@@ -102,11 +102,14 @@ def query(name=TASK_NAME):
 
 
 def _enabled_times(entries):
-    """entries（schedule 时间项列表）→ 校验过的启用时间列表（HH:MM）。"""
+    """entries（schedule 时间项列表）→ 校验过的启用时间列表（HH:MM）。
+
+    enabled 缺失视为启用，与 config.py / 插件 / master.ps1 同口径。
+    """
     times = [e.get("time") for e in entries
-             if isinstance(e, dict) and e.get("enabled")]
+             if isinstance(e, dict) and e.get("enabled", True)]
     return [t for t in times
-            if isinstance(t, str) and re.match(r"^([01]\d|2[0-3]):([0-5]\d)$", t)]
+            if isinstance(t, str) and re.match(r"^([01][0-9]|2[0-3]):([0-5][0-9])$", t)]
 
 
 def _apply_task(name, times, master_args):
@@ -116,7 +119,7 @@ def _apply_task(name, times, master_args):
     则只禁用（触发保留但灰置，重新启用时由下一次 apply 按最新配置重写）——
     避免注册无触发任务这种任务计划程序不保证接受的形态。
     """
-    times = [t for t in times if re.match(r"^([01]\d|2[0-3]):([0-5]\d)$", t)]
+    times = [t for t in times if re.match(r"^([01][0-9]|2[0-3]):([0-5][0-9])$", t)]
     enabled = bool(times)
 
     extra = (" " + " ".join(master_args)) if master_args else ""

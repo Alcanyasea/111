@@ -80,6 +80,22 @@ class SchedulerCollectRenderTest(unittest.TestCase):
         self.assertNotIn("20:30", s, "禁用的时间点不写入触发")
         self.assertIn("if ($true)", s)
 
+    def test_apply_collect_rejects_unicode_digit_time(self):
+        # master.ps1 只认 ASCII 时间；GUI 侧放行会在计划任务里生成无法解析的时间
+        captured, fake_ps = self._capture()
+        original = scheduler._ps
+        scheduler._ps = fake_ps
+        try:
+            ok, msg = scheduler.apply_collect({"schedule": {"collect_times": [
+                {"time": "0٤:00", "enabled": True},
+            ]}})
+        finally:
+            scheduler._ps = original
+        self.assertTrue(ok, msg)
+        script = captured["script"]
+        self.assertNotIn("0٤:00", script)
+        self.assertIn("if ($false)", script)
+
     def test_apply_collect_empty_disables_instead_of_register(self):
         captured, fake_ps = self._capture()
         original = scheduler._ps
@@ -92,6 +108,45 @@ class SchedulerCollectRenderTest(unittest.TestCase):
         # 无启用时间：不注册无触发任务，已存在则只禁用（elseif ($t) 分支）
         self.assertIn("if ($false)", captured["script"])
         self.assertIn("@()", captured["script"])
+
+
+class SchedulerEnabledDefaultTest(unittest.TestCase):
+    """enabled 缺失视为启用（与 config.py / 插件 / master.ps1 同口径）。"""
+
+    def _apply(self, func, cfg):
+        captured = {}
+
+        def fake_ps(script, timeout=0):
+            captured["script"] = script
+            return 0, "APPLIED", b""
+
+        original = scheduler._ps
+        scheduler._ps = fake_ps
+        try:
+            ok, msg = func(cfg)
+        finally:
+            scheduler._ps = original
+        self.assertTrue(ok, msg)
+        return captured["script"]
+
+    def test_apply_times_missing_enabled_are_enabled(self):
+        script = self._apply(scheduler.apply,
+                             {"schedule": {"times": [{"time": "04:00"}]}})
+        self.assertIn("04:00", script)
+        self.assertIn("if ($true)", script)
+
+    def test_apply_collect_missing_enabled_is_enabled(self):
+        script = self._apply(scheduler.apply_collect,
+                             {"schedule": {"collect_times": [{"time": "08:00"}]}})
+        self.assertIn("08:00", script)
+        self.assertIn("if ($true)", script)
+
+    def test_explicit_disabled_still_excluded(self):
+        script = self._apply(scheduler.apply,
+                             {"schedule": {"times": [
+                                 {"time": "04:00", "enabled": False}]}})
+        self.assertNotIn("04:00", script)
+        self.assertIn("if ($false)", script)
 
 
 if __name__ == "__main__":

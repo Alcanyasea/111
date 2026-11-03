@@ -54,6 +54,27 @@ class BatchAndPeriodTest(unittest.TestCase):
                          ["04:00", "16:00"])
 
 
+class UnicodeTimeTest(unittest.TestCase):
+    """时间必须是 ASCII HH:MM（与 master/GUI 同口径）。"""
+
+    UNICODE_TIME = "0٤:00"
+
+    def test_batch_name_rejects_non_ascii_digits(self):
+        self.assertEqual(bs.batch_name(self.UNICODE_TIME), self.UNICODE_TIME)
+
+    def test_schedule_entries_skips_non_ascii_digits(self):
+        cfg = {"schedule": {"times": [
+            {"time": self.UNICODE_TIME, "enabled": True},
+            {"time": "16:00", "enabled": True},
+        ]}}
+        self.assertEqual([e["time"] for e in bs.schedule_entries(cfg)],
+                         ["16:00"])
+
+    def test_import_time_rejects_non_ascii_digits(self):
+        self.assertFalse(bs._import_time(self.UNICODE_TIME))
+        self.assertTrue(bs._import_time("04:00"))
+
+
 class PlanPathTest(unittest.TestCase):
     def setUp(self):
         self.old = bs.PLANS_DIR

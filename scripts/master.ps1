@@ -1,38 +1,12 @@
-# MAA Auto Farm v4 — Dual MAA + 槽位切号（非点击）
-# 2026-09-22 v4.3 拆分重构：本文件只保留主流程（MAA 等待/运行 + 账号管线 +
-# 班次判定 + 收尾），基础设施/插件调度/留痕通知拆到三个库文件：
-#   master_lib.ps1      锁 + 日志 + 配置 + 模拟器启停 + 数据清理
-#   master_plugins.ps1  Invoke-Plugin + Run-Switch（心跳看门狗）+ Refresh-SlotData
-#   master_history.ps1  Save-RunHistory + Send-RunNotify
-# dot-source 顺序：lib → plugins（依赖 lib 变量）→ history（依赖 Invoke-Plugin）
-# -NoShutdown: GUI 手动运行传入，跳过结束后的自动关机（无论成败）；计划任务不传，行为不变
-# -SkipMAA: 测试切号流程用——跳过 MAA、结束时保留模拟器运行供检查
-# -InfrastCollect: 基建收菜模式——逐个已启用账号只收制造站/贸易站产物（生产房间
-#   skip：不换干员、不用无人机；宿舍自动换休：留空+autofill，疲惫干员进驻、
-#   满心情换出，不抽走在岗干员），停用理智/招募/信用/领奖任务，不碰班次计划；
-#   使用独立的「收菜」配置方案（切 Current 指针，结束切回 Default），
-#   farm 用的 Default 方案全程不被触碰，无需备份/恢复。
-#   定时收菜（计划任务 MAA_基建收菜，GUI「仪表盘 → 收菜计划」维护）到点带
-#   -InfrastCollect 调本脚本：跑全部已启用账号（不做班次账号筛选）；结束后
-#   是否关机按「收菜计划」每项的关机开关判定（任务动作无法按触发器带参数，
-#   由本脚本按启动时刻匹配最近一个已到的启用收菜时间点，见 MAIN 的收菜段；
-#   无配置不关机）。GUI 手动收菜带 -NoShutdown，永不关机
-# -SwitchTo <slot>: 只切到该槽位账号并完成登录校验即停——不跑 MAA、模拟器保持
-#   运行、不关机不推送（GUI「账号管理 → 切换到此账号」，切完直接手动游戏）
-# -SwitchTo <slot> -NoLoginCheck: 快速启动——只推入槽位登录数据（token）并启动
-#   游戏，跳过更新等待与登录校验（两者都在 login_check 内）即停；token 失效时
-#   游戏会停在登录界面，需手动输账号密码或重新捕获（GUI「账号管理 → 卡片快速启动」）
-# 每轮结束把结果写入 scripts\run_history\run_<时间戳>.json（保留 60 天），
-# GUI「运行历史」页读取；config.notify.enabled 时按账号逐步骤检查（切号 → 登录
-# 校验 → 任务开关自检 → MAA）：某个步骤失败的账号单独推送一条，标题含账号名与
-# 失败步骤；成功推送由 config.notify.on_success 控制（默认关闭）。
-# 失败重试：有账号失败时（部分失败或全部失败），整轮跑完后对失败号再完整跑一遍；
-# 重试的号无论成败都推送（成功标「重试成功」、仍失败标「重试后仍失败」）；
-# 手动切号（人在电脑前）不走自动重试
-# 2026-09 性能与成功率优化：模拟器启动接 config 启动等待并轮询开机完成（不再固定
-#   睡 15 秒）、45 秒连不上自动重拉实例；MAA 启动即崩溃（零任务进展）自动重试一次；
-#   完成信号 FileSystemWatcher + Wait-Event 事件驱动（文件创建瞬间醒来，
-#   旧 4 秒轮询平均 2 秒）；各阶段衔接 sleep 3→1 秒
+# MAA 自动挂机主控：班次选择 → 逐账号执行 → 失败重试 → 历史/通知/关机。
+# 兼容现有 GUI、计划任务与 bat 入口；模块加载顺序见下方。
+# -NoShutdown：手动操作不关机；定时任务按班次设置决定。
+# -SkipMAA：只验证切号/登录，保留模拟器。
+# -InfrastCollect：全部启用账号只跑收菜，使用独立方案，结束恢复 Default。
+# -SwitchTo <slot>：只切号与登录验证；忽略停用和班次筛选，不跑任务、不关机。
+# -SwitchTo <slot> -NoLoginCheck：快速启动，不做更新/登录检查和槽位回拉。
+# 账号流程由 master_pipeline.ps1 负责；设备回拉与下一号切换严格串行。
+# MAA 生命周期在 master_maa.ps1；历史 JSON 和 GUI 日志协议保持兼容。
 param([switch]$NoShutdown, [switch]$SkipMAA, [switch]$InfrastCollect,
     [string]$SwitchTo = "", [switch]$NoLoginCheck)
 $ErrorActionPreference = "Continue"
@@ -43,258 +17,8 @@ $ProgressPreference = "SilentlyContinue"
 . (Join-Path $PSScriptRoot "master_plugins.ps1")
 . (Join-Path $PSScriptRoot "master_history.ps1")
 
-# ---- MAA 完成等待：FileSystemWatcher 事件驱动 + 2 秒兜底轮询（v4.3）----
-# 完成信号由 signal_done.bat（MAA 任务结束后回调）创建 maa_done.signal 文件。
-# 心跳 = MAA 的 asst.log 持续出现 SubTask 事件（进战斗、战斗中 PRTS 轮询、
-# 结算等，正常战斗下每几秒一条）；超过 $t 秒没有任何心跳才判超时。
-# 存活判定用 Run-MAA -PassThru 拿到的进程对象（本脚本拉起的那个实例），
-# 不按进程名全局扫描——用户手动开的无关 MAA 不影响 dead/dead-early 判定。
-# 返回状态字符串：ok / stall（无进展超时）/ dead（进程退出且已执行过任务）/
-#   dead-early（进程启动即退出、一次任务都没跑过，由 Run-MAA 自动重试一次）。
-# 任务链报错统计：MAA 跑完全部任务链会照常发完成信号，「正常退出」≠ 全部成功
-# ——个别任务链失败（TaskChainError）必须从 asst.log 单独识别（2026-09-23
-# 官服漏刷事故：MAA 资源过期导致全链报错，MAA 照常退出，调度层却全绿报成功，
-# 理智/日常一个没刷）。报错链名记入 $script:LastMaaChainErrors，Run-MAA 据此
-# 把「有报错的完成」判为失败（chain-error），走重试 + 失败通知；健康轮历史上
-# 零 TaskChainError，不会误伤。
-# v4.3 变更：完成信号检测由固定 4 秒轮询 Test-Path 改为 FileSystemWatcher +
-#   Wait-Event 事件驱动——signal 文件创建瞬间事件入队，Wait-Event 提前醒来
-#   （毫秒级）立即检测到文件，平均发现延迟从 ~2 秒降至接近零。watcher 初始化
-#   失败时自然回退 2 秒轮询（Test-Path 兜底不变，不会误判）。其余检查（进程
-#   退出/日志心跳/超时）仍按 2 秒间隔轮询（比旧版 4 秒更 responsive）。
-function Convert-MaaChainName($chain) {
-    # MAA 任务链名 → 中文名（日志/失败原因/通知可读性）；未知链名原样返回
-    switch ($chain) {
-        "StartUp"     { "开始唤醒" }
-        "Recruit"     { "公开招募" }
-        "Infrast"     { "基建换班" }
-        "Fight"       { "理智作战" }
-        "Mall"        { "信用收支" }
-        "Award"       { "领取奖励" }
-        "Roguelike"   { "集成战略" }
-        "Reclamation" { "生息演算" }
-        default       { $chain }
-    }
-}
-
-function Wait-MAADone($t, $maaDir, $maaProc) {
-    Log ("Waiting for MAA tasks... ({0} 秒无战斗/任务进展判超时)" -f $t)
-    if (Test-Path $signalFile) { Remove-Item $signalFile -Force }
-    $logPath = Join-Path $maaDir "debug\asst.log"
-    $logPos = -1
-    $carry = ""   # 上一块日志尾部（跨读块边界的心跳匹配用，见下方读取段）
-    if (Test-Path $logPath) {
-        try {
-            $fs = [System.IO.File]::Open($logPath, 'Open', 'Read', 'ReadWrite')
-            $logPos = $fs.Length   # 只统计本次 MAA 启动后新增的日志
-            $fs.Dispose()
-        } catch { $logPos = -1 }
-    }
-    $sw = [System.Diagnostics.Stopwatch]::StartNew()
-    $lastAct = Get-Date
-    $lastLogTry = Get-Date
-    $readFail = 0
-    $maaDeadCount = 0
-    $sawProgress = $false
-    # 本次 MAA 启动窗口内报错的任务链（按链名去重；carry 拼接会重扫同一段字节）。
-    # 有报错的「正常完成」由 Run-MAA 判为 chain-error 失败，见顶部注释
-    $script:LastMaaChainErrors = New-Object System.Collections.Generic.List[string]
-    # ---- FileSystemWatcher 完成信号（v4.3）----
-    # 不带 -Action 订阅 + 主循环 Wait-Event 等待：文件创建瞬间事件入队，
-    # Wait-Event 立即提前醒来（实测毫秒级），比等满轮询间隔快。
-    # 不能用「-Action 里 Set ManualResetEvent + WaitOne」的写法——事件 Action
-    # 在管道线程被 .NET 阻塞调用（WaitOne）期间不会执行，WaitOne 永远等满
-    # 超时（实测 5/5 轮等满 3 秒），事件驱动形同虚设；Wait-Event 由引擎在
-    # 等待中处理事件队列，才能真正提前返回
-    $fswSignal = $null
-    $fswSrc = "MaaDoneSignal"
-    try {
-        $fswSignal = New-Object System.IO.FileSystemWatcher
-        $fswSignal.Path = $scriptDir
-        $fswSignal.Filter = "maa_done.signal"
-        $fswSignal.EnableRaisingEvents = $true
-        $null = Register-ObjectEvent -InputObject $fswSignal `
-            -EventName "Created" -SourceIdentifier $fswSrc
-    } catch {
-        if ($fswSignal) { try { $fswSignal.Dispose() } catch {} }
-        $fswSignal = $null   # watcher 初始化失败 → 回退纯轮询（不影响正确性）
-    }
-    try {
-    while ($true) {
-        if (Test-Path $signalFile) {
-            Log ("MAA finished! {0} min" -f [math]::Round($sw.Elapsed.TotalMinutes, 1))
-            if ($script:LastMaaChainErrors.Count -gt 0) {
-                Log ("  [WARN] MAA 正常退出，但 {0} 个任务链报错: {1}" -f $script:LastMaaChainErrors.Count,
-                    (($script:LastMaaChainErrors | ForEach-Object { Convert-MaaChainName $_ }) -join "、"))
-            }
-            Start-Sleep 2
-            return "ok"
-        }
-        # MAA 进程意外退出（启动即崩溃/被手动关闭）→ 不傻等心跳超时，快速判失败；
-        # 连续 2 轮 HasExited 才判，避开进程刚拉起的瞬间。是否执行过任务决定
-        # Run-MAA 是否自动重试（已有进展的退出重试可能重复执行任务，不重试）
-        if ($null -eq $maaProc -or $maaProc.HasExited) {
-            $maaDeadCount++
-            if ($maaDeadCount -ge 2) {
-                if ($sawProgress) {
-                    Log "ERROR: MAA 进程已退出且没有完成信号，判定失败"
-                    return "dead"
-                }
-                Log "ERROR: MAA 启动后未执行任何任务即退出（启动即崩溃）"
-                return "dead-early"
-            }
-        } else {
-            $maaDeadCount = 0
-        }
-        # asst.log 启动瞬间不存在/被占用时周期性重试打开，
-        # 否则心跳全程失效，会把正常运行的 MAA 误判为卡死
-        if ($logPos -lt 0 -and ((Get-Date) - $lastLogTry).TotalSeconds -ge 30) {
-            $lastLogTry = Get-Date
-            $fs0 = $null
-            try {
-                $fs0 = [System.IO.File]::Open($logPath, 'Open', 'Read', 'ReadWrite')
-                $logPos = $fs0.Length
-                $fs0.Dispose()
-            } catch { if ($fs0) { try { $fs0.Dispose() } catch {} } }
-        }
-        if ($logPos -ge 0) {
-            $fs = $null
-            try {
-                $fs = [System.IO.File]::Open($logPath, 'Open', 'Read', 'ReadWrite')
-                $len = $fs.Length
-                $readFail = 0   # 恢复可读即清零连击（旧版只在匹配心跳时清零，安静期偶发失败会跨成功读取累积）
-                if ($len -lt $logPos) { $logPos = 0; $carry = "" }   # asst.log 被轮转/重建
-                if ($len -gt $logPos) {
-                    $fs.Seek($logPos, 'Begin') | Out-Null
-                    $n = $len - $logPos
-                    $buf = New-Object byte[] $n
-                    # Read 不保证一次读满（短读合法）：循环读满，且只按实际读到
-                    # 的字节推进 logPos，余下字节下轮接着读
-                    $off = 0
-                    while ($off -lt $n) {
-                        $r = $fs.Read($buf, $off, $n - $off)
-                        if ($r -le 0) { break }
-                        $off += $r
-                    }
-                    $logPos += $off
-                    # 心跳串可能正好被读块边界切开（2 秒一轮按字节续读）：保留
-                    # 上块尾部 64 字符拼到本块前面再匹配；UTF-8 多字节字符跨界
-                    # 至多解码成替换符，不影响 ASCII 心跳串匹配
-                    $chunk = $carry + [System.Text.Encoding]::UTF8.GetString($buf, 0, $off)
-                    if ($chunk.Length -gt 64) { $carry = $chunk.Substring($chunk.Length - 64) }
-                    else { $carry = $chunk }
-                    if ($chunk -match 'append_callback \| SubTask') {
-                        $lastAct = Get-Date
-                        $sawProgress = $true
-                        $readFail = 0
-                    }
-                    # 任务链报错识别（见顶部注释）：匹配链名并首次出现时实时落日志。
-                    # 正则与链名合计约 40 字符，64 字符 carry 保证跨读块边界不漏配
-                    foreach ($mc in [regex]::Matches($chunk, 'TaskChainError \{"taskchain":"([^"]+)"')) {
-                        $errChain = $mc.Groups[1].Value
-                        if (-not $script:LastMaaChainErrors.Contains($errChain)) {
-                            $script:LastMaaChainErrors.Add($errChain)
-                            Log ("  [WARN] MAA 任务链报错: " + (Convert-MaaChainName $errChain) + "（" + $errChain + "）")
-                        }
-                    }
-                }
-                $fs.Dispose()
-            } catch {
-                if ($fs) { try { $fs.Dispose() } catch {} }
-                # 日志读不到（杀软扫描/MAA 独占写等瞬时竞争）：连败 4 次
-                # （约 16 秒）就把 lastAct 拨到超时点、当轮立即判 stall——正常
-                # 战斗会被瞬时锁误杀。补强为「文件增长判活」：MAA 活着就持续
-                # 追加日志，元数据查询（Get-Item）不打开数据流、不受数据锁
-                # 影响（已实测）——在长即视为有进展刷新 lastAct；查不到或不在
-                # 长则不动 lastAct，由统一的 stall 计时自然兜底（与日志可读时
-                # 完全同口径，不会更快也不会更慢）
-                $readFail++
-                $len2 = -1
-                try { $len2 = (Get-Item -LiteralPath $logPath -ErrorAction Stop).Length } catch { }
-                if ($len2 -gt 0) {
-                    if ($logPos -ge 0 -and $len2 -gt $logPos) {
-                        $lastAct = Get-Date   # 在长 = MAA 活着在写，进度照常
-                        $logPos = $len2       # 增长字节已计入基线，成功读取后无需重扫
-                        $readFail = 0
-                    } elseif ($logPos -lt 0) {
-                        $logPos = $len2       # 首次建立基线，不给进度
-                    }
-                }
-                if ($readFail -eq 3) {
-                    Log "  [WARN] asst.log 连续 3 次读取失败且文件无增长（疑似被独占），按无进展计时中"
-                }
-            }
-        }
-        $idleSec = ((Get-Date) - $lastAct).TotalSeconds
-        if ($idleSec -ge $t) {
-            Log ("ERROR: MAA stall: 已 {0} 分钟没有战斗/任务进展，判定超时" -f [math]::Round($idleSec / 60, 1))
-            return "stall"
-        }
-        # 等完成信号事件（文件创建瞬间 Wait-Event 提前返回）或 2 秒超时；
-        # 超时后正常做下一轮进程/日志/超时检查。watcher 不可用时退化为
-        # Start-Sleep 2 秒轮询（Test-Path 兜底不变）。醒来后排空事件队列，
-        # 防残留事件让下一轮 Wait-Event 假醒（假醒无害，Test-Path 兜底，
-        # 但排空更干净）
-        if ($fswSignal) {
-            [void](Wait-Event -SourceIdentifier $fswSrc -Timeout 2)
-            Get-Event -SourceIdentifier $fswSrc -ErrorAction SilentlyContinue |
-                Remove-Event -ErrorAction SilentlyContinue
-        } else {
-            Start-Sleep 2
-        }
-    }
-    } finally {
-        # 清理 watcher 与事件订阅（防句柄/队列泄漏；Wait-MAADone 每次调用各建各拆。
-        # 先排空再注销：注销后残留队列事件会跟随 SourceIdentifier 一起失效，先排空更稳）
-        if ($fswSignal) {
-            Get-Event -SourceIdentifier $fswSrc -ErrorAction SilentlyContinue |
-                Remove-Event -ErrorAction SilentlyContinue
-            Unregister-Event -SourceIdentifier $fswSrc -Force -ErrorAction SilentlyContinue
-            try { $fswSignal.Dispose() } catch {}
-        }
-    }
-}
-
-function Run-MAA($exe, $dir, $label) {
-    Log ("=== Run MAA [" + $label + "] ===")
-    Stop-StaleMaa $dir
-    Start-Sleep 2
-    if (Test-Path $signalFile) { Remove-Item $signalFile -Force }
-    Log "Launching MAA..."
-    # -PassThru 拿到本脚本拉起的进程对象：存活判定与收尾只针对它，
-    # 用户手动开的无关 MAA 不再被误杀/误判
-    $maaProc = Start-Process $exe -WorkingDirectory $dir -PassThru
-    Start-Sleep 5
-    $status = Wait-MAADone $maaStallTimeoutSec $dir $maaProc
-    $script:LastMaaStatus = $status
-    if ($status -eq "dead-early") {
-        # 启动即崩溃（一次任务都没跑）自动重试一次：偶发崩溃/被占用拦截时自愈。
-        # 已有任务进展的退出不重试（重试可能重复执行任务），按失败处理。
-        Log "WARN: 3 秒后自动重试一次 MAA 启动"
-        Start-Sleep 3
-        Log "Launching MAA (retry)..."
-        $maaProc = Start-Process $exe -WorkingDirectory $dir -PassThru
-        Start-Sleep 5
-        $status = Wait-MAADone $maaStallTimeoutSec $dir $maaProc
-        $script:LastMaaStatus = $status
-    }
-    # 收尾只杀自己拉起的实例（按 Id），不按名字全局杀
-    if ($maaProc -and -not $maaProc.HasExited) {
-        Stop-Process -Id $maaProc.Id -Force -ErrorAction SilentlyContinue
-    }
-    Start-Sleep 2
-    $ok = ($status -eq "ok")
-    if ($ok -and $script:LastMaaChainErrors.Count -gt 0) {
-        # 有报错的「正常完成」不是成功：资源过期/界面改动会让任务链逐个失败，
-        # MAA 照常退出发信号——按失败处理，走整轮重试 + 失败通知
-        $ok = $false
-        $script:LastMaaStatus = "chain-error"
-        Log ("ERROR: MAA [" + $label + "] 完成，但任务链报错: " +
-            (($script:LastMaaChainErrors | ForEach-Object { Convert-MaaChainName $_ }) -join "、"))
-    } elseif ($ok) { Log ("MAA [" + $label + "] completed successfully") }
-    else     { Log ("ERROR: MAA [" + $label + "] FAILED or timed out") }
-    return $ok
-}
+. (Join-Path $PSScriptRoot "master_maa.ps1")
+. (Join-Path $PSScriptRoot "master_pipeline.ps1")
 
 # config.accounts 非数组或为空 → 拒绝运行（防跑错号；旧 3 账号点击流程已废弃）
 if (-not $accountList -or $accountList.Count -eq 0) {
@@ -333,8 +57,15 @@ $scheduleEntries = @()
 if ($config -and $null -ne $config.schedule -and $null -ne $config.schedule.times -and
     $config.schedule.times -is [System.Array]) {
     foreach ($t in $config.schedule.times) {
-        if ($t -and $t.time -and $t.enabled) {
+        if (-not $t) { continue }
+        $tt = ([string]$t.time).Trim()
+        # enabled 缺失视为启用（与 GUI config.py / base_schedule 同口径）
+        $isEnabled = if ($null -ne $t.PSObject.Properties['enabled']) { [bool]$t.enabled } else { $true }
+        if ($isEnabled -and $tt -match '^([01][0-9]|2[0-3]):[0-5][0-9]$') {
+            $t.time = $tt   # 归一化：后续 Substring 取值依赖无前后空格
             $scheduleEntries += $t
+        } elseif ($isEnabled) {
+            Log ("  [WARN] 忽略非法班次时间：'{0}'（应为 HH:MM）" -f $tt)
         }
     }
 }
@@ -343,13 +74,19 @@ if ($scheduleEntries.Count -eq 0 -and $config -and $null -ne $config.schedule -a
     $null -ne $config.schedule.morning -and $null -ne $config.schedule.evening) {
     foreach ($kv in @(@("morning", "morning_shutdown"), @("evening", "evening_shutdown"))) {
         $item = $config.schedule.($kv[0])
-        $t = [string]$item.time
-        if ($t -match '^([01]\d|2[0-3]):[0-5]\d$') {
+        # enabled 缺失视为启用（与 GUI config.py 迁移同口径）；停用项不参与
+        # 批次/关机判定（迁移后即为 enabled=false 的 times 项）
+        $itemEnabled = if ($null -ne $item.PSObject.Properties['enabled']) { [bool]$item.enabled } else { $true }
+        if (-not $itemEnabled) { continue }
+        $t = ([string]$item.time).Trim()
+        if ($t -match '^([01][0-9]|2[0-3]):[0-5][0-9]$') {
             $scheduleEntries += [pscustomobject]@{
                 time    = $t
-                enabled = [bool]$item.enabled
+                enabled = $true
                 shutdown = [bool]$config.behavior.($kv[1])
             }
+        } else {
+            Log ("  [WARN] 忽略非法班次时间：'{0}'（应为 HH:MM）" -f $t)
         }
     }
 }
@@ -435,7 +172,16 @@ if ($InfrastCollect) {
         $null -ne $config.schedule.collect_times -and
         $config.schedule.collect_times -is [System.Array]) {
         foreach ($ct in $config.schedule.collect_times) {
-            if ($ct -and $ct.time -and $ct.enabled) { $collectEntries += $ct }
+            if (-not $ct) { continue }
+            $ctTime = ([string]$ct.time).Trim()
+            # enabled 缺失视为启用（与 GUI config.py 同口径）
+            $ctEnabled = if ($null -ne $ct.PSObject.Properties['enabled']) { [bool]$ct.enabled } else { $true }
+            if ($ctEnabled -and $ctTime -match '^([01][0-9]|2[0-3]):[0-5][0-9]$') {
+                $ct.time = $ctTime
+                $collectEntries += $ct
+            } elseif ($ctEnabled) {
+                Log ("  [WARN] 忽略非法收菜时间：'{0}'（应为 HH:MM）" -f $ctTime)
+            }
         }
     }
     if ($collectEntries.Count -gt 0) {
@@ -475,206 +221,13 @@ if (-not (Start-MuMu)) {
     exit 1
 }
 
-# ============ 动态账号流程（config.accounts 数组）============
-# 每个账号：槽位切号（重启游戏+推入登录数据，非点击）→ MAA。
-# 完整管线抽成 Invoke-AccountRun：主循环与「失败重试」（循环后的 RETRY 段）共用，
-# 函数只返回结果对象，$results 的追加/替换由调用方负责。
-function Invoke-AccountRun($acc, $idx, $IsRetry, [switch]$NoRefresh) {
-    $accLabel = if ($null -ne $acc.label -and [string]$acc.label) { [string]$acc.label } else { "Account $idx" }
-    $accServer = if ($null -ne $acc.server -and [string]$acc.server) { [string]$acc.server } else { "official" }
-    $accEnabled = $true
-    if ($null -ne $acc.enabled) { $accEnabled = [bool]$acc.enabled }
-    $accSlot = if ($null -ne $acc.slot) { [string]$acc.slot } else { "" }
-
-    # 横幅格式被 gui/core/logparse.py 的 BANNER_RE 解析（[序号/总数] 必须保持）
-    $retryMark = if ($IsRetry) { "（重试）" } else { "" }
-    Log " "; Log ("********** [{0}/{1}] {2}{3} **********" -f $idx, $total, $accLabel, $retryMark)
-    $sw = [System.Diagnostics.Stopwatch]::StartNew()
-
-    if (-not $accEnabled -and -not $SwitchTo) {
-        Log "  [SKIP] disabled in config.json"
-        return [PSCustomObject]@{ Account=$accLabel; OK=$true; Duration="skip"; Minutes=$null; Reason=""; Step=""; Retried=$false }
-    }
-
-    # ---- 切换账号：重启游戏 + 推入槽位数据（非点击）----
-    $switchOk = $true
-    $slotPath = if ($accSlot) { Join-Path $scriptDir ("accounts\" + $accSlot) } else { "" }
-    if ($accSlot -and (Test-Path $slotPath)) {
-        $switchOk = ((Run-Switch ("slot_switch.ps1 -Server {0} -Slot {1}" -f $accServer, $accSlot)) -eq 0)
-    } elseif ($accSlot -and -not (Test-Path $slotPath)) {
-        if ($accServer -eq "bilibili") {
-            # B 服只有一个号，槽位缺失不影响：照常运行（客户端由 MAA 拉起）
-            Log "  [WARN] slot '$accSlot' not found, switching client only"
-            $switchOk = $true
-        } else {
-            # 官服槽位缺失：拒绝运行该号（防跑错号），日志提示补捕获
-            Log "  [ERROR] slot '$accSlot' not found - refusing to run (防跑错号)"
-            Log "  [ERROR] 请在控制台「账号管理」页重新捕获该账号"
-            $switchOk = $false
-        }
-    } else {
-        if ($accServer -eq "bilibili") { $switchOk = ((Run-Switch "switch_to_B服.ps1") -eq 0) }
-        else {
-            Log "  [ERROR] account '$accLabel' has no slot - refusing to run (防跑错号)"
-            $switchOk = $false
-        }
-    }
-    if (-not $switchOk) {
-        Log "  [ERROR] Account switch failed"
-        return [PSCustomObject]@{ Account=$accLabel; OK=$false; Duration="0 min"; Minutes=0.0; Reason="切号失败"; Step="切号"; Retried=[bool]$IsRetry }
-    }
-
-    # ---- 快速启动（-SwitchTo -NoLoginCheck）：跳过更新等待与登录校验 ----
-    # token 已随槽位数据推入，导入完成即可玩；token 失效时游戏会停在登录界面
-    # （需手动登录或重新捕获，这正是跳过校验的代价）。也不做 Refresh-SlotData：
-    # 数据刚从槽位推入、游戏刚拉起还在加载写文件，此时回拉可能抓到写了一半的
-    # 文件覆盖掉槽位里的完好副本。
-    if ($SwitchTo -and $NoLoginCheck) {
-        Log "  [FAST] 快速启动：已跳过更新等待与登录校验，模拟器保持运行"
-    } else {
-        # ---- 登录校验：屏幕级确认游戏已登录；未登录自动输账号密码（官服）并刷新槽位 ----
-        # 文件级 uid 校验通过不代表游戏真在登录态（token 失效时会回到登录界面）。
-        # 游戏更新等待（含失败快判/安装器检测）自 v1.3.2 起由 login_check 内部处理。
-        # B服 与官服登录差异大（无标题画面/token 预检不可用/登录界面不可自动登录），
-        # 拆为独立的 login_check_bilibili.ps1 单独校验（盲点只在更新进行中禁用，
-        # 修复 2026-09-14 更新后无文字画面 240 秒空转超时）。
-        if ($accServer -eq "bilibili") {
-            $loginOk = ((Run-Switch ("login_check_bilibili.ps1 -Slot {0}" -f $accSlot)) -eq 0)
-        } else {
-            $loginOk = ((Run-Switch ("login_check.ps1 -Server {0} -Slot {1}" -f $accServer, $accSlot)) -eq 0)
-        }
-        if (-not $loginOk) {
-            Log "  [ERROR] Login check failed - 请在控制台重新捕获该账号"
-            return [PSCustomObject]@{ Account=$accLabel; OK=$false; Duration="0 min"; Minutes=0.0; Reason="登录校验失败"; Step="登录校验"; Retried=[bool]$IsRetry }
-        }
-    }
-
-    # ---- -SwitchTo 模式：切号 + 登录校验完成即停（不跑日常，模拟器保持运行）----
-    if ($SwitchTo) {
-        # 快速启动不回拉槽位数据（见上方 [FAST] 注释）
-        if (-not $NoLoginCheck) { Refresh-SlotData $accServer $accSlot }
-        $dur = [math]::Round($sw.Elapsed.TotalMinutes, 1)
-        Log ("  [OK] 已切换到「" + $accLabel + "」，模拟器保持运行（不跑日常）")
-        return [PSCustomObject]@{ Account=$accLabel; OK=$true; Duration="$dur min"; Minutes=$dur; Reason=""; Step=""; Retried=$false }
-    }
-
-    # ---- 跑 MAA（按服务器选对应客户端；-SkipMAA 测试模式跳过）----
-    $failReason = ""
-    if ($SkipMAA) {
-        Log "  [TEST] -SkipMAA: 跳过 MAA，仅验证切号"
-        $ok = $true
-    } else {
-        $accId = if ($null -ne $acc.id -and [string]$acc.id) { [string]$acc.id } else { "" }
-        # 插件走同一套调用模板（Invoke-Plugin）；$accId 缺失时全部跳过
-        if ($accId) {
-            $pluginArgs = @('apply', '--config', $configPath, '--account', $accId, '--server', $accServer)
-            if ($InfrastCollect) {
-                # ---- 基建收菜：切到独立「收菜」方案（全 skip 不换班），
-                # 不碰 Default 方案与班次计划/理智/菲亚梅塔 ----
-                [void](Invoke-Plugin $infrastCollectPy "基建收菜" "基建收菜插件" $pluginArgs "按 MAA 原配置运行（可能换班跑全设施）")
-            } else {
-                # ---- 任务开关自检：收菜配置恢复链一旦断了（备份残留被人工覆盖等），
-                # farm 会静默继承「只收菜」配置——MAA 只跑勾着的任务且正常退出，
-                # 理智/日常没刷但调度层全绿（2026-09-17 官服漏刷的根因）。
-                # 启动 MAA 前强制补开关键任务；自检不过该号按失败处理，走重试+失败通知。
-                $guardOk = $false
-                if (Test-Path $farmGuardPy) {
-                    $guardOk = Invoke-Plugin $farmGuardPy "任务自检" "任务开关自检" $pluginArgs "任务开关未校验"
-                } else {
-                    Log "  [WARN] 任务自检插件缺失（$farmGuardPy），跳过校验"
-                }
-                if (-not $guardOk) {
-                    Log "  [ERROR] 任务开关自检未通过 - 该号按失败处理（防静默跳过理智/日常）"
-                    # 带上插件自报明细（缺哪个任务/方案缺失原因），通知里不用再翻日志
-                    $guardReason = "任务开关自检失败"
-                    if ($script:LastPluginError) { $guardReason += "（" + $script:LastPluginError + "）" }
-                    return [PSCustomObject]@{ Account=$accLabel; OK=$false; Duration="0 min"; Minutes=0.0; Reason=$guardReason; Step="任务开关自检"; Retried=[bool]$IsRetry }
-                }
-                # ---- 第二理智作战关卡：启动 MAA 前按账号写入第二个 FightTask 的关卡 ----
-                $accHasFightPlan = $false
-                $planProp = $acc.PSObject.Properties['second_fight_plan']
-                if ($null -ne $planProp -and $null -ne $planProp.Value) {
-                    $planList = @($planProp.Value)
-                    if ($planList.Count -gt 0) {
-                        $accHasFightPlan = $true
-                    }
-                }
-                if (-not $accHasFightPlan -and $null -ne $acc.second_fight_stage -and
-                    [string]$acc.second_fight_stage) {
-                    $accHasFightPlan = $true
-                }
-                if ($accHasFightPlan) {
-                    [void](Invoke-Plugin $fightStagePy "理智关卡" "理智关卡插件" $pluginArgs "第二理智关卡未写入")
-                }
-                # ---- 精确基建派驻插件：启动 MAA 前按账号写入自定义计划（未启用则恢复 Rotation）----
-                [void](Invoke-Plugin $baseSchedulePy "基建插件" "基建插件" ($pluginArgs + @('--batch', $bsBatch)) "继续按 MAA 原配置运行")
-                # ---- 菲亚梅塔心情恢复：换班前先恢复目标干员心情 ----
-                # 自定义模式（精确基建）由上面生成的计划 JSON 的 Fiammetta 字段生效；
-                # 这里写的是常规模式的基建任务参数，两者互斥、都是换班前恢复。
-                [void](Invoke-Plugin $fiammettaPy "菲亚梅塔" "菲亚梅塔插件" $pluginArgs "菲亚梅塔设置未写入")
-            }
-        }
-        $maaExe = if ($accServer -eq "bilibili") { $maaBilibili } else { $maaOfficial }
-        $maaDir = if ($accServer -eq "bilibili") { $maaBilibiliDir } else { $maaOfficialDir }
-        $ok = Run-MAA $maaExe $maaDir $accLabel
-        if (-not $ok) {
-            # 失败原因跟随心跳判定状态（运行历史/通知里能看到具体死法）
-            switch ($script:LastMaaStatus) {
-                "stall"       { $failReason = "MAA 无进展超时" }
-                "dead"        { $failReason = "MAA 中途退出" }
-                "dead-early"  { $failReason = "MAA 启动即崩溃（已自动重试一次）" }
-                "chain-error" { $failReason = "MAA 任务链失败: " +
-                    (($script:LastMaaChainErrors | ForEach-Object { Convert-MaaChainName $_ }) -join "、") }
-                default       { $failReason = "MAA 运行失败" }
-            }
-        }
-    }
-    # 把设备上最新的登录数据（弹窗处理标记等）拉回槽位，避免下次切号弹窗重现。
-    # -NoRefresh（非最后一个号）：主循环在返回后以后台进程拉起 refresh_slot.ps1，
-    # 与下一个号的 slot_switch 并行执行（每号省 ~5-8 秒）；最后一个号无下一号
-    # 可流水线，保持同步回拉保证收尾完整。
-    if (-not $NoRefresh) { Refresh-SlotData $accServer $accSlot }
-    $dur = [math]::Round($sw.Elapsed.TotalMinutes, 1)
-    # Step = 失败步骤名（切号/登录校验/任务开关自检/MAA 运行），成功为空串；
-    # Reason 保持纯失败说明（不再带「重试后仍失败：」前缀，重试状态看 Retried）
-    $maaStep = if ($failReason) { "MAA 运行" } else { "" }
-    return [PSCustomObject]@{ Account=$accLabel; OK=$ok; Duration="$dur min"; Minutes=$dur; Reason=$failReason; Step=$maaStep; Retried=[bool]$IsRetry }
-}
-
+# 每个账号独占设备完成切号、登录、任务和槽位回拉；首跑/重试共用账号管线。
 $total = $accountList.Count
 $idx = 0
-$bgRefreshProcs = @()   # 后台回拉进程（每号一个；主流程不阻塞等它，收尾时兜底等待）
 foreach ($acc in $accountList) {
     $idx++
-    # 非最后一个号传 -NoRefresh：MAA 完成后立刻返回、不等同步回拉，
-    # 由下方 Start-Process 拉起后台回拉与下一号的 slot_switch 并行
-    $isLast = ($idx -eq $total)
-    $results += (Invoke-AccountRun $acc $idx $false -NoRefresh:(-not $isLast))
-    # 后台回拉（仅完整跑成功了的非最后号；skipped / 失败号不需要——失败号由
-    # 重试管线跑成功后的同步回拉兜底）。注意 -WindowStyle 与 -NoNewWindow
-    # 分属 Start-Process 的不同参数集，不能同时给（实测报参数集解析失败、
-    # 进程起不来）；Hidden 独立隐藏窗口，子脚本日志走 master_log.txt 直写
-    $accSlot = if ($null -ne $acc.slot) { [string]$acc.slot } else { "" }
-    $lastResult = $results[$idx-1]
-    if (-not $isLast -and $lastResult.OK -and $null -ne $lastResult.Minutes -and $accSlot) {
-        $accSrv = if ($acc.server) { [string]$acc.server } else { "official" }
-        $rp = Start-Process -FilePath $pwshExe `
-            -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$scriptDir\refresh_slot.ps1`" -Server $accSrv -Slot $([string]$acc.slot)" `
-            -WindowStyle Hidden -PassThru
-        if ($null -eq $rp) {
-            Log "  [WARN] 后台回拉 $accSlot 启动失败（Start-Process 未返回进程），该号下次切号前请手动检查"
-        } else {
-            $bgRefreshProcs += $rp
-            Log "  [Pipeline] 后台回拉 $accSlot 已启动（与下一号切号并行）"
-        }
-    }
+    $results += (Invoke-AccountRun $acc $idx $false)
 }
-# 收尾兜底：等待残留的后台回拉完成（正常 5-8 秒；最多 30 秒防 ADB 挂死阻塞收尾）
-foreach ($bp in $bgRefreshProcs) {
-    if ($bp -and -not $bp.HasExited) { [void]$bp.WaitForExit(30000) }
-    if ($bp) { try { $bp.Dispose() } catch {} }
-}
-
 # ---- 失败重试：有账号失败时（部分失败或全部失败），整轮跑完后对失败号按原顺序
 # 完整重试一遍（切号→登录校验→插件→MAA 与首跑同一管线）。全失败常见于系统性
 # 问题（游戏维护/更新），重试等于赌维护在两轮之间结束——接受这份耗时换取成功率。
@@ -702,7 +255,8 @@ if (-not $SwitchTo) {
             }
         }
         Log ("=== [RETRY] 结束：最终成功 {0}/{1} ===" -f
-            (@($results | Where-Object { $_.OK }).Count), $attempted.Count)
+            (@($results | Where-Object { $_.OK -and $null -ne $_.Minutes }).Count),
+            $attempted.Count)
     }
 }
 
@@ -710,8 +264,11 @@ if (-not $SwitchTo) {
 if ($InfrastCollect) {
     # 收菜结束：Current 指针切回 Default（MAA 已被 Run-MAA 杀掉，回写不会覆盖）。
     # 中断残留的「收菜」指针由 farm_guard 在下次挂机启动前强制纠正。
-    [void](Invoke-Plugin $infrastCollectPy "基建收菜" "基建收菜插件" @('restore', '--config', $configPath) "下次挂机启动时任务自检会强制切回 Default")
-    Log "=== [InfrastCollect] MAA 配置已切回 Default ==="
+    if (Invoke-Plugin $infrastCollectPy "基建收菜" "基建收菜插件" @('restore', '--config', $configPath) "下次挂机启动时任务自检会强制切回 Default") {
+        Log "=== [InfrastCollect] MAA 配置已切回 Default ==="
+    } else {
+        Log "  [WARN] 收菜配置恢复失败，下次挂机将由任务自检恢复 Default"
+    }
 }
 if ($SwitchTo) {
     Log " "
@@ -735,8 +292,11 @@ if ($SwitchTo) {
 
 $totalDur = [math]::Round($totalSw.Elapsed.TotalMinutes, 1)
 # @(...) wrapper required - in PS 5.1, .Count on a single PSCustomObject returns $null
-$passed = @($results | Where-Object { $_.OK }).Count
+$passed = @($results | Where-Object { $_.OK -and $null -ne $_.Minutes }).Count
 $failed = @($results | Where-Object { -not $_.OK }).Count
+$skipped = @($results | Where-Object { $null -eq $_.Minutes }).Count
+$resultSummary = ("本轮共 {0} 个账号：成功 {1} · 失败 {2}" -f @($results).Count, $passed, $failed)
+if ($skipped -gt 0) { $resultSummary += " · 跳过 $skipped" }
 
 Log " "
 Log "========================================"
@@ -780,7 +340,7 @@ if (-not $SwitchTo) {
         $push = ("失败步骤：{0}" -f $(if ([string]$r.Step) { [string]$r.Step } else { "未知" }))
         $push += ("`n{0}班 · 用时 {1} 分钟" -f $bsBatch, $r.Minutes)
         if ($r.Retried) { $push += " · 重试后仍失败" }
-        $push += ("`n本轮共 {0} 个账号：成功 {1} · 失败 {2}" -f @($results).Count, $passed, $failed)
+        $push += "`n$resultSummary"
         Send-RunNotify $title $push
     }
     # 重试成功的号单独推送（重试无论成败都通知）：首跑报错的号用户必须知道
@@ -792,7 +352,7 @@ if (-not $SwitchTo) {
         $title = "MAA {0}重试成功：「{1}」" -f $modeLabel, $r.Account
         $push = "首跑失败：$firstReason`n重试已成功，本轮按成功计"
         $push += ("`n{0}班 · 用时 {1} 分钟" -f $bsBatch, $r.Minutes)
-        $push += ("`n本轮共 {0} 个账号：成功 {1} · 失败 {2}" -f @($results).Count, $passed, $failed)
+        $push += "`n$resultSummary"
         Send-RunNotify $title $push
     }
 }
@@ -808,6 +368,7 @@ if (-not $SwitchTo -and $config -and $null -ne $config.notify -and
         $modeLabel = if ($InfrastCollect) { "基建收菜" } else { "挂机" }
         $title = "MAA {0}完成 ✅" -f $modeLabel
         $push = ("{0}班 · {1} 个账号全部成功 · 总用时 {2} 分钟" -f $bsBatch, $ranAccounts.Count, $totalDur)
+        if ($skipped -gt 0) { $push += " · 跳过 $skipped" }
         foreach ($r in $ranAccounts) {
             $mark = if ($r.Retried) { "（重试成功）" } else { "" }
             $push += ("`n  {0} {1}min{2}" -f $r.Account, $r.Minutes, $mark)
