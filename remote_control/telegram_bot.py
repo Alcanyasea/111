@@ -29,14 +29,35 @@ class BaseScheduleBot:
         editor_commands = [
             {"command": "start", "description": "查看机器人状态"},
             {"command": "upload", "description": "上传基建配置 JSON"},
+            {"command": "config", "description": "查看当前基建配置"},
             {"command": "bind", "description": "使用绑定码关联账号"},
         ]
-        owner_commands = editor_commands[:2] + [
+        owner_commands = editor_commands[:3] + [
             {"command": "invite", "description": "生成编辑者绑定码"},
             {"command": "publish", "description": "发布草稿到本地配置"},
         ]
         self.api.set_my_commands(editor_commands)
         self.api.set_my_commands(owner_commands, {"type": "chat", "chat_id": self.policy.owner_id})
+
+    def _config_messages(self, user_id):
+        if not (self.policy.is_owner(user_id) or self.policy.bound_account(user_id)):
+            raise PermissionError("账号权限不足")
+        messages = []
+        for account in self.policy.accounts_for(user_id, self.cfg.get("accounts") or []):
+            safe = {
+                "label": account.get("label") or account.get("id"),
+                "base_schedule": copy.deepcopy(account.get("base_schedule") or {}),
+            }
+            if self.policy.is_owner(user_id):
+                safe["id"] = str(account.get("id"))
+            messages.append(json.dumps(safe, ensure_ascii=False, indent=2))
+        return messages or ["暂无可查看的账号配置。"]
+
+    def _send_config(self, chat_id, user_id):
+        for body in self._config_messages(user_id):
+            text = "当前基建配置：\n" + body
+            for start in range(0, len(text), 3500):
+                self.api.send(chat_id, text[start:start + 3500])
 
     def handle_message(self, message):
         user_id = str(((message.get("from") or {}).get("id")))
@@ -48,6 +69,12 @@ class BaseScheduleBot:
             return
         if text == "/upload":
             self.api.send(chat_id, "请直接发送基建排班 JSON 文件。编辑者会写入绑定账号；所有者会生成草稿。")
+            return
+        if text == "/config":
+            try:
+                self._send_config(chat_id, user_id)
+            except Exception as exc:
+                self.api.send(chat_id, "查看失败：%s" % str(exc))
             return
         if text == "/invite":
             if not self.policy.is_owner(user_id): self.api.send(chat_id, "只有所有者可以生成绑定码。"); return

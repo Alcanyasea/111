@@ -101,9 +101,23 @@ class TelegramBaseScheduleTests(unittest.TestCase):
         bot.configure_commands()
         self.assertEqual(len(api.menus), 2)
         default, owner = api.menus
-        self.assertEqual([item["command"] for item in default[0]], ["start", "upload", "bind"])
-        self.assertEqual([item["command"] for item in owner[0]], ["start", "upload", "invite", "publish"])
+        self.assertEqual([item["command"] for item in default[0]], ["start", "upload", "config", "bind"])
+        self.assertEqual([item["command"] for item in owner[0]], ["start", "upload", "config", "invite", "publish"])
         self.assertEqual(owner[1], {"type": "chat", "chat_id": "1"})
+
+    def test_config_command_is_scoped_to_user_and_excludes_secrets(self):
+        class Api:
+            def __init__(self): self.sent = []
+            def send(self, chat, text): self.sent.append((chat, text))
+
+        self.cfg["accounts"][0]["password"] = "hidden"
+        self.cfg["accounts"][1]["token"] = "hidden"
+        api = Api()
+        bot = BaseScheduleBot(api, self.cfg, Path("."), DraftStore(Path(tempfile.mkdtemp()) / "d.json"), RolePolicy("1", {"2": "a1"}))
+        bot.handle_message({"from": {"id": "2"}, "chat": {"id": "2"}, "text": "/config"})
+        self.assertIn("官服1", "\n".join(text for _, text in api.sent))
+        self.assertNotIn("官服2", "\n".join(text for _, text in api.sent))
+        self.assertNotIn("hidden", "\n".join(text for _, text in api.sent))
 
 
 if __name__ == "__main__": unittest.main()
