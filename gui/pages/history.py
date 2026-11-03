@@ -4,10 +4,15 @@
 左侧按时间倒序列出每一轮（挂机/收菜/切号），右侧展示该轮每号结果、
 耗时与失败原因。记录保留 60 天（master.ps1 写入时自动清理），纯本机数据；
 正在挂机时不能清空历史，查看不受影响。
+
+失败现场（run_history\\<时间戳>\\<槽位>\\ 的截图与调试日志）另算容量：工具栏
+显示当前占用，可单独清空；主控每轮归档后也会把总量压到上限（默认 200MB）。
+
 """
 import json
 import os
 import re
+import shutil
 from datetime import datetime
 from pathlib import Path
 
@@ -53,6 +58,18 @@ def _fmt_dur(mins):
     return "%g 分钟" % m
 
 
+def _fmt_size(n):
+    """字节数 → 「860 KB / 12.4 MB / 1.3 GB」。"""
+    try:
+        n = float(n)
+    except (TypeError, ValueError):
+        return "—"
+    for unit, scale in (("GB", 1024.0 ** 3), ("MB", 1024.0 ** 2), ("KB", 1024.0)):
+        if n >= scale:
+            return "%.1f %s" % (n / scale, unit)
+    return "%d B" % int(n)
+
+
 def _label(text, size=None, weight="400", color=None, mono=False):
     """主题色文本标签。size 缺省取字号标尺正文档；color 传调色板令牌名，
     配方随主题切换自动重读；mono=True 用等宽字体（耗时等数据列对齐）。"""
@@ -86,10 +103,17 @@ class HistoryPage(QWidget):
         open_btn.clicked.connect(self._open_dir)
         clear_btn = style_button(PushButton("清空历史"), "danger", small=True)
         clear_btn.clicked.connect(self._on_clear)
+        self.evidence_btn = style_button(PushButton("清空失败现场"), small=True)
+        self.evidence_btn.clicked.connect(self._on_clear_evidence)
         bar.addWidget(refresh_btn)
         bar.addWidget(open_btn)
         bar.addWidget(clear_btn)
+        bar.addWidget(self.evidence_btn)
         bar.addStretch(1)
+        self.evidence_label = BodyLabel("")
+        theme.bind(self.evidence_label, lambda: "color: %s; %s"
+                   % (theme.TEXT_3, theme.font_stack(theme.FS_CAPTION)))
+        bar.addWidget(self.evidence_label)
         hint = BodyLabel("每轮挂机结束自动记录 · 保留 60 天")
         theme.bind(hint, lambda: "color: %s; %s"
                    % (theme.TEXT_3, theme.font_stack(theme.FS_CAPTION)))
@@ -219,6 +243,7 @@ class HistoryPage(QWidget):
             self._selected_file = None
             self.list.setCurrentRow(-1)
             self._show_detail(None)
+        self._update_evidence_summary()
 
     def _on_select(self, cur, _prev=None):
         if self._suppress_select:
@@ -367,6 +392,73 @@ class HistoryPage(QWidget):
     def _open_dir(self):
         self._open_path(self._history_dir())
 
+    # ---------- 失败现场 ----------
+
+    def _evidence_dirs(self):
+        """所有轮次的失败现场目录（run_history/<yyyyMMdd_HHmmss>/），按时间升序。"""
+        d = self._history_dir()
+        if not d.is_dir():
+            return []
+        try:
+            entries = sorted(d.iterdir())
+        except OSError:
+            return []
+        return [p for p in entries
+                if p.is_dir() and re.fullmatch(r"\d{8}_\d{6}", p.name)]
+
+    @staticmethod
+    def _evidence_bytes(dirs):
+        total = 0
+        for d in dirs:
+            for f in d.rglob("*"):
+                try:
+                    if f.is_file():
+                        total += f.stat().st_size
+                except OSError:
+                    pass   # 正在被写入/已删除的文件跳过，不阻断统计
+        return total
+
+    def _update_evidence_summary(self):
+        dirs = self._evidence_dirs()
+        total = self._evidence_bytes(dirs)
+        self.evidence_label.setText(
+            "失败现场 %s" % _fmt_size(total) if dirs else "无失败现场")
+        self.evidence_btn.setEnabled(bool(dirs))
+
+    def _remove_evidence(self, dirs):
+        removed = 0
+        for d in dirs:
+            shutil.rmtree(d, ignore_errors=True)
+            if not d.exists():
+                removed += 1
+        return removed
+
+    def _on_clear_evidence(self):
+        if runner.is_running():
+            InfoBar.warning("挂机运行中", "运行期间不能清空失败现场（master.ps1 正在写入）",
+                            parent=self.window(), position=InfoBarPosition.TOP_RIGHT,
+                            duration=5000)
+            return
+        dirs = self._evidence_dirs()
+        if not dirs:
+            InfoBar.info("无需清理", "当前没有失败现场证据",
+                         parent=self.window(), position=InfoBarPosition.TOP_RIGHT,
+                         duration=3000)
+            return
+        box = MessageBox(
+            "清空失败现场",
+            "将删除 %d 个轮次的失败截图与调试日志（%s）。运行历史记录保留，证据不可恢复。"
+            % (len(dirs), _fmt_size(self._evidence_bytes(dirs))), self.window())
+        box.yesButton.setText("清空")
+        box.cancelButton.setText("取消")
+        if not box.exec():
+            return
+        removed = self._remove_evidence(dirs)
+        self.refresh()
+        InfoBar.success("已清空失败现场", "删除 %d 个轮次的证据" % removed,
+                        parent=self.window(), position=InfoBarPosition.TOP_RIGHT,
+                        duration=3000)
+
     def _on_clear(self):
         if runner.is_running():
             InfoBar.warning("挂机运行中", "运行期间不能清空历史（master.ps1 可能正在写入）",
@@ -380,7 +472,7 @@ class HistoryPage(QWidget):
             return
         box = MessageBox(
             "清空运行历史",
-            "将删除 scripts\\run_history 下全部 %d 条运行记录，不可恢复。"
+            "将删除 scripts\\run_history 下全部 %d 条运行记录与失败现场证据，不可恢复。"
             % len(self._records), self.window())
         box.yesButton.setText("清空")
         box.cancelButton.setText("取消")
@@ -393,8 +485,10 @@ class HistoryPage(QWidget):
                 removed += 1
             except OSError:
                 pass
+        ev_removed = self._remove_evidence(self._evidence_dirs())
         self._selected_file = None
         self.refresh()
-        InfoBar.success("已清空运行历史", "删除 %d 条记录" % removed,
+        InfoBar.success("已清空运行历史",
+                        "删除 %d 条记录、%d 个失败现场" % (removed, ev_removed),
                         parent=self.window(), position=InfoBarPosition.TOP_RIGHT,
                         duration=3000)

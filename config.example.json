@@ -45,7 +45,8 @@
     "cleanup": {
         "auto": true,
         "interval_days": 7,
-        "last_run": ""
+        "last_run": "",
+        "evidence_limit_mb": 200
     },
     "notify": {
         "enabled": false,

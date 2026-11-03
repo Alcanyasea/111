@@ -110,6 +110,134 @@ Save-RunHistory ''
             buttons[0].click()
         open_folder.assert_called_once_with(str(expected))
 
+    # ---------- 失败现场容量上限（PS 侧） ----------
+
+    def test_evidence_over_limit_removes_oldest_rounds_only(self):
+        r = run_ps(self, self.root, ["scripts/master_history.ps1"], r'''
+$dir = Join-Path $scriptDir 'run_history'
+foreach ($stamp in '20260101_000001','20260102_000001','20260103_000001') {
+    $slot = Join-Path $dir (Join-Path $stamp 'fixture')
+    $null = New-Item -ItemType Directory -Path $slot -Force
+    [IO.File]::WriteAllBytes((Join-Path $slot 'shot.png'), [byte[]]::new(500KB))
+    [IO.File]::WriteAllText((Join-Path $dir ('run_' + $stamp + '.json')), '{}')
+}
+$res = Remove-ExcessEvidence -Dir $dir -LimitBytes (700KB) -Keep ''
+@{
+  removed = @($res.removed)
+  total = [long]$res.total
+  dirs = @(Get-ChildItem -LiteralPath $dir -Directory | ForEach-Object { $_.Name })
+  json = @(Get-ChildItem -LiteralPath $dir -Filter 'run_*.json' -File).Count
+} | ConvertTo-Json -Depth 4
+''')
+        self.assertEqual(list(r["removed"]), ["20260101_000001", "20260102_000001"])
+        self.assertLessEqual(r["total"], 700 * 1024)
+        self.assertEqual(list(r["dirs"]), ["20260103_000001"])
+        self.assertEqual(r["json"], 3)
+
+    def test_current_round_evidence_survives_even_over_limit(self):
+        r = run_ps(self, self.root, ["scripts/master_history.ps1"], r'''
+$dir = Join-Path $scriptDir 'run_history'
+foreach ($stamp in '20260101_000001','20260102_000001') {
+    $slot = Join-Path $dir (Join-Path $stamp 'fixture')
+    $null = New-Item -ItemType Directory -Path $slot -Force
+    [IO.File]::WriteAllBytes((Join-Path $slot 'shot.png'), [byte[]]::new(500KB))
+}
+$res = Remove-ExcessEvidence -Dir $dir -LimitBytes (100KB) -Keep '20260102_000001'
+@{
+  removed = @($res.removed)
+  dirs = @(Get-ChildItem -LiteralPath $dir -Directory | ForEach-Object { $_.Name })
+} | ConvertTo-Json -Depth 4
+''')
+        self.assertEqual(list(r["removed"]), ["20260101_000001"])
+        self.assertEqual(list(r["dirs"]), ["20260102_000001"])
+
+    def test_evidence_limit_defaults_to_200mb_and_accepts_config_override(self):
+        r = run_ps(self, self.root, ["scripts/master_history.ps1"], r'''
+$config = $null
+$def = Get-EvidenceLimitBytes
+$config = [pscustomobject]@{ cleanup = [pscustomobject]@{ evidence_limit_mb = 50 } }
+$cfg = Get-EvidenceLimitBytes
+@{ def = [long]$def; cfg = [long]$cfg } | ConvertTo-Json
+''')
+        self.assertEqual(r["def"], 200 * 1024 * 1024)
+        self.assertEqual(r["cfg"], 50 * 1024 * 1024)
+
+    def test_run_history_write_enforces_evidence_limit(self):
+        # 接线检查：Save-RunHistory 结束时按 config 上限清理最老证据
+        r = run_ps(self, self.root,
+                   ["scripts/master_history.ps1"], r'''
+$runHistoryDir = Join-Path $scriptDir 'run_history'
+$runStartTs = '2026-11-02 22:00:02'
+$runStamp = '20261102_220003'
+$runMode = 'collect'
+$bsBatch = ''
+$totalSw = [Diagnostics.Stopwatch]::StartNew()
+$results = @()
+$config = [pscustomobject]@{ cleanup = [pscustomobject]@{ evidence_limit_mb = 0.25 } }
+$old = Join-Path $runHistoryDir '20260101_000001\fixture'
+$null = New-Item -ItemType Directory -Path $old -Force
+[IO.File]::WriteAllBytes((Join-Path $old 'shot.png'), [byte[]]::new(400KB))
+Save-RunHistory ''
+@{
+  old = Test-Path -LiteralPath (Join-Path $runHistoryDir '20260101_000001')
+  json = Test-Path -LiteralPath (Join-Path $runHistoryDir 'run_20261102_220003.json')
+} | ConvertTo-Json
+''')
+        self.assertFalse(r["old"])
+        self.assertTrue(r["json"])
+
+    # ---------- 失败现场容量（GUI 侧） ----------
+
+    def _make_evidence(self, stamp, size=1024):
+        slot = self.root / "run_history" / stamp / "fixture"
+        slot.mkdir(parents=True)
+        (slot / "shot.png").write_bytes(b"x" * size)
+        return slot.parent
+
+    def test_evidence_summary_shows_usage_and_enables_button(self):
+        self._make_evidence("20261102_220002")
+        self._make_evidence("20261103_040002")
+        self.page.refresh()
+        self.assertEqual(self.page.evidence_label.text(), "失败现场 2.0 KB")
+        self.assertTrue(self.page.evidence_btn.isEnabled())
+
+    def test_clear_evidence_keeps_history_records(self):
+        ev = self._make_evidence("20261102_220002")
+        rec = self.root / "run_history" / "run_20261102_220002.json"
+        rec.write_text('{"start": "2026-11-02 22:00:02", "accounts": []}',
+                       encoding="utf-8")
+        self.page.refresh()
+        with patch("pages.history.runner.is_running", return_value=False), \
+                patch("pages.history.InfoBar"), \
+                patch("pages.history.MessageBox") as box:
+            box.return_value.exec.return_value = True
+            self.page._on_clear_evidence()
+        self.assertFalse(ev.exists())
+        self.assertTrue(rec.exists())
+        self.assertEqual(self.page.evidence_label.text(), "无失败现场")
+        self.assertFalse(self.page.evidence_btn.isEnabled())
+
+    def test_clear_evidence_is_blocked_while_farming(self):
+        ev = self._make_evidence("20261102_220002")
+        with patch("pages.history.runner.is_running", return_value=True), \
+                patch("pages.history.InfoBar"):
+            self.page._on_clear_evidence()
+        self.assertTrue(ev.exists())
+
+    def test_clear_history_removes_evidence_directories_too(self):
+        ev = self._make_evidence("20261102_220002")
+        rec = self.root / "run_history" / "run_20261102_220002.json"
+        rec.write_text('{"start": "2026-11-02 22:00:02", "accounts": []}',
+                       encoding="utf-8")
+        self.page.refresh()
+        with patch("pages.history.runner.is_running", return_value=False), \
+                patch("pages.history.InfoBar"), \
+                patch("pages.history.MessageBox") as box:
+            box.return_value.exec.return_value = True
+            self.page._on_clear()
+        self.assertFalse(ev.exists())
+        self.assertFalse(rec.exists())
+
 
 if __name__ == "__main__":
     unittest.main()

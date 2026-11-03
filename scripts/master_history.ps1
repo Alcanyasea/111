@@ -4,6 +4,64 @@
 # $configPath / Log，以及 master_plugins.ps1 的 Invoke-Plugin；$results /
 # $bsBatch / $totalSw 在 MAIN 阶段赋值，函数体调用时才取值，不受影响）。
 
+# ---- 失败现场容量上限 ----
+# 每个失败号最多归档 3 个文件；按每天 2 轮 × 4 号全失败约 7MB/天估算，60 天可达
+# 400MB 以上，且历史 JSON 被手动删掉时证据会变成孤儿。每轮写完历史后统计
+# <yyyyMMdd_HHmmss> 证据目录总量，超限就从最老的轮次删起，只删证据、不动 run_*.json。
+# 上限默认 200MB；config.cleanup.evidence_limit_mb（正数）可覆盖。
+function Get-EvidenceLimitBytes {
+    $mb = $null
+    if ($config -and $config.cleanup) { $mb = $config.cleanup.evidence_limit_mb }
+    if ($null -ne $mb) {
+        $n = [double]0
+        if ([double]::TryParse([string]$mb, [ref]$n) -and $n -gt 0) { return [long]($n * 1MB) }
+    }
+    return [long](200MB)
+}
+
+# 证据目录只认 <yyyyMMdd_HHmmss> 形式，避免误删 run_history 下其它目录；
+# 返回按目录名升序（即时间从老到新）。
+function Get-EvidenceDirs([string]$Dir) {
+    if (-not $Dir -or -not (Test-Path -LiteralPath $Dir)) { return @() }
+    return @(Get-ChildItem -LiteralPath $Dir -Directory -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -match '^\d{8}_\d{6}$' } | Sort-Object Name)
+}
+
+function Get-DirectorySizeBytes([string]$Path) {
+    $sum = [long]0
+    foreach ($f in @(Get-ChildItem -LiteralPath $Path -Recurse -File -ErrorAction SilentlyContinue)) {
+        $sum += [long]$f.Length
+    }
+    return $sum
+}
+
+# 删除超出上限的最老证据目录；当前轮（$Keep）永不删除，保留诊断现场。
+# 返回 @{ total; limit; removed }，removed 是被删掉的目录名数组。
+function Remove-ExcessEvidence {
+    param([string]$Dir = "", [long]$LimitBytes = 0, [string]$Keep = "")
+    if (-not $Dir) { $Dir = $runHistoryDir }
+    if ($LimitBytes -le 0) { $LimitBytes = Get-EvidenceLimitBytes }
+    $dirs = Get-EvidenceDirs $Dir
+    $sizes = @{}
+    $total = [long]0
+    foreach ($d in $dirs) {
+        $n = Get-DirectorySizeBytes $d.FullName
+        $sizes[$d.Name] = $n
+        $total += $n
+    }
+    $removed = @()
+    foreach ($d in $dirs) {
+        if ($total -le $LimitBytes) { break }
+        if ($Keep -and $d.Name -eq $Keep) { continue }
+        Remove-Item -LiteralPath $d.FullName -Recurse -Force -ErrorAction SilentlyContinue
+        if (-not (Test-Path -LiteralPath $d.FullName)) {
+            $total -= $sizes[$d.Name]
+            $removed += $d.Name
+        }
+    }
+    return [ordered]@{ total = $total; limit = $LimitBytes; removed = @($removed) }
+}
+
 # ---- 运行历史留存：每轮结束写一份 JSON 到 scripts\run_history\（GUI「运行历史」页读取）----
 # 记录模式/班次/每号结果与失败原因；保留 60 天，且总数超 400 时删最老的
 # （切号/收菜多轮时兜底）。写入失败只告警，不影响主流程收尾。
@@ -71,6 +129,14 @@ function Save-RunHistory($fatalReason) {
             if ($d.Name -match '^\d{8}_\d{6}$' -and $d.LastWriteTime -lt $cutoff) {
                 Remove-Item $d.FullName -Recurse -Force -ErrorAction SilentlyContinue
             }
+        }
+        # 容量兜底：证据总量超过上限时从最老的轮次开始删（当前轮保留）
+        $limit = Get-EvidenceLimitBytes
+        $ev = Remove-ExcessEvidence -Dir $runHistoryDir -LimitBytes $limit -Keep $runStamp
+        if ($ev.removed.Count -gt 0) {
+            Log ("  [证据] 失败现场超上限，已清理 " + $ev.removed.Count + " 个最老轮次（现 " +
+                [math]::Round($ev.total / 1MB, 1) + " MB / 上限 " +
+                [math]::Round($limit / 1MB, 0) + " MB）")
         }
     } catch {
         Log ("  [WARN] 运行历史写入失败：" + $_.Exception.Message)
