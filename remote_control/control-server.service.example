@@ -1,0 +1,18 @@
+[Unit]
+Description=MAA remote control plane
+After=network.target
+
+[Service]
+User=maa-control
+WorkingDirectory=/opt/maa-control
+EnvironmentFile=/etc/maa-control/maa-control.env
+ExecStart=/usr/bin/python3 -m remote_control.server_cli --db /var/lib/maa-control/control.sqlite --bind 127.0.0.1 --port 18765 --password-env MAA_CONTROL_PASSWORD
+Restart=on-failure
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/maa-control
+MemoryMax=256M
+
+[Install]
+WantedBy=multi-user.target

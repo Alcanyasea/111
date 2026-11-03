@@ -1,0 +1,15 @@
+services:
+  maa-control:
+    build: .
+    command: python -m remote_control.server_cli --db /data/control.sqlite --bind 0.0.0.0 --port 8765 --password-env MAA_CONTROL_PASSWORD
+    environment:
+      MAA_CONTROL_PASSWORD: change-me
+    ports:
+      - "127.0.0.1:18765:8765"
+    volumes:
+      - ./data:/data
+    read_only: true
+    tmpfs:
+      - /tmp
+    mem_limit: 256m
+    restart: unless-stopped

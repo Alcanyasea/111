@@ -148,6 +148,7 @@ def detect_maa_official_dir(base=r"D:\软件\MAA"):
 _maa_dir_default = detect_maa_official_dir() or r"D:\软件\MAA\MAA-v6.11.1-win-x64"
 
 DEFAULTS = {
+    "remote_revision": 0,
     "paths": {
         "maa_official": str(Path(_maa_dir_default) / "MAA.exe"),
         "maa_official_dir": _maa_dir_default,
@@ -481,6 +482,18 @@ def save(cfg: dict):
     最终失败仍抛出（调用方 settings 页已有捕获弹窗，静默丢配置更危险）。
     """
     CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        from core.remote_revision import backup_config, config_write_lock, next_revision
+        with config_write_lock(CONFIG_PATH):
+            if CONFIG_PATH.exists():
+                backup_config(CONFIG_PATH)
+            next_revision(cfg)
+            _save_atomic(cfg)
+    except ImportError:
+        _save_atomic(cfg)
+
+
+def _save_atomic(cfg):
     tmp = CONFIG_PATH.with_suffix(".json.tmp-%d" % os.getpid())
     with open(tmp, "w", encoding="utf-8", newline="\n") as f:
         json.dump(cfg, f, ensure_ascii=False, indent=2)
@@ -491,9 +504,7 @@ def save(cfg: dict):
             return
         except OSError:
             if attempt == 2:
-                try:
-                    os.unlink(tmp)
-                except OSError:
-                    pass
+                try: os.unlink(tmp)
+                except OSError: pass
                 raise
             time.sleep(0.15)

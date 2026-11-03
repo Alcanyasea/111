@@ -113,6 +113,8 @@ gui\.venv\Scripts\python.exe gui\main.py
 
 ## 6. 出问题去哪查
 
+手机远程控制（可选）：先看 `docs/remote-control.md`。它只把命令和脱敏状态放到 1GB 服务器，实际挂机仍由 Windows 本地 Agent 调用现有脚本；不要把 `config.json`、`scripts\accounts` 或 MAA 目录上传到服务器。
+
 - 运行日志：`scripts\master_log.txt`（GUI「日志」页可直接看）
 - 每轮结果：`scripts\run_history\`（GUI「运行历史」页，含逐号失败原因）
 - 常见问题：`README.md` 的「常见问题」一节（覆盖执行策略、MAA 连接、超时、
