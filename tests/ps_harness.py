@@ -9,7 +9,7 @@ ROOT = Path(__file__).resolve().parents[1]
 PWSH = shutil.which("pwsh")
 
 
-def run_ps(test, root, sources, body, timeout=30):
+def run_ps(test, root, sources, body, timeout=30, env=None):
     if not PWSH:
         test.skipTest("PowerShell 7 required")
     loader = r'''
@@ -28,10 +28,13 @@ function Log($message) { }
 '''
     script = Path(root) / "harness.ps1"
     script.write_text(loader + body, encoding="utf-8")
+    child_env = dict(os.environ, TEST_PS_ROOT=str(root),
+                     TEST_PS_SOURCES=json.dumps([str(ROOT / s) for s in sources]))
+    if env:
+        child_env.update(env)
     result = subprocess.run(
         [PWSH, "-NoProfile", "-File", str(script)],
-        env=dict(os.environ, TEST_PS_ROOT=str(root),
-                 TEST_PS_SOURCES=json.dumps([str(ROOT / s) for s in sources])),
+        env=child_env,
         capture_output=True, encoding="utf-8", errors="replace", timeout=timeout,
         creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
     )

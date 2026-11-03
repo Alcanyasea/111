@@ -1,4 +1,4 @@
-﻿# ============================================================
+# ============================================================
 # 登录校验 v2 — 槽位切号后、MAA 启动前：屏幕级确认游戏已登录
 # 已登录（无登录界面标记）→ 直接放行；检测到登录界面 →
 #   官服：自动输入账号密码登录（凭据取自 config.accounts，不经命令行传递），
@@ -60,7 +60,9 @@ $scriptDir = $PSScriptRoot
 # ---- 读取 GUI 配置（项目根 config.json），字段缺失时回退上面的默认值 ----
 $Username = ""
 $Password = ""
+$PasswordBroken = $false
 . (Join-Path $PSScriptRoot "config_lib.ps1")
+. (Join-Path $PSScriptRoot "secret_lib.ps1")
 $config = Read-AppConfigJson (Join-Path (Split-Path -Parent $PSScriptRoot) "config.json")
 if ($config) {
     if ($null -ne $config.paths -and $config.paths.adb)    { $adb = [string]$config.paths.adb }
@@ -71,7 +73,12 @@ if ($config) {
         foreach ($a in $config.accounts) {
             if ([string]$a.server -eq $Server -and [string]$a.slot -eq $Slot) {
                 if ($null -ne $a.username) { $Username = [string]$a.username }
-                if ($null -ne $a.password) { $Password = [string]$a.password }
+                if ($null -ne $a.password) {
+                    # dpapi: 密文 → 明文；旧版明文原样返回；解不开按「没配密码」处理
+                    $decoded = Unprotect-DpapiSecret ([string]$a.password)
+                    if ($null -eq $decoded) { $PasswordBroken = $true; $Password = "" }
+                    else { $Password = $decoded }
+                }
                 break
             }
         }
@@ -83,6 +90,10 @@ $slotDir = if ($Slot) { Join-Path $accountsDir $Slot } else { "" }
 
 function Timestamp { Get-Date -Format "HH:mm:ss" }
 function LogLine($m) { Write-Output ("$(Timestamp) [LoginCheck] " + $m) }
+
+if ($PasswordBroken) {
+    LogLine "密码无法解密（DPAPI 密文属于其他 Windows 用户或已损坏）：本号只能人工登录，请在控制台「账号管理」重新输入密码并保存"
+}
 
 if ($Server -eq "bilibili") {
     $pkg = "com.hypergryph.arknights.bilibili"

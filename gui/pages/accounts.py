@@ -29,7 +29,7 @@ from qfluentwidgets import (BodyLabel, ComboBox, FluentIcon, InfoBar,
 
 import config as appconfig
 import theme
-from core import runner, token_check
+from core import runner, secret, token_check
 from core.poller import FuncWorker
 from core.util import CREATE_NO_WINDOW, decode_console, pwsh_exe
 from pages.stage_plan_dialog import show_stage_plan_dialog
@@ -194,6 +194,7 @@ class CaptureDialog(QDialog):
         self._token_worker = None
         self._slot = ""
         self._closing = False
+        self._password_broken = False   # 原密文无法解密 → 保存时不得用空值覆盖
         self.setWindowTitle("捕获账号" if acc is None else "重新捕获账号")
         self.setModal(True)
         self.resize(560, 560)
@@ -236,8 +237,9 @@ class CaptureDialog(QDialog):
         root.addWidget(form)
 
         self.hint_label = BodyLabel(
-            "账号密码仅保存在本机 config.json（明文）。密码含 % ^ _ + = [ ] 等特殊字符"
-            "或登录出现验证码时，脚本会自动提示你在模拟器窗口手动完成登录。")
+            "账号密码以 Windows DPAPI 加密保存在本机 config.json（仅当前 Windows 用户"
+            "能解密）。密码含 % ^ _ + = [ ] 等特殊字符或登录出现验证码时，脚本会自动"
+            "提示你在模拟器窗口手动完成登录。")
         self.hint_label.setWordWrap(True)
         # 提示行配色随运行状态变（正常灰 / 失败红 / 通过绿）：
         # 状态记在 _hint_state，配方读它，主题切换时按当前状态重套
@@ -268,8 +270,25 @@ class CaptureDialog(QDialog):
             self.server_combo.setCurrentIndex(
                 1 if acc.get("server") == "bilibili" else 0)
             self.user_edit.setText(acc.get("username", ""))
-            self.pass_edit.setText(acc.get("password", ""))
+            self._fill_password(acc)
         self._set_running(False)
+
+    def _fill_password(self, acc):
+        """密码框显示解密后的明文；旧配置的明文原样显示。
+
+        DPAPI 解密失败（换了 Windows 用户/机器）时留空并标红提示，保存时保留原密文，
+        不会把凭据覆盖成空串。
+        """
+        stored = acc.get("password", "")
+        value = secret.unprotect(stored) if isinstance(stored, str) else ""
+        if value is None:
+            self._password_broken = True
+            self.pass_edit.setText("")
+            self._set_hint(
+                "原密码无法解密（DPAPI 密文属于其他 Windows 用户或已损坏），"
+                "请重新输入密码并保存；不输入则保留原密文。", "err")
+        else:
+            self.pass_edit.setText(value)
 
     def _append_log(self, line):
         self.log_view.appendPlainText(line)
@@ -381,6 +400,10 @@ class CaptureDialog(QDialog):
     def _apply_result(self):
         """成功：写入 cfg（新增或更新账号项）并保存。"""
         server = "bilibili" if self.server_combo.currentIndex() == 1 else "official"
+        # 原密文解不开且用户没重填时保留原值：空串写回去等于删掉凭据
+        password = self.pass_edit.text()
+        if not password and self._password_broken and self.acc is not None:
+            password = self.acc.get("password", "")
         entry = {
             "id": (self.acc or {}).get("id") or ("acc_" + uuid.uuid4().hex[:8]),
             "label": self.name_edit.text().strip(),
@@ -388,7 +411,7 @@ class CaptureDialog(QDialog):
             "enabled": (self.acc or {}).get("enabled", True),
             "slot": self._slot,
             "username": self.user_edit.text().strip(),
-            "password": self.pass_edit.text(),
+            "password": password,
             "second_fight_plan": list((self.acc or {}).get("second_fight_plan")
                                       or []),
             "second_fight_use_optional": bool(

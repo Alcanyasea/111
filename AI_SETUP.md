@@ -99,7 +99,7 @@ gui\.venv\Scripts\python.exe gui\main.py
    班次/收菜计划页管，绕过 GUI 直接 `schtasks` 会破坏状态同步。
 5. **新行为尽量加测试固化**，防止回归。
 6. 终端命令优先 PowerShell 7（`pwsh`）。
-7. 账号密码只允许进 `config.json` / 环境变量，不写进代码、测试、对话或文档。
+7. 账号密码只允许进 `config.json` / 环境变量，不写进代码、测试、对话或文档。`config.json` 里的 `accounts[].password` 是 DPAPI 密文（`dpapi:` 前缀，CurrentUser 范围）：不要解密、不要复制到其他机器或其他 Windows 用户下，也不要手工把密文改回明文。
 
 ## 5. 部署完成验证清单
 

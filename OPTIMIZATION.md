@@ -2,7 +2,7 @@
 
 > 用途：记录待优化项、已验证结论和踩过的坑，供后续迭代参考。
 > 约定：每条尽量写清「现象 → 原因 → 建议 → 怎么验收」，避免凭猜测改动。
-> 最近更新：2026-11-04（v2.1.3 之后：失败现场容量上限 + GUI 占用显示/单独清理）
+> 最近更新：2026-11-04（v2.1.4 之后：密码 DPAPI 加密与明文配置自动迁移）
 
 ---
 
@@ -10,7 +10,7 @@
 
 | 项目 | 状态 | 证据 |
 |---|---|---|
-| 单元测试 | 259 项全绿 | `gui\.venv\Scripts\python.exe -m unittest discover -s tests -t .` |
+| 单元测试 | 273 项全绿 | `gui\.venv\Scripts\python.exe -m unittest discover -s tests -t .` |
 | Python 运行时 | 3.12.10（与 CI 一致） | `gui\.venv\pyvenv.cfg`；旧环境备份在 `gui\.venv-py314rc3.bak`（911 MB，确认无误后可删） |
 | GUI 自检 | 通过 | `python gui/main.py --smoke` → `SMOKE OK` |
 | 切号链路 | 真机通过 | 2026-11-03 01:53，`-SwitchTo official_1 -NoLoginCheck`，停游戏→推 3 文件→启动→uid 校验，7.5 秒 |
@@ -87,6 +87,17 @@ GUI「运行历史」工具栏显示实时占用并可单独「清空失败现�
 **建议**：用 Windows DPAPI（`ProtectedData.Protect`，CurrentUser 范围）加密存储，运行时解密。改动集中在 `gui/config.py` 的读写和 `login_device_lib.ps1` 的取用。
 
 **注意**：会导致旧配置需要一次性迁移，迁移失败要能回退到明文读取。
+
+**结论（2026-11-04）**：已采用。`gui/core/secret.py` 封装 CryptProtectData /
+CryptUnprotectData（ctypes，无新依赖），密码存为 `dpapi:<base64>`；`config.save()`
+写盘前把明文转密文（深拷贝，不改调用方内存），无前缀的旧明文按原样读取、下次保存
+自动迁移；GUI 账号对话框显示时解密，解不开则留空并提示重填，且保存时保留原密文，
+不会被空串覆盖。PowerShell 侧 `scripts/secret_lib.ps1` 用同一套 API 解密
+（`login_check.ps1` 调用），解不开时按「没配密码」走人工登录并写日志，不拿空密码
+重试。已知边界：捕获登录仍用进程环境变量传密码（读完即清），DPAPI 只解决落盘明文；
+密文绑定 Windows 用户，换机/重装/换用户需重填。验收：`tests/test_secret.py`
+（Python↔PowerShell 双向互认）、`tests/test_config.py::SealPasswordTest`、
+`tests/test_accounts_password.py`。
 
 ---
 
@@ -194,7 +205,7 @@ Get-Process | Where-Object { $_.ProcessName -like "*MuMu*" }
 - [x] P1.1 修日志双时间戳
 - [x] P1.2 证据目录容量上限（默认 200MB，GUI 显示占用并可单独清理）
 - [ ] P1.3 运行历史趋势图
-- [ ] P1.4 密码 DPAPI 加密
+- [x] P1.4 密码 DPAPI 加密（明文配置保存时自动迁移，PS 侧同源解密）
 - [ ] P2.1 config 单一 schema
 - [x] P2.4 `run_*.json` 增加 `stamp` 字段
 - [ ] P3 README 拆分

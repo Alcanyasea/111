@@ -10,6 +10,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "gui"))
 
 from tests.test_support import appconfig  # noqa: E402
+from core import secret  # noqa: E402
 
 
 class ConfigSaveLoadTest(unittest.TestCase):
@@ -254,6 +255,46 @@ class ScheduleTimeValidationTest(unittest.TestCase):
             {"time": "16:00"},
         ]}}
         self.assertEqual(appconfig.schedule_batches(cfg), ["16点"])
+
+
+class SealPasswordTest(unittest.TestCase):
+    """save() 把明文密码转成 DPAPI 密文（CONFIG_PATH 重定向，不碰真实配置）。"""
+
+    def setUp(self):
+        self.root = Path(tempfile.mkdtemp())
+        self._old = appconfig.CONFIG_PATH
+        appconfig.CONFIG_PATH = self.root / "config.json"
+
+    def tearDown(self):
+        appconfig.CONFIG_PATH = self._old
+
+    def _saved_account(self, password):
+        cfg = appconfig.load()
+        cfg["accounts"].append({"id": "a1", "label": "甲", "server": "official",
+                                "slot": "official_1", "username": "u",
+                                "password": password})
+        appconfig.save(cfg)
+        raw = json.loads(appconfig.CONFIG_PATH.read_text(encoding="utf-8"))
+        return cfg, raw["accounts"][0]["password"]
+
+    @unittest.skipUnless(secret.available(), "Windows DPAPI required")
+    def test_plaintext_password_is_sealed_on_save(self):
+        cfg, stored = self._saved_account("明文密码%^")
+        self.assertTrue(stored.startswith("dpapi:"))
+        self.assertNotIn("明文密码", stored)
+        self.assertEqual(secret.unprotect(stored), "明文密码%^")
+        # 调用方内存里的值不受影响：GUI 后续还要用明文
+        self.assertEqual(cfg["accounts"][0]["password"], "明文密码%^")
+
+    @unittest.skipUnless(secret.available(), "Windows DPAPI required")
+    def test_sealed_password_is_not_double_encrypted(self):
+        sealed = secret.protect("pw")
+        _cfg, stored = self._saved_account(sealed)
+        self.assertEqual(stored, sealed)
+
+    def test_empty_password_stays_empty(self):
+        _cfg, stored = self._saved_account("")
+        self.assertEqual(stored, "")
 
 
 if __name__ == "__main__":

@@ -18,6 +18,7 @@ from pathlib import Path
 # 纯路径规则放在插件公共目录，插件独立运行时也无需依赖 GUI。
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "plugins"))
 from project_paths import relocate_project_paths
+from core import secret
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 CONFIG_PATH = PROJECT_ROOT / "config.json"
@@ -477,18 +478,41 @@ def load() -> dict:
     return cfg
 
 
+def _seal_passwords(cfg):
+    """写盘副本里的密码统一转 DPAPI 密文（见 core/secret.py）。
+
+    只处理明文：已是 ``dpapi:`` 密文、空值、加密失败（非 Windows / 系统拒绝）
+    都保持原样，绝不因为保存设置而丢掉凭据。返回深拷贝，不改调用方内存里的值。
+    """
+    out = deepcopy(cfg)
+    for a in out.get("accounts") or []:
+        if not isinstance(a, dict):
+            continue
+        value = a.get("password")
+        if not isinstance(value, str) or not value or secret.is_protected(value):
+            continue
+        sealed = secret.protect(value)
+        if sealed:
+            a["password"] = sealed
+    return out
+
+
 def save(cfg: dict):
     """原子写入（临时文件 + 替换），UTF-8 无 BOM，中文不转义。
+
+    写盘前把账号密码转成 DPAPI 密文（仅当前 Windows 用户可解密）。旧版明文
+    配置在下一次保存时自动迁移；解密失败的值由 GUI 保留原密文，不会被覆盖。
 
     临时文件名带进程 ID：固定名 config.json.tmp 在两个写方（历史版本/
     异常并发）同时落盘时会互相截断；os.replace 带短重试——杀软/索引器
     瞬时占用目标文件是 Windows 上替换失败的常见原因，重试即可恢复。
     最终失败仍抛出（调用方 settings 页已有捕获弹窗，静默丢配置更危险）。
     """
+    data = _seal_passwords(cfg)
     CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
     tmp = CONFIG_PATH.with_suffix(".json.tmp-%d" % os.getpid())
     with open(tmp, "w", encoding="utf-8", newline="\n") as f:
-        json.dump(cfg, f, ensure_ascii=False, indent=2)
+        json.dump(data, f, ensure_ascii=False, indent=2)
         f.write("\n")
     for attempt in range(3):
         try:
