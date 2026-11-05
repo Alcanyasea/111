@@ -1,10 +1,11 @@
 # -*- coding: utf-8 -*-
-"""core 公共小工具：无窗口子进程调用、控制台输出解码、安全的整数转换。
+"""core 公共小工具：无窗口子进程调用、控制台输出解码、安全的整数转换、JSON 读写。
 
 此前 CREATE_NO_WINDOW / _run / 解码逻辑在 runner、adb、scheduler、maa_update、
 accounts 各复制一份，且解码策略不一致（有的只试 GBK，有的 utf-8→gbk），
-统一收拢到这里。
+统一收拢到这里；JSON 原子写是 maa_setup / maa_update 两份副本的合并。
 """
+import json
 import os
 import subprocess
 from pathlib import Path
@@ -70,3 +71,17 @@ def to_int(value, default):
         return int(value)
     except (TypeError, ValueError):
         return default
+
+
+def read_json(path):
+    """读 UTF-8 JSON 文件；损坏/缺失直接抛异常，由调用方决定是否兜底。"""
+    return json.loads(Path(path).read_text(encoding="utf-8"))
+
+
+def write_json(path, data):
+    """原子写 JSON：先写同目录 .tmp 再 os.replace，避免留下半截 gui.json。"""
+    path = Path(path)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    os.replace(tmp, path)
+    return path

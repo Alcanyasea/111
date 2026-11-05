@@ -297,5 +297,16 @@ class SealPasswordTest(unittest.TestCase):
         self.assertEqual(stored, "")
 
 
+class BatchNameSharedTest(unittest.TestCase):
+    """班次键必须只有一份实现：GUI 与基建插件各存一份时，改一边就会静默错位。"""
+
+    def test_gui_reuses_plugin_implementation(self):
+        sys.path.insert(0, str(ROOT / "plugins"))
+        import common
+        self.assertIs(appconfig.batch_name, common.batch_name)
+        for value in ("00:00", "04:00", "04:30", "16:00", "23:59", "bad"):
+            self.assertEqual(appconfig.batch_name(value), common.batch_name(value))
+
+
 if __name__ == "__main__":
     unittest.main()

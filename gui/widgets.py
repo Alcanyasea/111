@@ -141,6 +141,27 @@ def big_number(num_text, unit_text):
     return w
 
 
+def label(text, size=None, weight="400", color=None, mono=False,
+          transparent=False, family=True):
+    """主题色文本标签，主题切换时由 bind 重套配方。
+
+    size: 像素数（int，如 theme.FS_CAPTION）或现成 CSS 长度（如 "12px"），None 取 FS_CAPTION；
+    color: 调色板令牌名（"TEXT_2" / "ALERT" 等），None 取 TEXT；
+    mono: 数据列用等宽字体；transparent: 显式透明底（父级有底色时必开）；
+    family: 是否写 font-family（沿用全局 QSS 字体时可关，保持旧页面的渲染不变）。
+    """
+    token = color if isinstance(color, str) else "TEXT"
+    size = size or theme.FS_CAPTION
+    css_size = "%spx" % size if isinstance(size, int) else str(size)
+    suffix = " background: transparent;" if transparent else ""
+    family_css = ("font-family: %s; " % (theme.FONT_MONO if mono else theme.FONT_FAMILY)
+                  if family else "")
+    lab = QLabel(text)
+    theme.bind(lab, lambda: "%sfont-size: %s; font-weight: %s; color: %s;%s"
+               % (family_css, css_size, weight, getattr(theme, token), suffix))
+    return lab
+
+
 class Card(CardWidget):
     """主题色卡片：可选标题 + 提示文字，内容用 add_widget 逐行加入。
 

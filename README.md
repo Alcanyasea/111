@@ -255,8 +255,9 @@ D:\1\
 │   ├── vision\                    # 识别模块（vision.py + MAA 模板 + PaddleOCR ONNX 模型）
 │   ├── capture_account.ps1        # 账号捕获（清登录态→过弹窗→输入账号密码→拉取槽位数据）
 │   ├── accounts\                  # 账号槽位目录（每个槽位一份登录数据 + uid.txt）
-│   ├── switch_to_B服.ps1           # 关官服App → 开B服App
-│   ├── switch_to_官服.ps1           # 关B服App → 开官服App（独立工具，主流程未使用）
+│   ├── switch_server.ps1          # 客户端切换实现（-To official|bilibili，两方向共用）
+│   ├── switch_to_B服.ps1           # 兼容入口：转调 switch_server.ps1（关官服App → 开B服App）
+│   ├── switch_to_官服.ps1           # 兼容入口：转调 switch_server.ps1（关B服App → 开官服App，主流程未使用）
 │   ├── switch_to_B服.bat           # B服切换快捷方式
 │   ├── signal_done.ps1            # MAA 完成信号（创建 maa_done.signal）
 │   ├── signal_done.bat            # MAA 完成信号 bat 包装（供 MAA 调用）

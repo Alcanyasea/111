@@ -18,13 +18,13 @@ MAA 是单实例程序（互斥锁）：两套不能同时开，后开的一套�
 """
 import ctypes
 import json
-import os
 import subprocess
 from ctypes import wintypes
 from datetime import datetime
 from pathlib import Path
 
 from core.util import CREATE_NO_WINDOW
+from core.util import read_json as _read_json, write_json as _write_json
 
 MAA_EXE = "MAA.exe"
 
@@ -158,18 +158,6 @@ def open_maa(cfg, key):
             return False, "启动 %s MAA 失败：%s" % (name, exc)
         return True, "%s MAA 已打开" % name
     return False, "未知的 MAA 标识：%s" % key
-
-
-# ---------- 更新中断残留恢复 ----------
-
-def _read_json(path):
-    return json.loads(Path(path).read_text(encoding="utf-8"))
-
-
-def _write_json(path, data):
-    tmp = Path(path).with_suffix(Path(path).suffix + ".tmp")
-    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-    os.replace(tmp, path)
 
 
 # 崩溃恢复标记：旧版控制台驱动式更新改 gui.new.json 前会把「原值快照」写进

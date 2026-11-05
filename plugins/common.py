@@ -14,6 +14,7 @@ farm_guard / infrast_collect）里逐字复制、只有日志标签不同——�
 """
 import json
 import os
+import re
 import shutil
 import tempfile
 from datetime import datetime
@@ -112,6 +113,21 @@ def read_json(path):
         return json.loads(Path(path).read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return None
+
+
+def batch_name(time):
+    """班次键：整点沿用旧键，非整点保留分钟，避免同一小时内互相覆盖。
+
+    GUI（gui/config.py）与基建插件共用这一份实现——两边算出不同的键，
+    就会出现「界面显示 4点16分、插件找不到 4点批」的静默错位。
+    """
+    m = re.fullmatch(r"([01][0-9]|2[0-3]):[0-5][0-9]", str(time))
+    if not m:
+        return str(time)
+    hour = int(m.group(1))
+    name = "%d点" % (24 if hour == 0 else hour)
+    minute = int(str(time)[3:])
+    return name if minute == 0 else "%s%02d分" % (name, minute)
 
 
 def find_account(cfg, acc_id):

@@ -14,13 +14,13 @@ from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (QComboBox, QDialog, QFrame, QHBoxLayout, QLabel,
                                QScrollArea, QVBoxLayout, QWidget)
 
-from qfluentwidgets import (BodyLabel, InfoBar, InfoBarPosition,
+from qfluentwidgets import (InfoBar, InfoBarPosition,
                             PrimaryPushButton, PushButton, SwitchButton)
 
 import config as appconfig
 import theme
-from widgets import (set_switch_checked_gray, style_button,
-                     style_primary_button, style_scroll_area)
+from widgets import (label as _styled_label, set_switch_checked_gray,
+                     style_button, style_primary_button, style_scroll_area)
 
 PERMANENT_STAGE_OPTIONS = (
     ("1-7", "1-7"),
@@ -213,14 +213,10 @@ def maa_second_fight_plan(cfg, server=None):
 
 
 def _label(text, size="12px", color=None, weight="400", transparent=False):
-    """主题色文本标签。color 传调色板令牌名（如 "TEXT_2"），
-    配方随主题切换自动重读；None = TEXT_3。"""
-    token = color if isinstance(color, str) else "TEXT_3"
-    lab = QLabel(text)
-    suffix = " background: transparent;" if transparent else ""
-    theme.bind(lab, lambda: "font-size: %s; font-weight: %s; color: %s;%s"
-               % (size, weight, getattr(theme, token), suffix))
-    return lab
+    """主题色文本标签（默认 12px / TEXT_3，沿用全局字体）。"""
+    return _styled_label(text, size, weight,
+                         color if isinstance(color, str) else "TEXT_3",
+                         transparent=transparent, family=False)
 
 
 class StagePlanDialog(QDialog):

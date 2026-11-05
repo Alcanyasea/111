@@ -458,11 +458,6 @@ def _rebind_all():
     _bound_refs[:] = alive
 
 
-def palette(name):
-    """当前配色下指定明暗的调色板 dict（name: "light" / "dark"）。"""
-    return _merged(name, _current_palette)
-
-
 def accent_of(name, palette_name=None):
     """指定主题（可带目标配色）的强调色（切换时先于 apply 交给 setThemeColor 用）。"""
     return _merged(name, palette_name or _current_palette)["ACCENT"]
@@ -470,10 +465,6 @@ def accent_of(name, palette_name=None):
 
 def is_dark():
     return _current == "dark"
-
-
-def theme_name():
-    return _current
 
 
 def palette_name():

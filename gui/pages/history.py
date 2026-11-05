@@ -18,16 +18,16 @@ from pathlib import Path
 
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QColor
-from PySide6.QtWidgets import (QHBoxLayout, QLabel, QListWidget,
-                               QListWidgetItem, QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QHBoxLayout, QListWidget, QListWidgetItem,
+                               QVBoxLayout, QWidget)
 
 from qfluentwidgets import (BodyLabel, FluentIcon, InfoBar, InfoBarPosition,
                             MessageBox, PushButton)
 
 import theme
 from core import runner
-from widgets import (Card, Pill, _label_transparent, _rgba, empty_state,
-                     hline, style_button, style_scroll_area)
+from widgets import (Card, Pill, _rgba, empty_state, hline,
+                     label as _styled_label, style_button)
 
 MODE_LABELS = {"farm": "挂机", "collect": "收菜", "switch": "切号",
                "start": "快速启动"}
@@ -71,15 +71,9 @@ def _fmt_size(n):
 
 
 def _label(text, size=None, weight="400", color=None, mono=False):
-    """主题色文本标签。size 缺省取字号标尺正文档；color 传调色板令牌名，
-    配方随主题切换自动重读；mono=True 用等宽字体（耗时等数据列对齐）。"""
-    token = color if isinstance(color, str) else "TEXT"
-    lab = QLabel(text)
-    theme.bind(lab, lambda: "font-family: %s; font-size: %spx; font-weight: %s;"
-               " color: %s; background: transparent;"
-               % (theme.FONT_MONO if mono else theme.FONT_FAMILY,
-                  size or theme.FS_BODY, weight, getattr(theme, token)))
-    return lab
+    """主题色文本标签（默认 FS_BODY / TEXT，透明底）。"""
+    return _styled_label(text, size or theme.FS_BODY, weight, color,
+                         mono=mono, transparent=True)
 
 
 class HistoryPage(QWidget):

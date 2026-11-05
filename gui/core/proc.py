@@ -9,16 +9,11 @@ from ctypes import wintypes
 
 TH32CS_SNAPPROCESS = 0x00000002
 PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
-STILL_ACTIVE = 259
-ERROR_ACCESS_DENIED = 5
 
 kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
 
 kernel32.OpenProcess.restype = wintypes.HANDLE
 kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
-kernel32.GetExitCodeProcess.restype = wintypes.BOOL
-kernel32.GetExitCodeProcess.argtypes = [
-    wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
 kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
 
 kernel32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
@@ -46,28 +41,6 @@ kernel32.Process32FirstW.restype = wintypes.BOOL
 kernel32.Process32NextW.argtypes = [
     wintypes.HANDLE, ctypes.POINTER(_ProcessEntry32W)]
 kernel32.Process32NextW.restype = wintypes.BOOL
-
-
-def process_alive(pid):
-    """PID 对应的进程是否存活（毫秒级，不派生子进程）。"""
-    try:
-        pid = int(pid)
-    except (TypeError, ValueError):
-        return False
-    if pid <= 0:
-        return False
-    handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
-    if handle:
-        try:
-            code = wintypes.DWORD()
-            if not kernel32.GetExitCodeProcess(handle, ctypes.byref(code)):
-                # 查不到退出码时按存活处理（宁可误判在跑，也不误清锁）
-                return True
-            return code.value == STILL_ACTIVE
-        finally:
-            kernel32.CloseHandle(handle)
-    # 打开失败：拒绝访问说明进程存在；参数错误说明进程不存在
-    return ctypes.get_last_error() == ERROR_ACCESS_DENIED
 
 
 def process_running(exe_name):

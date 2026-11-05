@@ -56,8 +56,8 @@ DEFAULT_CONFIG = Path(__file__).resolve().parents[2] / "config.json"
 
 # 插件公共工具（plugins\common.py）——此前五个插件各复制一份、改一处漏四处
 sys.path.insert(0, str(PLUGIN_DIR.parent))
-from common import (atomic_json_write as _atomic_json_write, find_account,
-                    load_config, log_file, maa_dir_for as _maa_dir)
+from common import (atomic_json_write as _atomic_json_write, batch_name,
+                    find_account, load_config, log_file, maa_dir_for as _maa_dir)
 
 
 def _log_file(cfg, msg):
@@ -73,17 +73,6 @@ MANUFACTURE_PRODUCTS = ["Pure Gold", "Originium Shard", "Battle Record"]
 TRADING_PRODUCTS = ["LMD", "Orundum"]
 DEFAULT_MANUFACTURE_PRODUCT = "Pure Gold"
 DEFAULT_TRADING_PRODUCT = "LMD"
-
-
-def batch_name(time):
-    """整点沿用旧键；非整点保留分钟，与 GUI/主脚本一致。"""
-    m = re.fullmatch(r"([01][0-9]|2[0-3]):[0-5][0-9]", str(time))
-    if not m:
-        return str(time)
-    hour = int(m.group(1))
-    name = "%d点" % (24 if hour == 0 else hour)
-    minute = int(str(time)[3:])
-    return name if minute == 0 else "%s%02d分" % (name, minute)
 
 
 def batch_data(batches, name):

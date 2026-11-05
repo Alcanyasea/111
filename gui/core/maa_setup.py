@@ -6,11 +6,11 @@ RunDirectly（直接运行）/ 结束脚本 signal_done.bat / 常用任务启用
 某服 MAA 目录缺失时，自动从另一服复制一份再修正（类似手动复制 MAA 文件夹）。
 """
 import json
-import os
 import shutil
 from pathlib import Path
 
 from core import proc
+from core.util import read_json as _read_json, write_json as _write_json
 
 SERVER_NAMES = {"official": "官服", "bilibili": "B服"}
 CLIENT_TYPES = {"official": "Official", "bilibili": "Bilibili"}
@@ -35,16 +35,6 @@ def _maa_dir(cfg, server):
 
 def _other_server(server):
     return "bilibili" if server == "official" else "official"
-
-
-def _read_json(path):
-    return json.loads(path.read_text(encoding="utf-8"))
-
-
-def _write_json(path, data):
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-    os.replace(tmp, path)
 
 
 def _backup(path):

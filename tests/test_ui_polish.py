@@ -405,6 +405,30 @@ class ScheduleToggleFeedbackTest(unittest.TestCase):
         self.assertIn(("success", "已更新收菜计划任务", "收菜触发：10:00"),
                       _InfoBarSpy.calls)
 
+    def test_add_row_goes_to_own_schedule_key(self):
+        """两张卡共用基类后仍各写各的列表，不能串到对方的键上。"""
+        shift = self._shift_card()
+        shift.cfg["schedule"]["collect_times"] = [{"time": "10:00"}]
+        shift._on_add()
+        self.assertEqual(len(shift.cfg["schedule"]["times"]), 3)
+        self.assertEqual(len(shift.cfg["schedule"]["collect_times"]), 1)
+
+        collect = self._collect_card()
+        collect.cfg["schedule"]["times"] = [{"time": "04:00"}]
+        collect._on_add()
+        self.assertEqual(len(collect.cfg["schedule"]["collect_times"]), 2)
+        self.assertEqual(len(collect.cfg["schedule"]["times"]), 1)
+
+    def test_rows_follow_entries(self):
+        for card in (self._shift_card(), self._collect_card()):
+            self.assertEqual(len(card._row_widgets), len(card._entries()))
+
+    def test_account_cell_only_on_shift_card(self):
+        shift = self._shift_card()
+        self.assertIsNotNone(shift._make_trailing_cell(shift._entries()[0]))
+        collect = self._collect_card()
+        self.assertIsNone(collect._make_trailing_cell(collect._entries()[0]))
+
 
 if __name__ == "__main__":
     unittest.main()

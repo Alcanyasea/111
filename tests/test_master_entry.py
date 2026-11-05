@@ -1,6 +1,5 @@
 """Run a copied master entry + real pipeline with isolated side-effect adapters."""
 import json
-import os
 from pathlib import Path
 import shutil
 import subprocess

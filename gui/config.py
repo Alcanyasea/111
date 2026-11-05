@@ -15,8 +15,10 @@ from copy import deepcopy
 from datetime import datetime
 from pathlib import Path
 
-# 纯路径规则放在插件公共目录，插件独立运行时也无需依赖 GUI。
+# 纯路径规则与班次命名放在插件公共目录，插件独立运行时也无需依赖 GUI；
+# batch_name 两边必须同源，否则班次键对不上（界面上有、插件里查不到）。
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "plugins"))
+from common import batch_name
 from project_paths import relocate_project_paths
 from core import secret
 
@@ -29,17 +31,6 @@ LAST_LOAD_WARNING = ""
 
 class ConfigLoadError(OSError):
     """无法安全加载配置；调用方必须停止启动，不能保存默认值覆盖原文件。"""
-
-
-def batch_name(time):
-    """整点沿用旧键；非整点保留分钟，避免同一小时内的排班互相覆盖。"""
-    m = re.fullmatch(r"([01][0-9]|2[0-3]):[0-5][0-9]", str(time))
-    if not m:
-        return str(time)
-    hour = int(m.group(1))
-    name = "%d点" % (24 if hour == 0 else hour)
-    minute = int(str(time)[3:])
-    return name if minute == 0 else "%s%02d分" % (name, minute)
 
 
 def schedule_batches(cfg):

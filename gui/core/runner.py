@@ -78,12 +78,6 @@ def lock_details():
         return None, None
 
 
-def lock_pid():
-    """master.lock 里的 PID；文件缺失/损坏返回 None。"""
-    pid, _ticks = lock_details()
-    return pid
-
-
 def _pid_name(pid):
     """PID 对应的进程名（小写），进程不存在返回 None。"""
     name = proc.process_name(pid)

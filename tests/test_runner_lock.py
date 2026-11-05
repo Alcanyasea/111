@@ -69,7 +69,6 @@ class LockDetailsTest(unittest.TestCase):
 
     def test_missing_lock(self):
         self.assertEqual(runner.lock_details(), (None, None))
-        self.assertIsNone(runner.lock_pid())
         self.assertFalse(runner.is_running())
         self.assertIsNone(runner.stale_lock())
 

@@ -11,7 +11,7 @@
 | 项目 | 状态 | 证据 |
 |---|---|---|
 | 单元测试 | 273 项全绿 | `gui\.venv\Scripts\python.exe -m unittest discover -s tests -t .` |
-| Python 运行时 | 3.12.10（与 CI 一致） | `gui\.venv\pyvenv.cfg`；旧环境备份在 `gui\.venv-py314rc3.bak`（911 MB，确认无误后可删） |
+| Python 运行时 | 3.12.10（与 CI 一致） | `gui\.venv\pyvenv.cfg`；旧 3.14rc3 环境备份已于 2026-11-05 删除 |
 | GUI 自检 | 通过 | `python gui/main.py --smoke` → `SMOKE OK` |
 | 切号链路 | 真机通过 | 2026-11-03 01:53，`-SwitchTo official_1 -NoLoginCheck`，停游戏→推 3 文件→启动→uid 校验，7.5 秒 |
 | 失败现场归档 | 真机命中 2 次 | `run_history\20261103_015956\official_1\`、`run_history\20261103_023212\official_1\`，日志含 `[证据] 登录校验 失败现场已归档（2 个文件）` |
@@ -157,7 +157,7 @@ Get-Process | Where-Object { $_.ProcessName -like "*MuMu*" }
 | `plugins/common.py` | 插件读取 |
 | `scripts/config_lib.ps1` | PS 侧读取 |
 
-另外 `127.0.0.1:16384` 在 8 个 PS 脚本里各硬编码一遍（`slot_switch` / `login_check` / `login_check_bilibili` / `capture_account` / `refresh_slot` / `master_lib` / `switch_to_B服` / `switch_to_官服`）。
+另外 `127.0.0.1:16384` 在 7 个 PS 脚本里各硬编码一遍（`slot_switch` / `login_check` / `login_check_bilibili` / `capture_account` / `refresh_slot` / `master_lib` / `switch_server`；两个 `switch_to_*` 已合并为兼容入口，不再各自复制）。
 
 **风险**：改默认值或加字段时漏一处，就是「只在某个班次炸」的 bug。
 

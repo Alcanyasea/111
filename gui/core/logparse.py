@@ -5,8 +5,8 @@
 账号名要从 `********** [n/3] Label **********` 横幅取，不能从 MAA 行取。
 
 性能：日志上限 1MB，主窗口每 2 秒、仪表盘每 5 秒、日志页每 3 秒都会来读，
-所以 read_text 只读尾部并按 (路径, size, mtime) 缓存；snapshot() 让
-last_run / current_stage 共享一次行匹配结果。
+所以 read_text 只读尾部并按 (路径, size, mtime) 缓存；snapshot() 让上次运行
+摘要与当前阶段共享一次行匹配结果。
 """
 import os
 import re
@@ -62,7 +62,7 @@ def _matched_lines(text):
 
 
 def _file_lines(path):
-    """带缓存的行匹配（last_run / current_stage / snapshot 共用）。"""
+    """带缓存的行匹配（snapshot 用）。"""
     try:
         st = os.stat(path)
         sig = (str(path), st.st_size, st.st_mtime)
@@ -79,23 +79,14 @@ def _file_lines(path):
 def snapshot(path, now=None):
     """一次解析同时取上次运行摘要与当前阶段（主窗口/仪表盘轮询共用）。
 
-    返回 {"run": last_run() 结果, "stage": current_stage() 结果}。
+    返回 {"run": 上次运行摘要, "stage": 当前阶段}，字段见
+    _last_run_from_lines / _current_stage_from_lines。
     """
     lines = _file_lines(path)
     return {
         "run": _last_run_from_lines(lines),
         "stage": _current_stage_from_lines(lines, now),
     }
-
-
-def last_run(text):
-    """解析最后一次运行的摘要。
-
-    返回 {"start": ts, "accounts": [{"key","name","ok","dur"}], "total_min",
-          "passed", "failed", "final": "success"/"fail", "emulator_closed": bool}
-    日志里没有 SUMMARY 时返回 None。
-    """
-    return _last_run_from_lines(_matched_lines(text))
 
 
 def _last_run_from_lines(lines):
@@ -157,15 +148,6 @@ def _last_run_from_lines(lines):
         "final": final,
         "emulator_closed": emulator_closed,
     }
-
-
-def current_stage(text, now=None):
-    """当前运行阶段：最后一次 banner 之后的状态。
-
-    返回 {"account": 账号名, "stage": 阶段文本, "elapsed_min": 距 MAA 启动的分钟数}
-    不在运行中（没有未完成的 banner 段）时返回 None。
-    """
-    return _current_stage_from_lines(_matched_lines(text), now)
 
 
 def _collect_mode_active(lines):
