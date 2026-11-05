@@ -68,7 +68,13 @@ function LogLine($m) { Write-Output ("$(Timestamp) [LoginCheck-B] " + $m) }
 
 # MAA 同款识别库（vision.py 常驻进程 + gzip 截图）+ 共用设备/槽位函数
 . (Join-Path $scriptDir "vision_lib.ps1")
+. (Join-Path $scriptDir "adb_lib.ps1")
+. (Join-Path $scriptDir "adb_sync.ps1")
 . (Join-Path $scriptDir "login_device_lib.ps1")
+# MuMu 重启后 ADB 端口可能漂移，截图失败时据此重新发现（见下方重连分支）
+$preferPort = 0
+if ($device -match ':(\d+)$') { $preferPort = [int]$Matches[1] }
+$vmConfigPath = Get-MuMuVmConfigPath -ToolPath $adb -PreferPort $preferPort
 # 首次心跳：先于 Start-Vision 等重初始化写入，识别进程启动阶段挂死也能被看门狗覆盖
 Write-LoginHeartbeat
 if (-not (Test-Path $debugDir)) { New-Item -ItemType Directory $debugDir -Force | Out-Null }
@@ -146,7 +152,36 @@ $stageStart = (Get-Date)
 $deadline = (Get-Date).AddSeconds($ScreenTimeoutSec)
 while ((Get-Date) -lt $deadline) {
     Write-LoginHeartbeat
-    if (-not (Invoke-VisionScreenshot $adb $device $png)) { Start-Sleep 3; continue }
+    if (-not (Invoke-VisionScreenshot $adb $device $png)) {
+        # 中途重发现：MuMu 若重启过，实例配置里的端口也刚被重写，重新读一次
+        $preferPort = 0
+if ($device -match ':(\d+)$') { $preferPort = [int]$Matches[1] }
+$vmConfigPath = Get-MuMuVmConfigPath -ToolPath $adb -PreferPort $preferPort
+        Write-LoginHeartbeat   # 重连可能 10-30 秒，别让父进程按心跳超时杀掉
+        $recovered = Ensure-AdbOnline -Device $device -Attempts 3 -RetryDelaySec 2 -VmConfigPath $vmConfigPath -RequireAnyPackage @($pkg) -OnAttempt { Write-LoginHeartbeat }
+        if (-not $recovered) {
+            # 不在第一次重连失败就退出：登录校验本来有 240 秒窗口，短暂抖动
+            # （adb server 重启/MuMu 忙）应继续等到 deadline，而不是直接判号失败。
+            LogLine ("WARN: {0}（继续等待）" -f $script:LastAdbError)
+            Start-Sleep 3
+            continue
+        }
+        if ([string]$recovered -ne $device) {
+            LogLine ("ADB 端口已重新发现：{0} -> {1}" -f $device, $recovered)
+            $device = [string]$recovered
+            $syncOk = Sync-AdbDeviceForProject -ProjectRoot (Split-Path -Parent $PSScriptRoot) -Device $device -Config $config
+            if (-not $syncOk) {
+                LogLine "WARN: ADB 地址回写配置失败，后续脚本可能仍用旧地址"
+            }
+            if ($script:LastAdbSyncWarning) {
+                LogLine ("WARN: " + $script:LastAdbSyncWarning)
+            }
+        } else {
+            $device = [string]$recovered
+        }
+        Start-Sleep 3
+        continue
+    }
     # 画面与上一轮完全相同（静态加载/弹窗/表单）→ 复用上一轮识别结果；
     # 画面一变立即重新识别。
     $pngHash = (Get-FileHash $png -Algorithm MD5 -ErrorAction SilentlyContinue).Hash

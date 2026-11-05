@@ -15,7 +15,8 @@ class SlotRefreshTest(unittest.TestCase):
     def run_refresh(self, mode="success", no_log_file=False):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            for name in ("refresh_slot.ps1", "slot_snapshot.ps1", "login_device_lib.ps1"):
+            for name in ("refresh_slot.ps1", "slot_snapshot.ps1", "login_device_lib.ps1",
+                         "adb_lib.ps1", "adb_sync.ps1"):
                 source = ROOT / "scripts" / name
                 if source.exists():
                     shutil.copyfile(source, root / name)
@@ -28,6 +29,9 @@ function Read-AppConfigJson {
 }
 ''', encoding="utf-8")
             (root / "fake-adb.ps1").write_text(r'''
+if ($args -contains 'devices') { 'List of devices attached'; "fake`tdevice"; exit 0 }
+if ($args -contains 'connect' -or $args -contains 'disconnect') { exit 0 }
+if (($args -join ' ') -match 'pm path') { 'package:/data/app/base.apk'; exit 0 }
 if ($args[2] -eq 'shell') { 'com.fake.v2.playerprefs.xml'; exit 0 }
 $remote = $args[3]
 $target = $args[4]
@@ -180,6 +184,8 @@ try { Publish-SlotSnapshot $slot @{data=$source} } catch { $blocked = $true }
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             shutil.copyfile(ROOT / "scripts" / "slot_switch.ps1", root / "slot_switch.ps1")
+            shutil.copyfile(ROOT / "scripts" / "adb_lib.ps1", root / "adb_lib.ps1")
+            shutil.copyfile(ROOT / "scripts" / "adb_sync.ps1", root / "adb_sync.ps1")
             (root / "config_lib.ps1").write_text(r'''
 function Read-AppConfigJson {
     [pscustomobject]@{paths=[pscustomobject]@{adb=(Join-Path $PSScriptRoot 'fake-adb.ps1')}}
@@ -196,6 +202,164 @@ function Read-AppConfigJson {
                 capture_output=True, timeout=25, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
             self.assertNotEqual(result.returncode, 0)
             self.assertFalse((root / "adb-touched").exists())
+
+    def test_offline_adb_stops_switch_without_waiting_for_uid(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for name in ("slot_switch.ps1", "adb_lib.ps1", "adb_sync.ps1"):
+                shutil.copyfile(ROOT / "scripts" / name, root / name)
+            (root / "config_lib.ps1").write_text(r'''
+function Read-AppConfigJson {
+    [pscustomobject]@{paths=[pscustomobject]@{
+        adb=(Join-Path $PSScriptRoot 'fake-adb.ps1'); device='fake'
+        script_dir=$PSScriptRoot
+    }}
+}
+''', encoding="utf-8")
+            (root / "fake-adb.ps1").write_text(r'''
+param([Parameter(ValueFromRemainingArguments=$true)][string[]]$Args)
+$calls = Join-Path $PSScriptRoot 'calls'
+Add-Content -LiteralPath $calls -Value ($Args -join ' ')
+if ($Args -contains 'devices') {
+    'List of devices attached'
+    $marker = Join-Path $PSScriptRoot 'state-count'
+    $n = 0
+    if (Test-Path $marker) { $n = [int](Get-Content $marker) }
+    $n++
+    Set-Content $marker $n
+    if ($n -eq 1) { "fake`tdevice" } else { "fake`toffline" }
+    exit 0
+}
+if ($Args -contains 'connect') { 'unable to connect'; exit 1 }
+if ($Args -contains 'disconnect') { exit 0 }
+if ($Args -contains 'shell') { 'error: device offline'; exit 1 }
+if ($Args -contains 'push') { 'error: device offline'; exit 1 }
+exit 0
+''', encoding="utf-8")
+            slot = root / "accounts" / "slot 1" / "shared_prefs"
+            slot.mkdir(parents=True)
+            (slot / "com.fake.v2.playerprefs.xml").write_text("x", encoding="utf-8")
+            result = subprocess.run(
+                [PWSH, "-NoProfile", "-File", str(root / "slot_switch.ps1"),
+                 "-Slot", "slot 1", "-WaitSec", "25"],
+                capture_output=True, encoding="utf-8", errors="replace", timeout=30,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("ERROR:", result.stdout)
+            self.assertIn("offline", result.stdout)
+            self.assertIn("FAILED:", result.stdout)
+            self.assertNotIn("Slot files pushed", result.stdout, "重连失败后不能再报推送成功")
+            calls = (root / "calls").read_text(encoding="utf-8").splitlines()
+            self.assertFalse(any(" monkey " in (" " + c + " ") for c in calls), "设备离线时不该启动客户端")
+
+    def test_push_transport_drop_reconnects_before_second_push(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for name in ("slot_switch.ps1", "adb_lib.ps1", "adb_sync.ps1"):
+                shutil.copyfile(ROOT / "scripts" / name, root / name)
+            (root / "config_lib.ps1").write_text(r'''
+function Read-AppConfigJson {
+    [pscustomobject]@{paths=[pscustomobject]@{
+        adb=(Join-Path $PSScriptRoot 'fake-adb.ps1'); device='fake'
+        script_dir=$PSScriptRoot
+    }}
+}
+''', encoding="utf-8")
+            (root / "fake-adb.ps1").write_text(r'''
+param([Parameter(ValueFromRemainingArguments=$true)][string[]]$Args)
+$calls = Join-Path $PSScriptRoot 'calls'
+Add-Content -LiteralPath $calls -Value ($Args -join ' ')
+$online = Join-Path $PSScriptRoot 'online'
+$dropped = Join-Path $PSScriptRoot 'dropped'
+if ($Args -contains 'devices') {
+    'List of devices attached'
+    if ((Test-Path $online) -and -not (Test-Path $dropped)) { "fake`tdevice" } else { "fake`toffline" }
+    exit 0
+}
+if ($Args -contains 'disconnect') { exit 0 }
+if ($Args -contains 'connect') {
+    New-Item -ItemType File -Path $online -Force | Out-Null
+    Remove-Item $dropped -Force -ErrorAction SilentlyContinue
+    exit 0
+}
+if ($Args -contains 'push') {
+    $marker = Join-Path $PSScriptRoot 'push-count'; $n = 0
+    if (Test-Path $marker) { $n = [int](Get-Content $marker) }
+    $n++; Set-Content $marker $n
+    if ($n -eq 1) { New-Item -ItemType File -Path $dropped -Force | Out-Null; 'error: device offline'; exit 1 }
+    '1 file pushed'; exit 0
+}
+if ($Args -contains 'shell') {
+    $command = ($Args -join ' ')
+    if ($command -match 'pm path') { 'package:/data/app/base.apk'; exit 0 }
+    if ($command -match 'stat -c %u:%g') { '10044:10044'; exit 0 }
+    if ($command -match 'stat -c %C') { 'u:object_r:app_data_file:s0'; exit 0 }
+    exit 0
+}
+exit 0
+''', encoding="utf-8")
+            (root / "online").write_text("", encoding="utf-8")
+            slot = root / "accounts" / "slot 1" / "shared_prefs"
+            slot.mkdir(parents=True)
+            (slot / "prefs.xml").write_text("data", encoding="utf-8")
+            result = subprocess.run(
+                [PWSH, "-NoProfile", "-File", str(root / "slot_switch.ps1"),
+                 "-Slot", "slot 1", "-NoVerify", "-WaitSec", "0"],
+                capture_output=True, encoding="utf-8", errors="replace", timeout=40,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            calls = (root / "calls").read_text(encoding="utf-8").splitlines()
+            self.assertEqual(sum(" push " in (" " + line + " ") for line in calls), 2, calls)
+            self.assertTrue(any(" disconnect fake" in (" " + line + " ") for line in calls),
+                            "掉线时必须先 disconnect 再重连")
+
+    def test_push_failure_without_transport_loss_does_not_disconnect(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for name in ("slot_switch.ps1", "adb_lib.ps1", "adb_sync.ps1"):
+                shutil.copyfile(ROOT / "scripts" / name, root / name)
+            (root / "config_lib.ps1").write_text(r'''
+function Read-AppConfigJson {
+    [pscustomobject]@{paths=[pscustomobject]@{
+        adb=(Join-Path $PSScriptRoot 'fake-adb.ps1'); device='fake'
+        script_dir=$PSScriptRoot
+    }}
+}
+''', encoding="utf-8")
+            (root / "fake-adb.ps1").write_text(r'''
+param([Parameter(ValueFromRemainingArguments=$true)][string[]]$Args)
+$calls = Join-Path $PSScriptRoot 'calls'
+Add-Content -LiteralPath $calls -Value ($Args -join ' ')
+if ($Args -contains 'devices') { 'List of devices attached'; "fake`tdevice"; exit 0 }
+if ($Args -contains 'push') {
+    $marker = Join-Path $PSScriptRoot 'push-count'; $n = 0
+    if (Test-Path $marker) { $n = [int](Get-Content $marker) }
+    $n++; Set-Content $marker $n
+    if ($n -eq 1) { 'adb: error: failed to copy: No space left on device'; exit 1 }
+    '1 file pushed'; exit 0
+}
+if ($Args -contains 'shell') {
+    $command = ($Args -join ' ')
+    if ($command -match 'pm path') { 'package:/data/app/base.apk'; exit 0 }
+    if ($command -match 'stat -c %u:%g') { '10044:10044'; exit 0 }
+    if ($command -match 'stat -c %C') { 'u:object_r:app_data_file:s0'; exit 0 }
+    exit 0
+}
+exit 0
+''', encoding="utf-8")
+            slot = root / "accounts" / "slot 1" / "shared_prefs"
+            slot.mkdir(parents=True)
+            (slot / "prefs.xml").write_text("data", encoding="utf-8")
+            result = subprocess.run(
+                [PWSH, "-NoProfile", "-File", str(root / "slot_switch.ps1"),
+                 "-Slot", "slot 1", "-NoVerify", "-WaitSec", "0"],
+                capture_output=True, encoding="utf-8", errors="replace", timeout=40,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            calls = (root / "calls").read_text(encoding="utf-8").splitlines()
+            self.assertEqual(sum(" push " in (" " + line + " ") for line in calls), 2, calls)
+            self.assertFalse(any(" disconnect " in (" " + line + " ") for line in calls),
+                             "设备在线时（磁盘满等）不该 disconnect 正常设备")
 
     def test_publish_failure_rolls_back_already_replaced_file(self):
         with tempfile.TemporaryDirectory() as tmp:

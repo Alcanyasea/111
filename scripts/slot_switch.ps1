@@ -31,6 +31,8 @@ $debugDir = Join-Path $PSScriptRoot "debug"
 
 # ---- 读取 GUI 配置（项目根 config.json），字段缺失时回退上面的默认值 ----
 . (Join-Path $PSScriptRoot "config_lib.ps1")
+. (Join-Path $PSScriptRoot "adb_lib.ps1")
+. (Join-Path $PSScriptRoot "adb_sync.ps1")
 $config = Read-AppConfigJson (Join-Path (Split-Path -Parent $PSScriptRoot) "config.json")
 if ($config) {
     if ($null -ne $config.paths -and $config.paths.adb)    { $adb = [string]$config.paths.adb }
@@ -61,6 +63,12 @@ if ($slotDir -and (Test-Path -LiteralPath (Join-Path $slotDir '.refresh-backup\r
 
 Write-Output ("$(Timestamp) [Switch] -> {0} (slot: {1})" -f $serverName, $(if ($Slot) { $Slot } else { "(无槽位,仅切换客户端)" }))
 
+# MuMu 重启后 ADB 端口可能漂移（今早 16384 → 16385），这里给出实时实例配置，
+# 供 Ensure-AdbOnline 在重连失败时重新发现；包名校验防止连到别的模拟器。
+$preferPort = 0
+if ($device -match ':(\d+)$') { $preferPort = [int]$Matches[1] }
+$vmConfigPath = Get-MuMuVmConfigPath -ToolPath $adb -PreferPort $preferPort
+
 # ---- adb root（MuMu 自带；失败则后面推送会失败并报错）----
 # root 两次：首次可能触发 adbd 重启，第二次确认已处于 root（重复调用无副作用）
 & $adb -s $device root 2>$null | Out-Null
@@ -68,6 +76,28 @@ Start-Sleep 2
 & $adb -s $device root 2>$null | Out-Null
 & $adb -s $device connect $device 2>$null | Out-Null
 Start-Sleep 1
+$confirmed = Ensure-AdbOnline -Device $device -Attempts 3 -RetryDelaySec 2 -VmConfigPath $vmConfigPath -RequireAnyPackage @($pkg)
+if (-not $confirmed) {
+    Write-Output ("$(Timestamp) [Switch] ERROR: {0}" -f $script:LastAdbError)
+    exit 1
+}
+if ([string]$confirmed -ne $device) {
+    Write-Output ("$(Timestamp) [Switch] ADB 端口已重新发现：{0} -> {1}" -f $device, $confirmed)
+    $device = [string]$confirmed
+    # 换了设备要重新取一次 root（正常路径 MuMu 的 adbd 已是 root，这里只兜底）
+    & $adb -s $device root 2>$null | Out-Null
+    Start-Sleep 1
+    # 回写项目配置与 MAA：否则本轮后续账号的 MAA 仍连旧端口
+    $syncOk = Sync-AdbDeviceForProject -ProjectRoot (Split-Path -Parent $PSScriptRoot) -Device $device -Config $config
+    if (-not $syncOk) {
+        Write-Output ("$(Timestamp) [Switch] WARN: ADB 地址回写配置失败，后续脚本可能仍用旧地址")
+    }
+    if ($script:LastAdbSyncWarning) {
+        Write-Output ("$(Timestamp) [Switch] WARN: " + $script:LastAdbSyncWarning)
+    }
+} else {
+    $device = [string]$confirmed
+}
 
 # ---- 停止两个客户端，避免同屏互相干扰 ----
 Write-Output ("$(Timestamp) [Switch] Stopping apps...")
@@ -76,6 +106,7 @@ Start-Sleep 2
 
 # ---- 推送槽位数据（存在才推）----
 $slotOk = $true
+$adbReconnectFailed = $false
 if ($slotDir -and (Test-Path $slotDir)) {
     # 应用 uid 与 SELinux 上下文（取目标包目录自身属性，兼容不同 MuMu 版本）
     $uidStr = (& $adb -s $device shell "stat -c %u:%g /data/data/$pkg" 2>$null | Select-Object -First 1)
@@ -113,16 +144,53 @@ if ($slotDir -and (Test-Path $slotDir)) {
             # 模拟器重启会清空 /data/local/tmp，先建好暂存目录再推
             $tmpDir = Split-Path $remoteTmp
             & $adb -s $device shell "mkdir -p $tmpDir; mkdir -p $remoteDir" 2>$null | Out-Null
-            & $adb -s $device push $f.FullName $remoteTmp 2>$null | Out-Null
+            # push 的输出不能再丢掉：半死连接时 adb devices 仍显示 device，
+            # 只有 push 的 stderr 才能看出 transport 已经坏了
+            $pushOut = (& $adb -s $device push $f.FullName $remoteTmp 2>&1) -join "`n"
+            $pushExit = $LASTEXITCODE
             # 复合命令用 && 链：任一步（cp/chown/chmod/chcon）失败都短路，
             # 由哨兵写进输出。原先把 4 条命令用 ; 串起来，只看 adb 客户端
             # 退出码，前面的 cp 失败也会被当成推送成功
             $res = (& $adb -s $device shell "cp $remoteTmp $remoteDst && chown $uidStr $remoteDst && chmod $mode $remoteDst && chcon $ctx $remoteDst || echo __ARK_FAIL__" 2>&1) -join "`n"
-            if ($LASTEXITCODE -eq 0 -and $res -notmatch '__ARK_FAIL__') { $fileOk = $true; break }
-            $errText = ($res -replace '\s+', ' ').Trim()
-            if (-not $errText) { $errText = "(adb exit $LASTEXITCODE)" }
+            if ($pushExit -eq 0 -and $LASTEXITCODE -eq 0 -and $res -notmatch '__ARK_FAIL__') { $fileOk = $true; break }
+            $errText = (($pushOut + " " + $res) -replace '\s+', ' ').Trim()
+            if (-not $errText) { $errText = "(adb push exit $pushExit)" }
             Write-Output ("$(Timestamp) [Switch] WARN: push attempt $attempt failed for $rel : $errText")
+            # transport 自愈只针对链路故障：设备不在线，或 push 输出明确是
+            # offline/断链。磁盘满、SELinux 拒绝这类失败直接进入第二次推送，
+            # 别把一个正常设备 disconnect 掉。
+            $transportDown = ($pushOut + "`n" + $res) -match 'device offline|no devices|device not found|protocol fault|connection reset|broken pipe'
+            if ($attempt -eq 1 -and ($transportDown -or -not (Test-AdbOnline -Device $device))) {
+                & $adb disconnect $device 2>&1 | Out-Null
+                # 中途重发现：MuMu 若重启过，实例配置里的端口也刚被重写，重新读一次
+                $preferPort = 0
+                if ($device -match ':(\d+)$') { $preferPort = [int]$Matches[1] }
+                $vmConfigPath = Get-MuMuVmConfigPath -ToolPath $adb -PreferPort $preferPort
+                $recovered = Ensure-AdbOnline -Device $device -Attempts 3 -RetryDelaySec 2 -VmConfigPath $vmConfigPath -RequireAnyPackage @($pkg)
+                if (-not $recovered) {
+                    $adbReconnectFailed = $true
+                    $slotOk = $false
+                    Write-Output ("$(Timestamp) [Switch] ERROR: {0}" -f $script:LastAdbError)
+                    break
+                }
+                if ([string]$recovered -ne $device) {
+                    Write-Output ("$(Timestamp) [Switch] ADB 端口已重新发现：{0} -> {1}" -f $device, $recovered)
+                    $device = [string]$recovered
+                    & $adb -s $device root 2>$null | Out-Null
+                    Start-Sleep 1
+                    $syncOk = Sync-AdbDeviceForProject -ProjectRoot (Split-Path -Parent $PSScriptRoot) -Device $device -Config $config
+                    if (-not $syncOk) {
+                        Write-Output ("$(Timestamp) [Switch] WARN: ADB 地址回写配置失败，后续脚本可能仍用旧地址")
+                    }
+                    if ($script:LastAdbSyncWarning) {
+                        Write-Output ("$(Timestamp) [Switch] WARN: " + $script:LastAdbSyncWarning)
+                    }
+                } else {
+                    $device = [string]$recovered
+                }
+            }
         }
+        if ($adbReconnectFailed) { break }
         if ($fileOk) {
             $pushed++
         } elseif ($core) {
@@ -136,6 +204,12 @@ if ($slotDir -and (Test-Path $slotDir)) {
     if ($slotOk) { Write-Output ("$(Timestamp) [Switch] Slot files pushed ($pushed files)") }
 } else {
     Write-Output ("$(Timestamp) [Switch] Slot dir not found, keeping current data: $slotDir")
+}
+
+# 设备 transport 已确认无法恢复时不要再启动客户端或白等校验超时。
+if ($adbReconnectFailed) {
+    Write-Output ("$(Timestamp) [Switch] FAILED: ADB 设备离线，跳过启动与 UID 校验")
+    exit 1
 }
 
 # ---- 启动目标客户端 ----

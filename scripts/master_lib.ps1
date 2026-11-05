@@ -1,6 +1,11 @@
 # master_lib.ps1 — 基础设施层：进程锁 / 日志 / 配置读取 / 路径变量 /
 # 模拟器启停 / 数据清理。由 master.ps1 dot-source 引入，函数与变量直接
 # 在主脚本作用域生效（与原来写在同一文件里完全等价）。
+. (Join-Path $PSScriptRoot "adb_sync.ps1")
+. (Join-Path $PSScriptRoot "adb_lib.ps1")
+# Start-MuMu 失败原因：master.ps1 用它决定日志/通知文案，避免把
+# 「地址写不进配置」误报成「模拟器启动失败」。
+$script:StartMuMuError = ""
 
 # ---- master.lock 句柄独占锁 — 防计划任务双触发并发双跑（v4.2 重构）：----
 # 排他性由「打开锁文件并持有 FileShare.Read 独占句柄到进程退出」保证，OS 兜底：
@@ -164,43 +169,92 @@ function Log($msg) {
 
 function Start-MuMu {
     Log "=== Starting MuMu ==="
-    # Kill any stale ADB server first (common after MuMu reinstall)
+    $script:StartMuMuError = "模拟器启动失败"
+    $oldDevice = [string]$script:device
     & $adb kill-server 2>$null | Out-Null
     Start-Sleep 1
-    $r = & $adb connect $device 2>&1
-    if ($r -match "connected|already") { Log "MuMu OK"; return $true }
-    Log "Launching instance..."
-    & $cli control -v 0 launch 2>$null | Out-Null
+    $preferPort = 0
+    if ($device -match ':(\d+)$') { $preferPort = [int]$Matches[1] }
+    $vmConfigPath = Get-MuMuVmConfigPath -ToolPath $cli -PreferPort $preferPort
+    if ($vmConfigPath) { Log ("ADB port source: {0}" -f $vmConfigPath) }
+    else { Log "WARN: 未找到 MuMu 实例配置，改用 ADB 设备表发现端口" }
+    # 只接受装着目标游戏的设备：避免机器上还有别的模拟器/真机时，把切号数据
+    # 推到错误设备上（候选里包含通用的 emulator-5554）。
+    $gamePackages = @("com.hypergryph.arknights", "com.hypergryph.arknights.bilibili")
+    # 模拟器没在跑时直接 launch：既省掉一轮 connect 探测的等待，也避免
+    # 「先探测几十秒再启动」把 launch_wait_sec 预算吃掉。
+    # 只认 MuMu 主程序：只剩 MuMuVMMHeadless 是上次异常退出的无头僵尸实例
+    # （OPTIMIZATION.md 记录过的事故态，画面抓不到），这时必须重新 launch。
+    $mumuRunning = [bool](Get-Process -Name "MuMuNxMain" -ErrorAction SilentlyContinue)
+    if (-not $mumuRunning -and (Get-Process -Name "MuMuVMMHeadless" -ErrorAction SilentlyContinue)) {
+        Log "WARN: 只检测到无头虚拟机残留（MuMuVMMHeadless），按未启动处理并重新拉起"
+    }
+    $initialFound = $null
+    if ($mumuRunning) {
+        $initialFound = Find-AdbDevice -VmConfigPath $vmConfigPath -CurrentDevice $device -RequireAnyPackage $gamePackages
+    }
+    if (-not $initialFound) {
+        Log "Launching instance..."
+        & $cli control -v 0 launch 2>$null | Out-Null
+    } else {
+        $script:device = [string]$initialFound
+        Log ("发现已运行的 ADB 实例：{0}" -f $script:device)
+    }
     $relaunched = $false
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
     while ($sw.Elapsed.TotalSeconds -lt $mumuLaunchTimeoutSec) {
-        $r = & $adb connect $device 2>&1
-        if ($r -match "connected|already") {
-            Log ("ADB connected ({0:N0}s)" -f $sw.Elapsed.TotalSeconds)
-            # ADB 就绪不等于系统开机完成：轮询 sys.boot_completed，就绪即放行。
-            # 旧版固定睡 15 秒，绝大多数时候是白等；60 秒仍未确认则按原样继续
-            # （与旧版兜底一致，不因 getprop 异常卡死流程）。
-            $bootSw = [System.Diagnostics.Stopwatch]::StartNew()
-            while ($bootSw.Elapsed.TotalSeconds -lt 60) {
-                $boot = (& $adb -s $device shell "getprop sys.boot_completed" 2>$null | Out-String).Trim()
-                if ($boot -match '^1$') {
-                    Log ("Boot completed ({0:N0}s)" -f $bootSw.Elapsed.TotalSeconds)
+        $found = if ($initialFound) { $initialFound; $initialFound = $null } else { Find-AdbDevice -VmConfigPath $vmConfigPath -CurrentDevice $script:device -RequireAnyPackage $gamePackages }
+        if ($found) {
+            $script:device = [string]$found
+            Log ("ADB connected ({0:N0}s): {1}" -f $sw.Elapsed.TotalSeconds, $script:device)
+            $remaining = [math]::Max(1, [int]($mumuLaunchTimeoutSec - $sw.Elapsed.TotalSeconds))
+            $bootReady = Wait-AdbBootReady -Device $script:device -Samples 2 -IntervalSec 2 -TimeoutSec ([math]::Min(60, $remaining))
+            if (-not $bootReady -and -not (Test-AdbOnline -Device $script:device)) {
+                Log "WARN: 设备未就绪，继续等待"
+            } else {
+                if ($bootReady) { Log "Boot completed and ADB state stable" }
+                else { Log "WARN: boot_completed 未连续两次确认，但设备在线，按原流程继续（由登录校验兜底）" }
+                $syncOk = Sync-ConfirmedAdbDevice -ConfigPath $configPath -ConfirmedDevice $script:device -MaaDirs @($maaOfficialDir, $maaBilibiliDir)
+                if (-not $syncOk) {
+                    # GUI 保存/杀软占用通常只持续几百毫秒，重试一次再降级
+                    Start-Sleep -Milliseconds 400
+                    $syncOk = Sync-ConfirmedAdbDevice -ConfigPath $configPath -ConfirmedDevice $script:device -MaaDirs @($maaOfficialDir, $maaBilibiliDir)
+                }
+                if ($syncOk) {
+                    if ($script:LastAdbSyncWarning) { Log ("WARN: " + $script:LastAdbSyncWarning) }
+                    if ($script:device -ne $oldDevice) {
+                        $suffix = if ($script:LastAdbSyncWarning) { "（MAA 同步有警告，见上一行）" } else { "（已回写 config 与 MAA 全部方案）" }
+                        Log ("ADB 地址已变更：{0} -> {1}{2}" -f $oldDevice, $script:device, $suffix)
+                    }
+                    # paths 存在但缺 device 键时不能直接赋值（PSCustomObject 会抛异常）
+                    if ($config -and $config.paths) {
+                        $config.paths | Add-Member -NotePropertyName device -NotePropertyValue $script:device -Force
+                    }
                     return $true
                 }
-                Start-Sleep 2
+                # 写不进 config 不判死：子脚本会自行重发现并再试一次回写，
+                # 直接 FATAL + 关机等于把可恢复故障升级成整天不跑。
+                $detail = if ($script:LastAdbSyncWarning) { $script:LastAdbSyncWarning } else { "config.json 被占用或损坏" }
+                $script:LastAdbSyncWarning = "ADB 已连接（$script:device），但地址写不进配置：$detail；本轮继续，子脚本会自行重连并重试回写"
+                Log ("WARN: " + $script:LastAdbSyncWarning)
+                return $true
             }
-            Log "WARN: 60 秒内未确认开机完成，继续按原流程执行"
-            return $true
         }
-        # 启动命令偶发丢失（CLI 首启窗口期未就绪）：45 秒仍连不上就再拉一次
         if (-not $relaunched -and $sw.Elapsed.TotalSeconds -ge 45) {
+            # 首启命令偶发丢失（CLI 窗口期未就绪）是已知故障态，重发一次是幂等的；
+            # 不要用启动前的进程快照判断——那时 MuMuNxMain 可能已存在但虚拟机没起来。
             $relaunched = $true
-            Log "WARN: 45 秒仍未连上 ADB，重新拉起模拟器实例"
+            Log "WARN: 45 秒仍未拿到可用设备，重新拉起模拟器实例"
             & $cli control -v 0 launch 2>$null | Out-Null
         }
         Start-Sleep 2
     }
-    Log "ERROR: MuMu timeout"; return $false
+    if ($script:LastAdbError -match '未安装目标游戏') {
+        $script:StartMuMuError = "未检测到已安装的明日方舟客户端"
+    }
+    if ($script:LastAdbError) { Log ("ERROR: MuMu timeout（最后错误：{0}）" -f $script:LastAdbError) }
+    else { Log "ERROR: MuMu timeout" }
+    return $false
 }
 
 function Stop-StaleMaa([string]$maaDir) {

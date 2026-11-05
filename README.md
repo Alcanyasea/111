@@ -307,7 +307,8 @@ D:\1\
   官服 MAA 路径会自动探测该目录（多套并存取版本号最新），装在别处时在
   控制台「运行设置 → 路径」里指定即可。MAA 自身的版本更新是原地升级、
   目录名不变，无需改配置
-- 运行 MAA，配置连接 MuMu 模拟器（ADB: `127.0.0.1:16384`）
+- 运行 MAA，配置连接 MuMu 模拟器（ADB: `127.0.0.1:16384`；挂机脚本每轮启动会按
+  MuMu 实例配置自动发现实际端口并回写 MAA 与 `config.json`，手动配置保持默认即可）
 - 配置任务队列：公开招募、基建换班、剿灭、刷1-7、信用商店、领奖励
 - 在 MAA 设置 → 「任务结束后」→ 执行脚本，填入 `D:\1\scripts\signal_done.bat`
 - 复制一份到 `D:\软件\MAA（b）\`，将客户端类型改为 Bilibili，同样配置结束脚本
@@ -482,7 +483,7 @@ schtasks /Change /TN "MAA_明日方舟自动挂机" /ST 08:00
 |------|--------|------|
 | `$maaStallTimeoutSec` | 180 (3分钟) | MAA 无战斗/任务进展判超时（秒）；正常打关不限制单号总时长 |
 | `$retryFailedDelaySec` | 60 | 有号失败时、重试前的等待秒数（部分失败、全部失败都重试） |
-| `$device` | `127.0.0.1:16384` | MuMu ADB 地址 |
+| `$device` | `127.0.0.1:16384` | MuMu ADB 地址；每轮启动按实例配置自动发现端口（`vms\<实例>\configs\vm_config.json`），发现到不同地址会自动回写 config 与两份 MAA 配置 |
 | `$adb` | `D:\软件\MuMu模拟器\...\adb.exe` | ADB 路径 |
 | `$maaOfficial` | 自动探测 `D:\软件\MAA\MAA-v*-win-x64`（取版本号最新） | 官服 MAA 路径 |
 | `$maaBilibili` | `D:\软件\MAA（b）\MAA.exe` | B服 MAA 路径 |
@@ -496,7 +497,9 @@ Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy Bypass
 ```
 
 **Q: MAA 连接不上模拟器？**
-A: 确认 MuMu 模拟器已开启、ADB 端口为 16384
+A: 确认 MuMu 模拟器已开启；挂机脚本启动时会自动发现 ADB 端口（日志里的
+`ADB port source` / `ADB connected`），若仍失败，检查 MuMu 实例是否正常、
+或在控制台「运行设置」里把 ADB 地址改成实际值（`adb devices` 里显示的地址）。
 
 **Q: 想改任务内容？**
 A: 分别打开官服 MAA 和 B服 MAA，修改任务队列后保存

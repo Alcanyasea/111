@@ -206,14 +206,19 @@ $results = @()
 $totalSw = [System.Diagnostics.Stopwatch]::StartNew()
 
 if (-not (Start-MuMu)) {
-    Log "FATAL: MuMu failed to start"
+    $startErr = if ($script:StartMuMuError) { [string]$script:StartMuMuError } else { "模拟器启动失败" }
+    Log ("FATAL: " + $startErr)
     # 没跑起来也留痕 + 推送（无人值守时早上能收到「今天没跑成」的消息）；
     # 通知发出后按班次关机开关收尾（与正常失败路径同一规则），GUI 手动运行不关机
     if (-not $SwitchTo) {
-        Save-RunHistory "模拟器启动失败"
-        Send-RunNotify "MAA 挂机未运行：模拟器启动失败" ("启动时间：{0}（本轮未执行任何账号）" -f $runStartTs)
+        Save-RunHistory $startErr
+        # Server酱标题只有 32 字符：长原因放正文，标题保持可读
+        $notifyTitle = "MAA 挂机未运行：$startErr"
+        if ($notifyTitle.Length -gt 28) { $notifyTitle = "MAA 挂机未运行" }
+        $notifyBody = "启动时间：{0}`n原因：{1}`n（本轮未执行任何账号）" -f $runStartTs, $startErr
+        Send-RunNotify $notifyTitle $notifyBody
         if (-not $NoShutdown -and $shutdownEnabled) {
-            Log "模拟器启动失败 - 通知已发送，60秒后自动关机"
+            Log ("{0} - 通知已发送，60秒后自动关机" -f $startErr)
             shutdown /s /t 60
         }
     }

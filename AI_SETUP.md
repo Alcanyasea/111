@@ -61,7 +61,8 @@ gui\.venv\Scripts\python.exe gui\main.py
 6. **「运行设置」页**：检查 MAA/ADB 路径探测结果（官服 MAA 路径自动探测；
    B服默认 `D:\软件\MAA（b）\MAA.exe`）。然后分别点「MAA 服务器配置（官服）」
    和「（B服）」两个按钮——一键修正该服 MAA 的客户端类型、ADB 地址
-   （MuMu 12 默认 `127.0.0.1:16384`）、RunDirectly、「任务结束后执行脚本」
+   （MuMu 12 默认 `127.0.0.1:16384`；挂机脚本每轮启动会按实例配置自动发现
+   实际端口并回写，端口变了不用手动改）、RunDirectly、「任务结束后执行脚本」
    （自动指向本仓库 `scripts\signal_done.bat`）和常用任务开关。若 B服 MAA
    目录不存在会自动从官服复制一份再修正。
 7. **「账号管理」页**：请用户本人输入游戏账号密码 →「开始捕获」。脚本自动
@@ -81,7 +82,7 @@ gui\.venv\Scripts\python.exe gui\main.py
 | pip 装完仍有 GUI 测试 loader error | 用 `gui\.venv\Scripts\python.exe` 跑测试，别用系统 Python |
 | `--smoke` 没输出 SMOKE OK | 无显示器环境加环境变量 `QT_QPA_PLATFORM=offscreen` 再试；仍失败看报错补依赖 |
 | MAA 路径探测不到 | GUI「运行设置」手动填；或按 §1 建议的目录放 |
-| 模拟器连不上 | MuMu 未开 / ADB 端口不是 16384 / 分辨率不是 1280×720 |
+| 模拟器连不上 | MuMu 未开 / 端口被别的程序占用（MuMu 会自动换端口，脚本会重新发现；看日志 `ADB port source`）/ 分辨率不是 1280×720 |
 | GUI 报「已在运行」 | 单实例锁：关掉已开的控制台；崩溃残留锁在 `gui\console.lock`，下次启动自动清 |
 | 提示「已在运行中」无法挂机 | 上轮未正常结束：确认没在跑后删 `scripts\master.lock` |
 | 计划任务创建失败 | GUI 需以管理员身份运行一次 |
