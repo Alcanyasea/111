@@ -16,11 +16,11 @@ python -m remote_control.telegram_bot `
   --drafts D:\1\.telegram\drafts.json
 ```
 
-你发送 `/invite` 生成绑定码，另一位发送 `/bind 绑定码` 即可自动绑定到 A；绑定码 10 分钟有效且只能使用一次。
+上面的编辑者参数是可选的；只运行所有者时可以省略 `--editor-id`、`--editor-account` 和 `--editor-account-label`。你发送 `/invite` 生成绑定码，另一位发送 `/bind 绑定码` 即可自动绑定到当前账号；绑定码 10 分钟有效且只能使用一次（`/bind` 成功后立即失效）。
 
 机器人启动时会自动设置命令菜单。编辑者可从菜单选择 `/start`、`/upload`、`/config`、`/bind`；所有者额外拥有 `/invite` 和 `/publish`。选择 `/upload` 后直接发送基建 JSON 文件；选择 `/config` 可查看当前精确基建配置。
 
-`/config` 输出为手机可读的排版（按批次列出控制中枢/会客室/制造站/贸易站/发电站/宿舍/办公室/加工站与干员，留空位显示「自动」）。所有者发送 `/config` 先看账号列表，再用 `/config 编号` 或 `/config 名称`（如 `/config 2`、`/config 官服2`）查看单个账号；编辑者发送 `/config` 直接查看绑定的 A 账号。输出不包含密码、token、路径等敏感字段。
+`/config` 输出为手机可读的排版（按批次列出控制中枢/会客室/制造站/贸易站/发电站/宿舍/办公室/加工站与干员，留空位显示「自动」）。所有者先用 `/select` 选择账号，再发送 `/config` 查看；也可用 `/select 编号` 或 `/select 名称`（如 `/select 2`、`/select 官服2`）切换账号。编辑者发送 `/config` 直接查看绑定的 A 账号。输出不包含密码、token、路径等敏感字段。
 
 上传成功后的回执包含：变更对比（哪些批次哪些房间的干员/产品变了）、导入注意项（文件里控制台不支持的字段，如 groups/skip，仅导入 operators）、以及所有者的草稿 ID。编辑者上传直接写入绑定账号；所有者上传生成草稿，回复 `/publish 草稿ID` 发布。
 

@@ -240,7 +240,6 @@ D:\1\
 │   ├── theme.py / widgets.py      # 调色板与通用组件（状态徽章/卡片等）
 │   ├── core\                      # adb / 运行控制 / 日志解析 / 计划任务 / 通知
 │   ├── pages\                     # 仪表盘 / 账号管理 / 运行设置 / 运行历史 / 日志
-│   ├── mockup.html                # 界面设计草图（浏览器打开预览）
 │   └── requirements.txt           # PySide6 + PySide6-Fluent-Widgets
 ├── 软件\
 │   ├── MAA\                       # 官服 MAA（Official 客户端）

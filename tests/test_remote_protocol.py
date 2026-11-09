@@ -29,6 +29,15 @@ class RemoteProtocolTests(unittest.TestCase):
         status = redact_status({"log": "secret", "token": "t", "screenshot": "x", "phase": "idle"})
         self.assertEqual(status, {"phase": "idle"})
 
+    def test_schedule_snapshot_only_copies_known_fields(self):
+        cfg = {"schedule": {"times": [
+            {"time": "04:00", "enabled": True, "password": "leak", "extension": {"token": "x"}},
+            {"time": "bad", "enabled": True},
+        ], "collect_times": [{"time": "12:00", "shutdown": True, "private": 1}]}}
+        safe = redact_config(cfg)
+        self.assertEqual(safe["schedule"]["times"], [{"time": "04:00", "enabled": True}])
+        self.assertEqual(safe["schedule"]["collect_times"], [{"time": "12:00", "enabled": True, "shutdown": True}])
+
 
 if __name__ == "__main__":
     unittest.main()

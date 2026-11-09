@@ -75,6 +75,13 @@ def _load_base_plugin(project_root):
     return plugin
 
 
+def schedule_fingerprint(value):
+    """Stable fingerprint used to detect a draft based on an outdated schedule."""
+    payload = json.dumps(value if value is not None else {}, sort_keys=True,
+                         ensure_ascii=False, separators=(",", ":"))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
 def build_schedule_patch(cfg, account_id, raw_bytes, project_root=None):
     try:
         doc = json.loads(raw_bytes.decode("utf-8-sig"))
@@ -463,10 +470,13 @@ class DraftStore:
         tmp.write_text(json.dumps(value, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         os.replace(tmp, self.path)
 
-    def create(self, user_id, account_id, patch, summary):
+    def create(self, user_id, account_id, patch, summary, base_fingerprint=None):
         drafts = self._read()
         draft_id = secrets.token_urlsafe(8)
-        drafts[draft_id] = {"id": draft_id, "user_id": str(user_id), "account_id": str(account_id), "patch": patch, "summary": summary, "created_at": int(time.time()), "status": "draft"}
+        draft = {"id": draft_id, "user_id": str(user_id), "account_id": str(account_id), "patch": patch, "summary": summary, "created_at": int(time.time()), "status": "draft"}
+        if base_fingerprint is not None:
+            draft["base_fingerprint"] = str(base_fingerprint)
+        drafts[draft_id] = draft
         self._write(drafts)
         return draft_id
 

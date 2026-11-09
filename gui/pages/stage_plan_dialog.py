@@ -14,8 +14,8 @@ from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (QComboBox, QDialog, QFrame, QHBoxLayout, QLabel,
                                QScrollArea, QVBoxLayout, QWidget)
 
-from qfluentwidgets import (BodyLabel, InfoBar, InfoBarPosition,
-                            PrimaryPushButton, PushButton, SwitchButton)
+from qfluentwidgets import (InfoBar, InfoBarPosition, PrimaryPushButton,
+                            PushButton, SwitchButton)
 
 import config as appconfig
 import theme

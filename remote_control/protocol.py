@@ -40,6 +40,22 @@ def command_payload(kind, args, idempotency_key, expires_at):
     return {"kind": kind, "args": safe_args, "idempotency_key": idempotency_key.strip(), "expires_at": expires_at}
 
 
+def _redact_times(items):
+    """Only known schedule fields leave the machine; unknown extensions stay local."""
+    result = []
+    for item in items if isinstance(items, list) else []:
+        if not isinstance(item, dict):
+            continue
+        value = str(item.get("time") or "").strip()
+        if not re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", value):
+            continue
+        clean = {"time": value, "enabled": bool(item.get("enabled", True))}
+        if "shutdown" in item:
+            clean["shutdown"] = bool(item.get("shutdown"))
+        result.append(clean)
+    return result
+
+
 def redact_config(cfg):
     out = {"revision": int(cfg.get("remote_revision", 0) or 0), "accounts": [], "schedule": {}}
     for acc in cfg.get("accounts") or []:
@@ -49,7 +65,7 @@ def redact_config(cfg):
         out["accounts"].append({"id": str(acc.get("id") or ""), "label": str(acc.get("label") or ""), "server": str(acc.get("server") or "official"), "enabled": bool(acc.get("enabled", True)), "slot_present": bool(acc.get("slot_present", False))})
     sched = cfg.get("schedule")
     if isinstance(sched, dict):
-        out["schedule"] = {"times": copy.deepcopy(sched.get("times") or []), "collect_times": copy.deepcopy(sched.get("collect_times") or [])}
+        out["schedule"] = {"times": _redact_times(sched.get("times")), "collect_times": _redact_times(sched.get("collect_times"))}
     return out
 
 

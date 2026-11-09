@@ -1,9 +1,8 @@
 import argparse
-import json
 import sys
 import time
 from pathlib import Path
-from .agent import AgentClient, CommandExecutor
+from .agent import AgentClient, CommandExecutor, run_iteration
 
 
 def main(argv=None):
@@ -19,7 +18,7 @@ def main(argv=None):
         from .local_state import LocalState
         cfg = appconfig.load()
         state = LocalState(project_root)
-        executor = CommandExecutor(cfg, runner, None, state)
+        executor = CommandExecutor(cfg, runner, None, state, config_loader=appconfig.load)
         client = AgentClient(args.url, args.device, args.token)
         delay = 1
         while True:
@@ -32,10 +31,7 @@ def main(argv=None):
                 item = client.poll(); delay = 1
             except OSError:
                 time.sleep(delay); delay = min(delay * 2, 60); continue
-            command = item.get("command") or (item if item.get("id") else None)
-            if command:
-                result = executor.execute(command)
-                client.post_result(command["id"], command.get("lease", ""), result)
+            run_iteration(client, executor, state, item)
             time.sleep(5)
 
 

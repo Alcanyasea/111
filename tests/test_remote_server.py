@@ -67,6 +67,17 @@ class RemoteServerTests(unittest.TestCase):
         status, _ = self.request("POST", "/api/v1/devices/missing/commands", body, data["token"])
         self.assertEqual(status, 404)
 
+    def test_admin_can_revoke_device_and_agent_is_rejected(self):
+        status, data = self.request("POST", "/api/v1/session", {"password": "admin-password"})
+        self.assertEqual(status, 200)
+        self.store.create_device("d4", "PC", "agent-token")
+        status, body = self.request("POST", "/api/v1/devices/d4/revoke", {}, data["token"])
+        self.assertEqual(status, 200); self.assertTrue(body["ok"])
+        self.assertEqual(self.store.get_device("d4")["revoked"], 1)
+        self.conn.request("GET", "/api/v1/devices/d4/commands/next",
+                          headers={"Authorization": "Bearer agent-token"})
+        self.assertEqual(self.conn.getresponse().status, 401)
+
     def test_server_redacts_agent_snapshot_and_lists_devices(self):
         status, data = self.request("POST", "/api/v1/session", {"password": "admin-password"})
         self.store.create_device("d3", "PC", "agent-token")

@@ -1,3 +1,4 @@
+import sqlite3
 import tempfile
 import time
 import unittest
@@ -40,6 +41,21 @@ class RemoteStorageTests(unittest.TestCase):
             second = store.claim_command("d1", now=111, lease_seconds=10)
             self.assertEqual(first["id"], second["id"]); self.assertNotEqual(first["lease"], second["lease"])
             self.assertFalse(store.finish_command(row["id"], first["lease"], "succeeded", {}))
+
+    def test_expired_command_is_not_requeued_after_lease(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "db.sqlite"
+            store = Store(path); store.create_device("d1", "Device", "hash")
+            row = store.enqueue_command("d1", {"kind": "run"}, "run-1", 105)
+            first = store.claim_command("d1", now=100, lease_seconds=10)
+            self.assertEqual(first["id"], row["id"])
+            self.assertIsNone(store.claim_command("d1", now=111, lease_seconds=10))
+            db = sqlite3.connect(path)
+            try:
+                state = db.execute("SELECT state FROM commands WHERE id=?", (row["id"],)).fetchone()[0]
+            finally:
+                db.close()
+            self.assertEqual(state, "expired")
 
 
 if __name__ == "__main__":

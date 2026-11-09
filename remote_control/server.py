@@ -2,11 +2,14 @@ import hashlib
 import hmac
 import json
 import secrets
+import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 from .protocol import ProtocolError, command_payload
+
+MAX_BODY_BYTES = 256 * 1024
 
 
 class Auth:
@@ -31,9 +34,36 @@ class Auth:
 class ControlHTTPServer(ThreadingHTTPServer):
     daemon_threads = True
 
-    def __init__(self, store, auth, bind="127.0.0.1", port=8765):
+    def __init__(self, store, auth, bind="127.0.0.1", port=8765, max_concurrency=8):
         self.store, self.auth = store, auth
+        self._slots = threading.BoundedSemaphore(max(1, int(max_concurrency)))
         super().__init__((bind, port), self._handler())
+
+    def process_request(self, request, client_address):
+        # ThreadingHTTPServer is unbounded by default; a burst of scrypt login
+        # attempts could otherwise exhaust a 1 GB host.
+        if not self._slots.acquire(blocking=False):
+            try:
+                request.sendall(b"HTTP/1.1 503 Service Unavailable\r\n"
+                                b"Content-Type: application/json\r\n"
+                                b"Content-Length: 16\r\nConnection: close\r\n\r\n"
+                                b'{"error":"busy"}')
+            except OSError:
+                pass
+            finally:
+                request.close()
+            return
+        try:
+            super().process_request(request, client_address)
+        except BaseException:
+            self._slots.release()
+            raise
+
+    def process_request_thread(self, request, client_address):
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self._slots.release()
 
     def _handler(self):
         parent = self
@@ -51,7 +81,16 @@ class ControlHTTPServer(ThreadingHTTPServer):
                 self.send_response(status); self.send_header("Content-Length", "0"); self.end_headers()
 
             def _body(self):
-                length = int(self.headers.get("Content-Length", "0")); return json.loads(self.rfile.read(length) or b"{}")
+                try:
+                    length = int(self.headers.get("Content-Length", "0"))
+                except (TypeError, ValueError):
+                    raise ValueError("invalid content length")
+                if length < 0 or length > MAX_BODY_BYTES:
+                    raise ValueError("request body too large")
+                data = self.rfile.read(length)
+                if len(data) != length:
+                    raise ValueError("incomplete request body")
+                return json.loads(data or b"{}")
 
             def _token(self):
                 value = self.headers.get("Authorization", "")
@@ -101,6 +140,13 @@ class ControlHTTPServer(ThreadingHTTPServer):
                     agent_token = secrets.token_urlsafe(32)
                     parent.store.create_device(device_id, name, agent_token)
                     return self._json(201, {"device_id": device_id, "agent_token": agent_token})
+                if len(parts) == 5 and parts[:3] == ["api", "v1", "devices"] and parts[4] == "revoke":
+                    if not self._admin(): return self._json(401, {"error": "unauthorized"})
+                    device = parent.store.get_device(parts[3])
+                    if not device: return self._json(404, {"error": "device_not_found"})
+                    parent.store.revoke_device(parts[3])
+                    parent.store.audit(parts[3], "device_revoked")
+                    return self._json(200, {"ok": True})
                 if len(parts) == 5 and parts[:3] == ["api", "v1", "devices"] and parts[4] == "register":
                     if not self._agent(parts[3]): return self._json(401, {"error": "unauthorized"})
                     from .protocol import redact_status

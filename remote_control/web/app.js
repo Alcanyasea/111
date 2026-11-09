@@ -21,6 +21,16 @@ document.querySelector('#login').addEventListener('click', async () => {
   refreshDevices(); refresh();
 });
 document.querySelector('#device').addEventListener('change', refresh);
+document.querySelector('#revoke').addEventListener('click', async () => {
+  if (!session) { status.textContent = '请先登录'; return; }
+  const device = document.querySelector('#device').value.trim();
+  if (!device) { status.textContent = '请填写设备 ID'; return; }
+  if (!confirm(`撤销设备 ${device}？撤销后该设备令牌立即失效。`)) return;
+  const response = await fetch(`/api/v1/devices/${encodeURIComponent(device)}/revoke`, {method:'POST', headers:{Authorization:`Bearer ${session}`}});
+  const data = await response.json();
+  status.textContent = response.ok ? '设备已撤销' : `撤销失败：${data.error || response.status}`;
+  if (response.ok) refreshDevices();
+});
 document.querySelectorAll('button[data-kind]').forEach(btn => btn.addEventListener('click', async () => {
   if (!session) { status.textContent = '请先登录'; return; }
   const device = document.querySelector('#device').value.trim();

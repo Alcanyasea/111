@@ -1,4 +1,3 @@
-import json
 import copy
 import sys
 import time
@@ -24,6 +23,7 @@ from .telegram_base_schedule import (
     preset_names,
     preset_summary,
     resolve_account_token,
+    schedule_fingerprint,
     split_preset_args,
 )
 
@@ -42,6 +42,23 @@ def restore_bindings(policy, invites):
     for user_id, account_id in invites.bindings().items():
         policy.editor_accounts.setdefault(user_id, account_id)
     return policy
+
+
+def resolve_editor_bindings(editor_ids, cfg, editor_account=None, editor_account_label=None):
+    """Resolve optional static editor bindings; owner-only mode needs no account args."""
+    editor_ids = list(editor_ids or [])
+    if not editor_ids:
+        return {}
+    account_id = editor_account
+    if not account_id and editor_account_label:
+        matches = [a for a in cfg.get("accounts") or []
+                   if str(a.get("label") or "") == editor_account_label]
+        if len(matches) != 1:
+            raise ValueError("账号名称未唯一匹配：%s" % editor_account_label)
+        account_id = str(matches[0].get("id"))
+    if not account_id:
+        raise ValueError("指定 --editor-id 时需要 --editor-account 或 --editor-account-label")
+    return {str(user_id): str(account_id) for user_id in editor_ids}
 
 
 def _menu(commands):
@@ -285,6 +302,7 @@ class BaseScheduleBot:
                 self.api.send(chat_id, "只有所有者可以发布草稿。")
                 return
             draft_id = text.split(None, 1)[1].strip()
+            saved = False
             try:
                 cfg = self._fresh_cfg()
                 sel = self._selected_id(user_id)
@@ -303,11 +321,35 @@ class BaseScheduleBot:
                     hint = ("/select %d" % idx) if idx else "/select"
                     self.api.send(chat_id, "该草稿属于账号「%s」，请先 %s 再发布。" % (label, hint))
                     return
+                account = next((a for a in cfg.get("accounts") or []
+                                if str(a.get("id")) == str(draft.get("account_id"))), None)
+                if account is None:
+                    self.api.send(chat_id, "发布失败：草稿对应的账号已不存在")
+                    return
+                expected = draft.get("base_fingerprint")
+                current = schedule_fingerprint(account.get("base_schedule"))
+                patch = draft.get("patch") if isinstance(draft.get("patch"), dict) else {}
+                desired = patch.get("base_schedule")
+                if expected and current != str(expected):
+                    # A previous publish may have written config but failed to mark
+                    # the draft. Treat identical content as already published.
+                    if desired is not None and current == schedule_fingerprint(desired):
+                        saved = True  # config already contains the draft content
+                        self.drafts.take(draft_id, user_id, self.policy.owner_id)
+                        self.api.send(chat_id, "该草稿内容已在账号「%s」生效，已标记为已发布。"
+                                      % self._account_label(cfg, draft["account_id"]))
+                        return
+                    self.api.send(chat_id, "发布失败：账号排班在草稿生成后已变化，请重新上传生成新草稿。")
+                    return
+                self._save_account_patch(cfg, draft["account_id"], patch)
+                saved = True
                 self.drafts.take(draft_id, user_id, self.policy.owner_id)
-                self._save_account_patch(cfg, draft["account_id"], draft["patch"])
                 self.api.send(chat_id, "已发布到账号「%s」。" % self._account_label(self.cfg, draft["account_id"]))
             except Exception as exc:
-                self.api.send(chat_id, "发布失败：%s" % str(exc))
+                if saved:
+                    self.api.send(chat_id, "配置已写入，但草稿状态更新失败：%s。请勿重复发布，重启后先确认配置。" % str(exc))
+                else:
+                    self.api.send(chat_id, "发布失败：%s" % str(exc))
             return
         document = message.get("document")
         if document:
@@ -669,7 +711,9 @@ class BaseScheduleBot:
                 self._plugin(), account.get("base_schedule") or {}, patch.get("base_schedule") or {})
             reply = self._upload_reply(summary, changes, notes)
             if self.policy.is_owner(user_id):
-                draft_id = self.drafts.create(user_id, account_id, patch, summary)
+                draft_id = self.drafts.create(
+                    user_id, account_id, patch, summary,
+                    base_fingerprint=schedule_fingerprint(account.get("base_schedule")))
                 reply += "\n\n草稿 ID：%s\n发布请回复 /publish %s" % (draft_id, draft_id)
             else:
                 self._save_account_patch(cfg, account_id, patch)
@@ -731,15 +775,13 @@ def main():
         p.error("需要 --token 或环境变量 " + args.token_env)
     appconfig = _import_appconfig(args.project)
     cfg = appconfig.load()
-    editor_account = args.editor_account
-    if not editor_account and args.editor_account_label:
-        matches = [a for a in cfg.get("accounts") or [] if str(a.get("label") or "") == args.editor_account_label]
-        if len(matches) != 1:
-            p.error("账号名称未唯一匹配：%s" % args.editor_account_label)
-        editor_account = str(matches[0].get("id"))
-    if not editor_account:
-        p.error("需要 --editor-account 或 --editor-account-label")
-    policy = RolePolicy(args.owner_id, {x: editor_account for x in args.editor_id})
+    try:
+        editor_accounts = resolve_editor_bindings(
+            args.editor_id, cfg, args.editor_account, args.editor_account_label)
+    except ValueError as exc:
+        p.error(str(exc))
+    editor_account = next(iter(editor_accounts.values()), None)
+    policy = RolePolicy(args.owner_id, editor_accounts)
     invites = InviteStore(args.invites)
     restore_bindings(policy, invites)
     state_path = args.state or str(Path(args.drafts).parent / "poll_state.json")

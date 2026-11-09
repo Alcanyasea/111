@@ -1,5 +1,4 @@
 import json
-import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -146,9 +145,70 @@ class TelegramBaseScheduleTests(unittest.TestCase):
     def test_owner_invite_code_binds_one_user_once(self):
         with tempfile.TemporaryDirectory() as td:
             store = InviteStore(Path(td) / "invites.json")
-            code = store.create("a1", ttl=600)
+            code = store.create("a1")
             self.assertEqual(store.redeem(code, "editor-1"), "a1")
             with self.assertRaises(ValueError): store.redeem(code, "editor-2")
+
+    def test_invite_code_expires_before_use(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "invites.json"
+            store = InviteStore(path)
+            code = store.create("a1", ttl=-1)
+            self.assertIn("expires_at", json.loads(path.read_text(encoding="utf-8"))[code])
+            with self.assertRaisesRegex(ValueError, "已过期"):
+                store.redeem(code, "editor-1")
+
+    def test_stale_draft_cannot_overwrite_newer_schedule(self):
+        with tempfile.TemporaryDirectory() as td:
+            api = Api()
+            fake = FakeAppConfig(self._configured_cfg())
+            bot = make_bot(api, fake.cfg, RolePolicy("1"), td, appconfig=fake)
+            send_as(bot, "1", "/select 1")
+            bot.handle_message({"from": {"id": "1"}, "chat": {"id": "1", "type": "private"},
+                                "document": {"file_name": "base.json", "file_id": "f"}})
+            draft_id = api.sent[-1][1].split("草稿 ID：")[1].splitlines()[0].strip()
+            fake.cfg["accounts"][0]["base_schedule"]["enabled"] = False
+            text = send_as(bot, "1", "/publish " + draft_id)
+            self.assertIn("草稿生成后已变化", text)
+            self.assertEqual(fake.saved, [])
+            self.assertEqual(bot.drafts.peek(draft_id)["status"], "draft")
+
+    def test_publish_is_idempotent_when_draft_content_already_applied(self):
+        with tempfile.TemporaryDirectory() as td:
+            api = Api()
+            fake = FakeAppConfig(self._configured_cfg())
+            bot = make_bot(api, fake.cfg, RolePolicy("1"), td, appconfig=fake)
+            send_as(bot, "1", "/select 1")
+            bot.handle_message({"from": {"id": "1"}, "chat": {"id": "1", "type": "private"},
+                                "document": {"file_name": "base.json", "file_id": "f"}})
+            draft_id = api.sent[-1][1].split("草稿 ID：")[1].splitlines()[0].strip()
+            draft = bot.drafts.peek(draft_id)
+            fake.cfg["accounts"][0]["base_schedule"] = json.loads(
+                json.dumps(draft["patch"]["base_schedule"]))
+            text = send_as(bot, "1", "/publish " + draft_id)
+            self.assertIn("已在账号", text)
+            self.assertEqual(fake.saved, [])
+            self.assertEqual(bot.drafts.peek(draft_id)["status"], "published")
+
+    def test_publish_save_failure_keeps_draft_retryable(self):
+        with tempfile.TemporaryDirectory() as td:
+            class FailingConfig(FakeAppConfig):
+                def save(self, value):
+                    raise OSError("disk full")
+
+            api = Api()
+            fake = FailingConfig(self._configured_cfg())
+            bot = make_bot(api, fake.cfg, RolePolicy("1"), td, appconfig=fake)
+            send_as(bot, "1", "/select 1")
+            draft_id = bot.drafts.create("1", "a1", {"base_schedule": {"enabled": True}}, "preview")
+            send_as(bot, "1", "/publish " + draft_id)
+            self.assertEqual(bot.drafts.peek(draft_id)["status"], "draft")
+
+    def test_owner_only_policy_has_no_required_editor_account(self):
+        from remote_control.telegram_bot import resolve_editor_bindings
+        self.assertEqual(resolve_editor_bindings([], self.cfg), {})
+        with self.assertRaises(ValueError):
+            resolve_editor_bindings(["2"], self.cfg)
 
     def test_command_menu_gates_owner_until_account_selected(self):
         api = Api()
@@ -351,17 +411,6 @@ class TelegramBaseScheduleTests(unittest.TestCase):
             self.assertIn("草稿 ID：", text)
             self.assertIn("/publish", text)
             self.assertFalse(fake.saved)  # 所有者上传只生成草稿，不落盘
-
-    def test_editor_upload_ignores_caption_and_writes_bound_account(self):
-        with tempfile.TemporaryDirectory() as td:
-            api = Api()
-            fake = FakeAppConfig(self.cfg)
-            bot = make_bot(api, self.cfg, RolePolicy("1", {"2": "a1"}), td, appconfig=fake)
-            bot.handle_message({"from": {"id": 2}, "chat": {"id": 2, "type": "private"}, "caption": "a2",
-                                "document": {"file_name": "base.json", "file_id": "f"}})
-            self.assertTrue(fake.cfg["accounts"][0]["base_schedule"]["enabled"])
-            self.assertFalse(fake.cfg["accounts"][1]["base_schedule"]["enabled"])
-            self.assertEqual(len(fake.saved), 1)
 
     def test_publish_requires_same_selected_account(self):
         with tempfile.TemporaryDirectory() as td:
@@ -619,14 +668,14 @@ class TelegramBaseScheduleTests(unittest.TestCase):
     def test_bindings_restore_after_restart(self):
         with tempfile.TemporaryDirectory() as td:
             store = InviteStore(Path(td) / "invites.json")
-            code = store.create("a1", ttl=600)
+            code = store.create("a1")
             store.redeem(code, "2")
             policy = RolePolicy("1")
             restore_bindings(policy, store)
             self.assertEqual(policy.editor_accounts.get("2"), "a1")
             # CLI 显式指定的绑定优先于历史记录
             store2 = InviteStore(Path(td) / "invites2.json")
-            code2 = store2.create("a1", ttl=600)
+            code2 = store2.create("a1")
             store2.redeem(code2, "9")
             policy2 = RolePolicy("1", {"9": "a2"})
             restore_bindings(policy2, store2)

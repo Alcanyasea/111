@@ -21,8 +21,7 @@ from qfluentwidgets import (BodyLabel, FluentIcon, InfoBar, InfoBarPosition,
 
 import theme
 from core import runner
-from widgets import (Card, Pill, _label_transparent, _rgba, empty_state,
-                     hline, style_button, style_scroll_area)
+from widgets import (Card, Pill, _rgba, empty_state, hline, style_button)
 
 MODE_LABELS = {"farm": "挂机", "collect": "收菜", "switch": "切号",
                "start": "快速启动"}

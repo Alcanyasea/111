@@ -66,9 +66,11 @@ class Store:
             dev = db.execute("SELECT revoked FROM devices WHERE id=?", (device_id,)).fetchone()
             if not dev or dev[0]:
                 return None
-            db.execute("UPDATE commands SET state='expired' WHERE device_id=? AND state='queued' AND expires_at<=?", (device_id, now))
-            db.execute("UPDATE commands SET state='queued',lease=NULL,lease_until=NULL WHERE device_id=? AND state IN ('claimed','running') AND lease_until<=?", (device_id, now))
-            row = db.execute("SELECT * FROM commands WHERE device_id=? AND state='queued' ORDER BY created_at,id LIMIT 1", (device_id,)).fetchone()
+            # Expire first: a command whose lease elapsed while the device was
+            # offline must not be re-queued after its own expiry passed.
+            db.execute("UPDATE commands SET state='expired' WHERE device_id=? AND state IN ('queued','claimed','running') AND expires_at<=?", (device_id, now))
+            db.execute("UPDATE commands SET state='queued',lease=NULL,lease_until=NULL WHERE device_id=? AND state IN ('claimed','running') AND lease_until<=? AND expires_at>?", (device_id, now, now))
+            row = db.execute("SELECT * FROM commands WHERE device_id=? AND state='queued' AND expires_at>? ORDER BY created_at,id LIMIT 1", (device_id, now)).fetchone()
             if not row:
                 return None
             lease = secrets.token_urlsafe(12)
