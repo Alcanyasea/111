@@ -13,8 +13,11 @@
 错误，由界面弹 InfoBar 提示）；查询无需管理员。
 """
 import json
+import os
 import re
-from datetime import datetime
+import shutil
+import tempfile
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from core.util import decode_console, pwsh_exe, run as _run
@@ -25,6 +28,7 @@ COLLECT_TASK_NAME = "MAA_基建收菜"
 # master.ps1 路径按本文件位置推导（gui\core\scheduler.py → 项目根\scripts），
 # 不再写死 D:\1：项目挪目录/装到别的盘后计划任务仍指向正确脚本
 MASTER_PS1 = str(Path(__file__).resolve().parents[2] / "scripts" / "master.ps1")
+SKIP_ONCE_PATH = Path(MASTER_PS1).with_name("skip_once.json")
 
 
 _PS_DATE_RE = re.compile(r"/Date\((\d+)\)/")
@@ -34,6 +38,67 @@ _HHMM_RE = re.compile(r"T(\d{2}:\d{2})")
 # 是 Register/Set-ScheduledTask，只有 apply 需要）
 QUERY_TIMEOUT = 12
 APPLY_TIMEOUT = 40
+
+
+def pending_skip(now=None):
+    """读取一次跳过的具体班次。到下一个班次自动失效，不修改用户配置。"""
+    now = now or datetime.now()
+    try:
+        state = json.loads(SKIP_ONCE_PATH.read_text(encoding="utf-8"))
+        target = datetime.strptime(state["skip_at"], "%Y-%m-%dT%H:%M:%S")
+        resume = datetime.strptime(state["resume_at"], "%Y-%m-%dT%H:%M:%S")
+        if target < resume <= target + timedelta(days=1) and now < resume:
+            return target
+    except (FileNotFoundError, ValueError, KeyError, TypeError):
+        pass
+    return None
+
+
+def skip_next_run(info, now=None):
+    """绑定已注册任务的下一班；过期查询拒绝写入，避免跳错日期。
+
+    状态用原子替换保存，重启控制台仍有效。旧文件先备份；主脚本只读，
+    用有效期防止重复触发漏跑或残留标记误跳次日班次。
+    """
+    now = now or datetime.now()
+    target = info.get("next_run")
+    times = _enabled_times([{"time": t} for t in info.get("times", [])])
+    if (not info.get("exists") or not info.get("enabled")
+            or not isinstance(target, datetime) or target <= now
+            or target.strftime("%H:%M") not in times):
+        raise ValueError("没有可跳过的下次班次，请等待计划任务状态刷新后重试")
+    following = []
+    for value in times:
+        hour, minute = map(int, value.split(":"))
+        candidate = target.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        if candidate <= target:
+            candidate += timedelta(days=1)
+        following.append(candidate)
+    state = {"skip_at": target.strftime("%Y-%m-%dT%H:%M:%S"),
+             "resume_at": min(following).strftime("%Y-%m-%dT%H:%M:%S")}
+    if SKIP_ONCE_PATH.exists():
+        shutil.copyfile(SKIP_ONCE_PATH, SKIP_ONCE_PATH.with_suffix(".json.bak"))
+    tmp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", delete=False,
+                                         dir=SKIP_ONCE_PATH.parent,
+                                         prefix="skip_once.", suffix=".tmp") as stream:
+            tmp_path = Path(stream.name)
+            json.dump(state, stream)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(tmp_path, SKIP_ONCE_PATH)
+    finally:
+        if tmp_path is not None:
+            tmp_path.unlink(missing_ok=True)
+    return target
+
+
+def cancel_skip():
+    """撤销前保留状态备份，绝不改动班次配置或计划任务。"""
+    if SKIP_ONCE_PATH.exists():
+        shutil.copyfile(SKIP_ONCE_PATH, SKIP_ONCE_PATH.with_suffix(".json.bak"))
+        SKIP_ONCE_PATH.unlink()
 
 
 def _ps(script, timeout=QUERY_TIMEOUT):
@@ -50,7 +115,9 @@ def _parse_date(value):
         if m:
             return datetime.fromtimestamp(int(m.group(1)) / 1000)
         try:
-            return datetime.fromisoformat(value)
+            parsed = datetime.fromisoformat(value)
+            # pwsh 可能返回带偏移的日期；计划任务和 GUI 均使用本地墙钟时间。
+            return parsed.astimezone().replace(tzinfo=None) if parsed.tzinfo else parsed
         except ValueError:
             pass
     return None

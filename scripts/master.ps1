@@ -12,6 +12,37 @@ param([switch]$NoShutdown, [switch]$SkipMAA, [switch]$InfrastCollect,
 $ErrorActionPreference = "Continue"
 $ProgressPreference = "SilentlyContinue"
 
+# 一次跳过必须在 master_lib 之前：不拿运行锁，不碰配置/日志/模拟器，也不关机。
+# 保留到下一班的边界，避免任务计划程序重复触发；过期文件不会影响后续班次。
+function Test-SkipScheduledRun {
+    param([string]$StatePath, [datetime]$Now = (Get-Date))
+    if (-not (Test-Path -LiteralPath $StatePath)) { return $false }
+    try {
+        # ConvertFrom-Json 在部分 pwsh 版本会把 ISO 字符串转成 DateTime；
+        # 用不带时区的本地时间，与 Windows 计划任务和 GUI 保持一致。
+        $state = Get-Content -LiteralPath $StatePath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+        $culture = [Globalization.CultureInfo]::InvariantCulture
+        $target = if ($state.skip_at -is [datetime]) { $state.skip_at } else {
+            [datetime]::ParseExact([string]$state.skip_at, 'yyyy-MM-ddTHH:mm:ss', $culture)
+        }
+        $resume = if ($state.resume_at -is [datetime]) { $state.resume_at } else {
+            [datetime]::ParseExact([string]$state.resume_at, 'yyyy-MM-ddTHH:mm:ss', $culture)
+        }
+        return ($target -lt $resume -and $resume -le $target.AddDays(1) -and
+                $Now -ge $target -and $Now -lt $resume)
+    } catch {
+        Write-Warning "无法读取一次跳过状态，按原班次计划运行：$_"
+        return $false
+    }
+}
+
+if (-not ($NoShutdown -or $SkipMAA -or $InfrastCollect -or $SwitchTo -or $NoLoginCheck)) {
+    if (Test-SkipScheduledRun -StatePath (Join-Path $PSScriptRoot 'skip_once.json')) {
+        Write-Output '本次班次已按控制台设置跳过；下一班自动恢复。'
+        exit 0
+    }
+}
+
 # ---- 加载库文件（拆分重构 v4.3）：顺序固定，后一层依赖前一层定义的变量/函数 ----
 . (Join-Path $PSScriptRoot "master_lib.ps1")
 . (Join-Path $PSScriptRoot "master_plugins.ps1")

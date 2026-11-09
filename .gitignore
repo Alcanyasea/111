@@ -42,6 +42,9 @@ __pycache__/
 scripts/master.lock
 gui/console.lock
 scripts/master.lock.tmp
+scripts/skip_once.json
+scripts/skip_once.json.bak
+scripts/skip_once.*.tmp
 scripts/switch_output.tmp
 scripts/switch_error.tmp
 

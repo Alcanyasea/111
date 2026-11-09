@@ -322,8 +322,8 @@ function Clear-UnnecessaryData {
 }
 
 function Clear-CacheData {
-    # Python 字节码缓存（__pycache__）与生成的基建计划文件：
-    # 都是运行前自动重建的临时产物，默认每次运行顺手清掉，避免本地残留。
+    # 只清 Python 字节码缓存（__pycache__）。MAA 持久引用生成的基建计划，
+    # 未轮到的账号不会重建计划，删除会导致单独启动 MAA 时配置索引越界。
     # 只清项目代码目录，不碰 .venv（虚拟环境属运行环境）。
     foreach ($cacheDir in @((Join-Path $root "gui\core"), (Join-Path $root "gui\pages"), (Join-Path $root "plugins"))) {
         if (Test-Path $cacheDir) {
@@ -332,10 +332,5 @@ function Clear-CacheData {
         }
     }
     Remove-Item (Join-Path $root "gui\__pycache__") -Recurse -Force -ErrorAction SilentlyContinue
-    $plansDir = Join-Path $root "plugins\base_schedule\plans"
-    if (Test-Path $plansDir) {
-        Get-ChildItem $plansDir -File -Filter "*.json" -ErrorAction SilentlyContinue |
-            Remove-Item -Force -ErrorAction SilentlyContinue
-    }
-    Log "Cleaned Python caches and generated base schedule plans"
+    Log "Cleaned Python caches (base schedule plans preserved)"
 }

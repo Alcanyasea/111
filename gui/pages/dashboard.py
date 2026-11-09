@@ -428,6 +428,10 @@ class _ScheduleCardBase(Card):
         else:
             self.task_val.setText("1 个任务 · %d 个触发 ✓" % len(info.get("times", [])))
 
+    def _prepare_trigger_change(self):
+        """子类可在修改触发时间前清理依赖旧班次的状态。"""
+        return True
+
     def _on_time(self, entry, edit):
         text = edit.text().strip()
         if not TIME_RE.match(text):
@@ -449,12 +453,18 @@ class _ScheduleCardBase(Card):
             edit.setText(entry["time"])
             edit.blockSignals(False)
             return
+        if not self._prepare_trigger_change():
+            self.refresh_from_cfg()
+            return
         entry["time"] = text
         self._sort_entries()
         self._apply()
         self.refresh_from_cfg()
 
     def _on_enabled(self, entry, checked):
+        if not self._prepare_trigger_change():
+            self.refresh_from_cfg()
+            return
         entry["enabled"] = bool(checked)
         # 开关只有深灰/浅灰一档色差，必须显式提示切换结果，否则用户无法确认生效
         InfoBar.success(
@@ -478,6 +488,8 @@ class _ScheduleCardBase(Card):
         self.refresh_from_cfg()
 
     def _on_delete(self, entry):
+        if not self._prepare_trigger_change():
+            return
         times = self._entries()
         if entry in times:
             times.remove(entry)
@@ -485,6 +497,8 @@ class _ScheduleCardBase(Card):
         self.refresh_from_cfg()
 
     def _on_add(self):
+        if not self._prepare_trigger_change():
+            return
         times = self._entries()
         used = {e.get("time") for e in times}
         default = None
@@ -509,6 +523,93 @@ class _ScheduleCardBase(Card):
 
 class ScheduleCard(_ScheduleCardBase):
     """班次计划：启动时间列表（可增删改），每项可启用/关机，修改即保存并更新计划任务。"""
+
+    def __init__(self, cfg):
+        super().__init__(cfg)
+        self._skip_info = {}
+        self._skip_syncing = False
+        bar = QHBoxLayout()
+        self.skip_btn = style_button(PushButton("跳过一次运行"))
+        self.skip_btn.setToolTip(
+            "跳过下一班全部账号及关机，之后自动恢复；关闭控制台仍有效。\n"
+            "手动立即运行和独立收菜计划不受影响；再次点击可取消。")
+        self.skip_btn.clicked.connect(self._on_skip_once)
+        bar.addWidget(self.skip_btn)
+        self.skip_val = _label("等待计划任务状态", size=theme.FS_CAPTION, color="TEXT_2")
+        self.skip_val.setWordWrap(True)
+        bar.addWidget(self.skip_val, 1)
+        self.vbox.addSpacing(8)
+        self.vbox.addLayout(bar)
+        self.refresh_scheduler({})
+
+    def _prepare_trigger_change(self):
+        # 班次边界变化后不能沿用旧的跳过窗口，否则可能连下一班也跳过。
+        try:
+            if scheduler.pending_skip():
+                scheduler.cancel_skip()
+                InfoBar.success("已取消原跳过设置", "班次计划即将变更，请按新计划重新设置跳过",
+                                parent=self.window(), position=InfoBarPosition.TOP_RIGHT,
+                                duration=4000)
+        except OSError as exc:
+            InfoBar.warning("班次计划未修改", "无法取消原跳过设置：%s" % exc,
+                            parent=self.window(), position=InfoBarPosition.TOP_RIGHT,
+                            duration=6000)
+            return False
+        self.refresh_scheduler({})
+        return True
+
+    def _start_apply_worker(self):
+        self._skip_syncing = True
+        self.skip_btn.setEnabled(False)
+        super()._start_apply_worker()
+
+    def _on_apply_done(self, ok, msg, info):
+        if not self._apply_pending:
+            self._skip_syncing = False
+            self._skip_info = info or {}
+        super()._on_apply_done(ok, msg, info)
+        if not self._skip_syncing:
+            self.refresh_scheduler(self._skip_info)
+
+    def refresh_scheduler(self, info):
+        super().refresh_scheduler(info)
+        self._skip_info = info
+        try:
+            target = scheduler.pending_skip()
+        except OSError as exc:
+            self.skip_val.setText("无法读取跳过状态")
+            self.skip_val.setToolTip(str(exc))
+            self.skip_btn.setEnabled(False)
+            return
+        self.skip_val.setToolTip("")
+        self.skip_btn.setText("取消跳过" if target else "跳过一次运行")
+        nxt = info.get("next_run")
+        available = (info.get("exists") and info.get("enabled")
+                     and isinstance(nxt, datetime) and nxt > datetime.now())
+        self.skip_btn.setEnabled(not self._skip_syncing and bool(target or available))
+        if target:
+            self.skip_val.setText("跳过班次：%s" % target.strftime("%Y-%m-%d %H:%M"))
+            if nxt == target:
+                self.next_val.setText(scheduler.next_run_text(info) + "（将跳过）")
+        else:
+            self.skip_val.setText("仅跳过下一班，之后自动恢复" if available else "暂无可跳过班次")
+
+    def _on_skip_once(self):
+        try:
+            if scheduler.pending_skip():
+                scheduler.cancel_skip()
+                title, message = "已取消跳过", "后续班次按原计划运行"
+            else:
+                target = scheduler.skip_next_run(self._skip_info)
+                title = "已设置跳过一次"
+                message = "%s 班次将跳过，下一班自动恢复" % target.strftime("%m-%d %H:%M")
+        except (OSError, ValueError) as exc:
+            InfoBar.warning("未能修改跳过状态", str(exc), parent=self.window(),
+                            position=InfoBarPosition.TOP_RIGHT, duration=6000)
+        else:
+            InfoBar.success(title, message, parent=self.window(),
+                            position=InfoBarPosition.TOP_RIGHT, duration=3000)
+        self.refresh_scheduler(self._skip_info)
 
     CARD_TITLE = "班次计划"
     COLUMNS = (("班次", 40), ("时间", 68), ("启用", 72), ("关机", 72),

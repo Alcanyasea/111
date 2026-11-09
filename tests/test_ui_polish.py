@@ -130,7 +130,8 @@ class MonoFontTest(unittest.TestCase):
         apply_mono_font(edit)
         self.assertEqual(edit.font().families(), theme.FONT_MONO_FAMILIES)
 
-    def test_schedule_time_edit_is_mono(self):
+    @mock.patch("pages.dashboard.scheduler.pending_skip", return_value=None)
+    def test_schedule_time_edit_is_mono(self, _pending):
         """班次行的时间输入框等宽：一列时间按位对齐。"""
         cfg = {"schedule": {"times": [{"time": "04:00", "enabled": True,
                                        "shutdown": False}]},
@@ -311,6 +312,9 @@ class ScheduleToggleFeedbackTest(unittest.TestCase):
     def setUp(self):
         import pages.dashboard as dash
         self.dash = dash
+        skip_patch = mock.patch.object(dash.scheduler, "pending_skip", return_value=None)
+        skip_patch.start()
+        self.addCleanup(skip_patch.stop)
         _InfoBarSpy.calls = []
         _FakeApplyWorker.started = []
         # 绝不碰真实 config.json / 真实计划任务

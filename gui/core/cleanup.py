@@ -7,12 +7,12 @@ r"""数据清理：清除挂机过程产生的临时 / 调试数据。
   leftover  测试遗留文件（scripts/_t1.xml / _t2.xml / _t3.bin，登录缓存 dump，含 token）
   backup    旧配置备份（D:/1/config.json.bak）
   log       master_log.txt 超限截断（默认 >1MB 保留末尾 512KB，日志页只读尾部不受影响）
-  cache     项目内 Python 字节码缓存（__pycache__）与生成的基建计划文件
-            （plugins/base_schedule/plans/*.json，运行前会自动重建）
+  cache     项目内 Python 字节码缓存（__pycache__）
 
 安全规则：
   - 挂机运行中（runner.is_running()）必须拒绝清理，防止删掉活动的锁文件 / 正在追加的日志
   - 绝不触碰 scripts\accounts\（登录数据目录，清理会跑错号）
+  - 保留生成的基建计划：MAA 会持久引用，未运行账号的计划不会自动重建
 """
 import os
 import shutil
@@ -29,7 +29,6 @@ DEBUG_DIR = SCRIPT_DIR / "debug"
 LOG_FILE = SCRIPT_DIR / "master_log.txt"
 LOCK_FILE = SCRIPT_DIR / "master.lock"
 CACHE_ROOTS = (PROJECT_ROOT / "gui", PROJECT_ROOT / "plugins")
-PLANS_DIR = PROJECT_ROOT / "plugins" / "base_schedule" / "plans"
 
 # 日志截断阈值：超过 max_size 时保留末尾 keep_size 字节。
 # 必须与 master.ps1 Clear-UnnecessaryData 里的 1048576/524288 保持一致，
@@ -50,7 +49,7 @@ KIND_NAMES = {
     "leftover": "测试遗留数据（含登录缓存）",
     "backup": "旧配置备份",
     "log": "master_log.txt 截断",
-    "cache": "Python 缓存 / 生成的基建计划",
+    "cache": "Python 缓存",
 }
 
 
@@ -142,13 +141,6 @@ def scan(cfg=None):
                     size = 0
                 items.append({"path": dirpath, "kind": "cache", "size": size})
                 dirnames[:] = []
-
-    # 生成的基建计划文件（每次运行前会自动重新生成）
-    if PLANS_DIR.is_dir():
-        for f in sorted(PLANS_DIR.glob("*.json")):
-            it = _item(f, "cache")
-            if it:
-                items.append(it)
 
     return items
 
