@@ -473,22 +473,11 @@ def load() -> dict:
 
 
 def _seal_passwords(cfg):
-    """写盘副本里的密码统一转 DPAPI 密文（见 core/secret.py）。
+    """写盘副本里的密码统一转 DPAPI 密文（实现见 core/secret.py）。
 
-    只处理明文：已是 ``dpapi:`` 密文、空值、加密失败（非 Windows / 系统拒绝）
-    都保持原样，绝不因为保存设置而丢掉凭据。返回深拷贝，不改调用方内存里的值。
+    返回深拷贝，不改调用方内存里的值。
     """
-    out = deepcopy(cfg)
-    for a in out.get("accounts") or []:
-        if not isinstance(a, dict):
-            continue
-        value = a.get("password")
-        if not isinstance(value, str) or not value or secret.is_protected(value):
-            continue
-        sealed = secret.protect(value)
-        if sealed:
-            a["password"] = sealed
-    return out
+    return secret.seal_account_passwords(deepcopy(cfg))
 
 
 _MISSING = object()
@@ -613,7 +602,7 @@ def save(cfg: dict):
     base = _LAST_LOADED_CFG
     for attempt in range(3):
         try:
-            save_cfg(CONFIG_PATH, data)
+            save_cfg(CONFIG_PATH, cfg)
             _LAST_LOADED_CFG = deepcopy(cfg)
             return
         except ConfigRevisionConflict:

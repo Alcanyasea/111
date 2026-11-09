@@ -97,3 +97,24 @@ def unprotect(value):
         return raw.decode("utf-8")
     except UnicodeDecodeError:
         return None
+
+
+def seal_account_passwords(cfg):
+    """原地把 ``cfg["accounts"][*]["password"]`` 的明文转 DPAPI 密文。
+
+    所有写盘方（config.save 的兜底路径、core.remote_revision.save_cfg）统一
+    在落盘前调用。只处理明文：已是 ``dpapi:`` 密文、空值、加密失败（非
+    Windows / 系统拒绝）都保持原样，绝不因为保存设置而丢掉凭据。
+    """
+    if not isinstance(cfg, dict):
+        return cfg
+    for a in cfg.get("accounts") or []:
+        if not isinstance(a, dict):
+            continue
+        value = a.get("password")
+        if not isinstance(value, str) or not value or is_protected(value):
+            continue
+        sealed = protect(value)
+        if sealed:
+            a["password"] = sealed
+    return cfg

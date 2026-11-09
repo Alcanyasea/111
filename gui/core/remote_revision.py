@@ -132,6 +132,13 @@ def save_cfg(config_path, cfg):
             if read_revision(cfg) != disk_revision: raise ConfigRevisionConflict("configuration changed on disk")
             backup_config(path)
         payload = copy.deepcopy(cfg)
+        # 落盘前把账号密码明文转 DPAPI 密文（见 core/secret.py），与 config.save
+        # 的兜底路径一致；try-import 兼容不带 core.secret 的打包环境。
+        try:
+            from core import secret
+            secret.seal_account_passwords(payload)
+        except ImportError:
+            pass
         next_revision(payload)
         tmp = path.with_suffix(".json.remote-tmp")
         try:

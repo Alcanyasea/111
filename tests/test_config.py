@@ -59,7 +59,8 @@ class ConfigSaveLoadTest(unittest.TestCase):
         merged = appconfig.load()
         self.assertEqual(merged["appearance"]["theme"], "dark")
         self.assertTrue(merged["accounts"][0]["base_schedule"]["enabled"])
-        self.assertEqual(merged["accounts"][0]["password"], "pa")
+        # DPAPI 合并后盘上是密文；解密回来必须仍是原文，凭据原样穿过 rebase
+        self.assertEqual(secret.unprotect(merged["accounts"][0]["password"]), "pa")
 
     def test_local_account_delete_does_not_write_null_or_resurrect(self):
         cfg = self._seed_accounts()
