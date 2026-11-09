@@ -27,6 +27,7 @@ CONFIG_PATH = PROJECT_ROOT / "config.json"
 
 # 最近一次 load() 的警告（配置损坏已备份等），由主窗口启动时弹出提示
 LAST_LOAD_WARNING = ""
+_LAST_LOADED_CFG = None
 
 
 class ConfigLoadError(OSError):
@@ -145,6 +146,7 @@ def detect_maa_official_dir(base=r"D:\软件\MAA"):
 _maa_dir_default = detect_maa_official_dir() or r"D:\软件\MAA\MAA-v6.11.1-win-x64"
 
 DEFAULTS = {
+    "remote_revision": 0,
     "paths": {
         "maa_official": str(Path(_maa_dir_default) / "MAA.exe"),
         "maa_official_dir": _maa_dir_default,
@@ -430,7 +432,7 @@ def load() -> dict:
     config.json.corrupt-<时间戳> 再回退默认值：后续任何一次 save() 都会
     整份覆盖 config.json，没有备份的话账号数据（含槽位、账密）就没了。
     """
-    global LAST_LOAD_WARNING
+    global LAST_LOAD_WARNING, _LAST_LOADED_CFG
     LAST_LOAD_WARNING = ""
     cfg = relocate_project_paths(deepcopy(DEFAULTS), CONFIG_PATH)
     try:
@@ -466,6 +468,7 @@ def load() -> dict:
         if isinstance(a, dict):
             _norm_base_schedule_presets(a)
     _norm_appearance(cfg)
+    _LAST_LOADED_CFG = deepcopy(cfg)
     return cfg
 
 
@@ -488,22 +491,149 @@ def _seal_passwords(cfg):
     return out
 
 
+_MISSING = object()
+
+
+def _merge_concurrent(base, local, disk, key=None):
+    """Three-way merge of GUI edits with a newer on-disk config.
+
+    Deletions win when both sides started with a value: a remote delete must not
+    be resurrected by an open GUI, and a local delete must not be undone by a
+    remote edit. Values added independently on either side are preserved.
+    """
+    if local is _MISSING and disk is _MISSING:
+        return _MISSING
+    if local is _MISSING:
+        return deepcopy(disk) if base is _MISSING else _MISSING
+    if disk is _MISSING:
+        return deepcopy(local) if base is _MISSING else _MISSING
+    if local == base:
+        return deepcopy(disk)
+    if disk == base:
+        return deepcopy(local)
+    if key == "accounts" and all(isinstance(v, list) for v in (base, local, disk) if v is not _MISSING):
+        return _merge_account_lists(base, local, disk)
+    if isinstance(local, dict) and isinstance(disk, dict) and (base is _MISSING or isinstance(base, dict)):
+        base_dict = {} if base is _MISSING else base
+        out = {}
+        for name in set(base_dict) | set(local) | set(disk):
+            merged = _merge_concurrent(
+                base_dict.get(name, _MISSING),
+                local.get(name, _MISSING),
+                disk.get(name, _MISSING),
+                name)
+            if merged is not _MISSING:
+                out[name] = merged
+        return out
+    # Conflicting scalar/list edits: the user's currently open form wins.
+    return deepcopy(local)
+
+
+def _merge_account_lists(base, local, disk):
+    """Merge accounts by id, keeping deletion semantics and object identity stable."""
+    if not (isinstance(local, list) and isinstance(disk, list)):
+        return deepcopy(local)
+    base_items = base if isinstance(base, list) else []
+
+    def by_id(items):
+        return {str(item.get("id")): item for item in items
+                if isinstance(item, dict) and item.get("id") is not None}
+
+    base_map, local_map, disk_map = by_id(base_items), by_id(local), by_id(disk)
+    order = list(local_map)
+    order += [account_id for account_id in disk_map if account_id not in local_map]
+    out = []
+    for account_id in order:
+        in_base = account_id in base_map
+        left = local_map.get(account_id, _MISSING)
+        right = disk_map.get(account_id, _MISSING)
+        if left is _MISSING and in_base:
+            continue  # deleted in the open GUI
+        if right is _MISSING and in_base:
+            continue  # remote deletion wins over a local edit
+        if left is _MISSING:
+            out.append(deepcopy(right))  # new on disk
+            continue
+        if right is _MISSING:
+            out.append(deepcopy(left))  # added locally
+            continue
+        merged = _merge_concurrent(base_map.get(account_id, _MISSING), left, right, "account")
+        if merged is not _MISSING:
+            out.append(merged)
+    return out
+
+
+def _apply_merged_in_place(target, merged, key=None):
+    """Apply merge result without replacing live account objects held by pages."""
+    if isinstance(target, dict) and isinstance(merged, dict):
+        for name in list(target):
+            if name not in merged:
+                del target[name]
+        for name, value in merged.items():
+            if name in target and isinstance(target[name], dict) and isinstance(value, dict):
+                _apply_merged_in_place(target[name], value, name)
+            elif name == "accounts" and isinstance(value, list) and isinstance(target.get(name), list):
+                old = {str(item.get("id")): item for item in target[name]
+                       if isinstance(item, dict) and item.get("id") is not None}
+                accounts = []
+                for item in value:
+                    account_id = str(item.get("id")) if isinstance(item, dict) and item.get("id") is not None else None
+                    current = old.get(account_id)
+                    if isinstance(current, dict) and isinstance(item, dict):
+                        _apply_merged_in_place(current, item, "account")
+                        accounts.append(current)
+                    else:
+                        accounts.append(deepcopy(item))
+                target[name][:] = accounts
+            else:
+                target[name] = deepcopy(value)
+        return
+    if isinstance(target, list) and isinstance(merged, list):
+        target[:] = deepcopy(merged)
+
+
 def save(cfg: dict):
     """原子写入（临时文件 + 替换），UTF-8 无 BOM，中文不转义。
 
     写盘前把账号密码转成 DPAPI 密文（仅当前 Windows 用户可解密）。旧版明文
     配置在下一次保存时自动迁移；解密失败的值由 GUI 保留原密文，不会被覆盖。
 
-    临时文件名带进程 ID：固定名 config.json.tmp 在两个写方（历史版本/
-    异常并发）同时落盘时会互相截断；os.replace 带短重试——杀软/索引器
-    瞬时占用目标文件是 Windows 上替换失败的常见原因，重试即可恢复。
-    最终失败仍抛出（调用方 settings 页已有捕获弹窗，静默丢配置更危险）。
+    若磁盘版本已被 Telegram/Agent 更新，先做三方合并再重试，避免整份旧快照
+    覆盖远程修改。临时文件名带进程 ID；最终失败仍抛出（静默丢配置更危险）。
     """
     data = _seal_passwords(cfg)
     CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    global _LAST_LOADED_CFG
+    try:
+        from core.remote_revision import ConfigRevisionConflict, save_cfg
+    except ImportError:
+        _save_atomic(data)
+        _LAST_LOADED_CFG = deepcopy(cfg)
+        return
+    base = _LAST_LOADED_CFG
+    for attempt in range(3):
+        try:
+            save_cfg(CONFIG_PATH, data)
+            _LAST_LOADED_CFG = deepcopy(cfg)
+            return
+        except ConfigRevisionConflict:
+            if base is None:
+                raise
+            with CONFIG_PATH.open("r", encoding="utf-8") as f:
+                disk = json.load(f)
+            merged = _merge_concurrent(base, cfg, disk)
+            if merged is _MISSING:
+                raise
+            _apply_merged_in_place(cfg, merged)
+            base = disk
+            if attempt == 2:
+                raise
+
+
+def _save_atomic(cfg):
     tmp = CONFIG_PATH.with_suffix(".json.tmp-%d" % os.getpid())
     with open(tmp, "w", encoding="utf-8", newline="\n") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+        json.dump(cfg, f, ensure_ascii=False, indent=2)
         f.write("\n")
     for attempt in range(3):
         try:
@@ -511,9 +641,7 @@ def save(cfg: dict):
             return
         except OSError:
             if attempt == 2:
-                try:
-                    os.unlink(tmp)
-                except OSError:
-                    pass
+                try: os.unlink(tmp)
+                except OSError: pass
                 raise
             time.sleep(0.15)

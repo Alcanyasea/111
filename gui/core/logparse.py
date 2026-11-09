@@ -246,7 +246,7 @@ def line_html(line):
 
 
 def to_html(text, max_lines=3000):
-    """日志文本转 HTML（配色同 mockup .log-view），只取最近 max_lines 行。"""
+    """日志文本转 HTML（深色终端配色），只取最近 max_lines 行。"""
     lines = text.splitlines()[-max_lines:]
     return "<br>".join(line_html(line) for line in lines)
 

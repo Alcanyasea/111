@@ -45,20 +45,11 @@ RADIUS_ROW = 8
 # 控件规格：macOS 常规按钮高度 32~36，输入框 30
 BTN_H = 34
 BTN_H_SM = 30
-INPUT_H = 32
 
-# 卡片内边距与卡片间距（8pt 栅格）；PAD_SM 给账号卡等紧凑卡片用
+# 卡片内边距与紧凑纵向间距
 CARD_PAD = 20
 CARD_PAD_SM = 16
-GAP = 16
-
-# 间距标尺（8pt 栅格的半步）：行间距统一从这里取，避免各页自定数字漂移
-SPACE_1 = 4
 SPACE_2 = 8
-SPACE_3 = 12
-SPACE_4 = 16
-SPACE_5 = 20
-SPACE_6 = 24
 
 # 深色日志视图（两种主题下日志都保持深色终端观感）
 LOG_BG = "#14171c"
@@ -68,13 +59,8 @@ LOG_OK = "#aeb6bf"
 LOG_ERR = "#ffffff"
 LOG_HEAD = "#d0d6dd"
 
-# 剩余图标渐变色统一为灰阶（窗口图标用）
+# 窗口图标渐变色（灰阶）
 ACCENT_O1 = ("#3d434b", "#1d2025")
-ACCENT_O2 = ("#4b515a", "#262a30")
-ACCENT_B = ("#5b6470", "#2f343b")
-
-# 取点覆盖层
-OVERLAY_BG = "rgba(9, 11, 15, 0.94)"
 
 # ---- 调色板 ----
 
@@ -163,9 +149,6 @@ _DARK = {
     "SCROLLBAR_HANDLE_HOVER": "rgba(255, 255, 255, 0.38)",
     "SCROLL_HANDLE_COLOR": (255, 255, 255, 62),
 }
-
-# 侧边栏（mockup .sidebar，历史遗留保留）
-SIDEBAR_BG = "#20262e"
 
 # ---- 配色方案（背景色调 × 明暗主题 的二维系统） ----
 #

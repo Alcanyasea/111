@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """MAA 挂机控制台 — 主窗口。
 
-PySide6 + PyQt-Fluent-Widgets 实现的桌面 GUI，设计见 mockup.html。
+PySide6 + PyQt-Fluent-Widgets 实现的桌面 GUI。
 「脚本当引擎，界面当控制台」：master.ps1 / slot_switch.ps1 仍是执行主体，
 计划任务照常直接调用，GUI 关闭不影响 4:00 / 16:00 自动挂机。
 
@@ -744,7 +744,7 @@ class MainWindow(FluentWindow):
 def make_icon():
     """窗口/任务栏图标：gui/app.ico（罗德岛徽记，白底黑三角白棋）。
 
-    图标文件缺失时退回程序绘制的「M」渐变徽标（同 mockup .logo-badge）。
+    图标文件缺失时退回程序绘制的「M」渐变徽标。
     """
     ico = os.path.join(os.path.dirname(os.path.abspath(__file__)), "app.ico")
     if os.path.exists(ico):

@@ -21,7 +21,7 @@ sys.path.insert(0, str(ROOT / "gui"))
 from PySide6.QtGui import QColor  # noqa: E402
 from PySide6.QtWidgets import QApplication, QLabel, QLineEdit  # noqa: E402
 
-from tests.test_support import appconfig  # noqa: E402
+import tests.test_support  # noqa: E402,F401  隔离 config 导入时的真实目录探测
 import theme  # noqa: E402
 from pages.dashboard import (AccountCard as DashAccountCard,  # noqa: E402
                              CollectScheduleCard, LastRunStrip, ScheduleCard)

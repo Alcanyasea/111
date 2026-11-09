@@ -1,0 +1,175 @@
+import hashlib
+import hmac
+import json
+import secrets
+import threading
+import time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+
+from .protocol import ProtocolError, command_payload
+
+MAX_BODY_BYTES = 256 * 1024
+
+
+class Auth:
+    def __init__(self, password):
+        self._salt = secrets.token_bytes(16)
+        self._password_hash = hashlib.scrypt(password.encode(), salt=self._salt, n=2**14, r=8, p=1)
+        self._sessions = {}
+
+    def verify_password(self, password):
+        return hmac.compare_digest(self._password_hash, hashlib.scrypt(password.encode(), salt=self._salt, n=2**14, r=8, p=1))
+
+    def issue_session(self, ttl=86400):
+        token = secrets.token_urlsafe(32); self._sessions[token] = int(time.time()) + ttl; return token
+
+    def verify_session(self, token):
+        expiry = self._sessions.get(token)
+        if not expiry or expiry < int(time.time()):
+            self._sessions.pop(token, None); return False
+        return True
+
+
+class ControlHTTPServer(ThreadingHTTPServer):
+    daemon_threads = True
+
+    def __init__(self, store, auth, bind="127.0.0.1", port=8765, max_concurrency=8):
+        self.store, self.auth = store, auth
+        self._slots = threading.BoundedSemaphore(max(1, int(max_concurrency)))
+        super().__init__((bind, port), self._handler())
+
+    def process_request(self, request, client_address):
+        # ThreadingHTTPServer is unbounded by default; a burst of scrypt login
+        # attempts could otherwise exhaust a 1 GB host.
+        if not self._slots.acquire(blocking=False):
+            try:
+                request.sendall(b"HTTP/1.1 503 Service Unavailable\r\n"
+                                b"Content-Type: application/json\r\n"
+                                b"Content-Length: 16\r\nConnection: close\r\n\r\n"
+                                b'{"error":"busy"}')
+            except OSError:
+                pass
+            finally:
+                request.close()
+            return
+        try:
+            super().process_request(request, client_address)
+        except BaseException:
+            self._slots.release()
+            raise
+
+    def process_request_thread(self, request, client_address):
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self._slots.release()
+
+    def _handler(self):
+        parent = self
+        class Handler(BaseHTTPRequestHandler):
+            server_version = "MAARemote/1"
+
+            def log_message(self, *_):
+                return
+
+            def _json(self, status, payload):
+                data = json.dumps(payload, ensure_ascii=False).encode()
+                self.send_response(status); self.send_header("Content-Type", "application/json; charset=utf-8"); self.send_header("Content-Length", str(len(data))); self.end_headers(); self.wfile.write(data)
+
+            def _empty(self, status):
+                self.send_response(status); self.send_header("Content-Length", "0"); self.end_headers()
+
+            def _body(self):
+                try:
+                    length = int(self.headers.get("Content-Length", "0"))
+                except (TypeError, ValueError):
+                    raise ValueError("invalid content length")
+                if length < 0 or length > MAX_BODY_BYTES:
+                    raise ValueError("request body too large")
+                data = self.rfile.read(length)
+                if len(data) != length:
+                    raise ValueError("incomplete request body")
+                return json.loads(data or b"{}")
+
+            def _token(self):
+                value = self.headers.get("Authorization", "")
+                return value[7:] if value.startswith("Bearer ") else ""
+
+            def _admin(self):
+                return parent.auth.verify_session(self._token())
+
+            def _agent(self, device_id):
+                device = parent.store.get_device(device_id)
+                token_hash = hashlib.sha256(self._token().encode("utf-8")).hexdigest()
+                return bool(device and not device["revoked"] and hmac.compare_digest(device["token_hash"], token_hash))
+
+            def do_GET(self):
+                if self.path == "/api/v1/health": return self._json(200, {"ok": True})
+                if self.path in {"/", "/index.html", "/app.js", "/styles.css"}:
+                    name = "index.html" if self.path in {"/", "/index.html"} else self.path.lstrip("/")
+                    html = (Path(__file__).parent / "web" / name).read_bytes()
+                    content_type = "text/html; charset=utf-8" if name.endswith("html") else ("application/javascript" if name.endswith("js") else "text/css")
+                    self.send_response(200); self.send_header("Content-Type", content_type); self.send_header("Content-Length", str(len(html))); self.end_headers(); self.wfile.write(html); return
+                parts = self.path.strip("/").split("/")
+                if self.path == "/api/v1/devices":
+                    if not self._admin(): return self._json(401, {"error": "unauthorized"})
+                    return self._json(200, {"devices": parent.store.list_devices()})
+                if len(parts) == 5 and parts[:3] == ["api", "v1", "devices"] and parts[4] == "snapshot":
+                    if not self._admin(): return self._json(401, {"error": "unauthorized"})
+                    return self._json(200, parent.store.get_snapshot(parts[3]) or {})
+                if len(parts) == 6 and parts[:4] == ["api", "v1", "devices", parts[3]] and parts[4:] == ["commands", "next"]:
+                    device_id = parts[3]
+                    if not self._agent(device_id): return self._json(401, {"error": "unauthorized"})
+                    item = parent.store.claim_command(device_id)
+                    return self._json(200, item) if item else self._empty(204)
+                return self._json(404, {"error": "not_found"})
+
+            def do_POST(self):
+                try: body = self._body()
+                except (ValueError, json.JSONDecodeError): return self._json(400, {"error": "invalid_json"})
+                if self.path == "/api/v1/session":
+                    if parent.auth.verify_password(str(body.get("password", ""))): return self._json(200, {"token": parent.auth.issue_session()})
+                    return self._json(401, {"error": "invalid_credentials"})
+                parts = self.path.strip("/").split("/")
+                if self.path == "/api/v1/pair":
+                    if not self._admin(): return self._json(401, {"error": "unauthorized"})
+                    device_id = str(body.get("device_id", "")).strip()
+                    name = str(body.get("name", device_id)).strip()
+                    if not device_id or len(device_id) > 80: return self._json(400, {"error": "invalid_device"})
+                    agent_token = secrets.token_urlsafe(32)
+                    parent.store.create_device(device_id, name, agent_token)
+                    return self._json(201, {"device_id": device_id, "agent_token": agent_token})
+                if len(parts) == 5 and parts[:3] == ["api", "v1", "devices"] and parts[4] == "revoke":
+                    if not self._admin(): return self._json(401, {"error": "unauthorized"})
+                    device = parent.store.get_device(parts[3])
+                    if not device: return self._json(404, {"error": "device_not_found"})
+                    parent.store.revoke_device(parts[3])
+                    parent.store.audit(parts[3], "device_revoked")
+                    return self._json(200, {"ok": True})
+                if len(parts) == 5 and parts[:3] == ["api", "v1", "devices"] and parts[4] == "register":
+                    if not self._agent(parts[3]): return self._json(401, {"error": "unauthorized"})
+                    from .protocol import redact_status
+                    parent.store.save_snapshot(parts[3], redact_status(body)); return self._json(200, {"ok": True})
+                if len(parts) == 6 and parts[:3] == ["api", "v1", "devices"] and parts[4] == "commands" and parts[5] == "result":
+                    device_id = parts[3]
+                    if not self._agent(device_id): return self._json(401, {"error": "unauthorized"})
+                    from .protocol import redact_status
+                    state = body.get("state", "failed")
+                    if state not in {"succeeded", "failed", "cancelled"}: return self._json(400, {"error": "invalid_state"})
+                    ok = parent.store.finish_command(body.get("command_id", ""), body.get("lease", ""), state, redact_status(body.get("result", {})), device_id=device_id)
+                    return self._json(200 if ok else 409, {"ok": ok})
+                if len(parts) == 5 and parts[:3] == ["api", "v1", "devices"] and parts[4] == "commands":
+                    if not self._admin(): return self._json(401, {"error": "unauthorized"})
+                    device_id = parts[3]
+                    device = parent.store.get_device(device_id)
+                    if not device: return self._json(404, {"error": "device_not_found"})
+                    if device["revoked"]: return self._json(409, {"error": "device_revoked"})
+                    try:
+                        payload = command_payload(body["kind"], body.get("args", {}), body["idempotency_key"], int(body["expires_at"]))
+                    except (KeyError, ValueError, ProtocolError) as exc:
+                        return self._json(400, {"error": str(exc)})
+                    row = parent.store.enqueue_command(device_id, payload, payload["idempotency_key"], payload["expires_at"])
+                    return self._json(202, {"command_id": row["id"]})
+                return self._json(404, {"error": "not_found"})
+        return Handler

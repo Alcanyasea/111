@@ -4,6 +4,7 @@ import json
 import sys
 import tempfile
 import unittest
+from copy import deepcopy
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -36,6 +37,82 @@ class ConfigSaveLoadTest(unittest.TestCase):
         self.assertEqual(appconfig.load(), cfg)
         residue = [p.name for p in self.root.iterdir() if ".tmp" in p.name]
         self.assertEqual(residue, [])
+
+    def _seed_accounts(self):
+        cfg = appconfig.load()
+        cfg["accounts"] = [
+            {"id": "a", "label": "A", "password": "pa", "slot": "slot-a"},
+            {"id": "b", "label": "B", "password": "pb", "slot": "slot-b"},
+        ]
+        cfg["schedule"] = {"times": [{"time": "04:00"}], "collect_times": []}
+        appconfig.save(cfg)
+        return appconfig.load()
+
+    def test_save_rebases_gui_change_on_newer_telegram_config(self):
+        cfg = self._seed_accounts()
+        cfg["appearance"]["theme"] = "dark"
+        remote = deepcopy(cfg)
+        remote["accounts"][0]["base_schedule"] = {"enabled": True}
+        from gui.core.remote_revision import save_cfg
+        save_cfg(appconfig.CONFIG_PATH, remote)
+        appconfig.save(cfg)
+        merged = appconfig.load()
+        self.assertEqual(merged["appearance"]["theme"], "dark")
+        self.assertTrue(merged["accounts"][0]["base_schedule"]["enabled"])
+        self.assertEqual(merged["accounts"][0]["password"], "pa")
+
+    def test_local_account_delete_does_not_write_null_or_resurrect(self):
+        cfg = self._seed_accounts()
+        remote = deepcopy(cfg)
+        remote["accounts"][1]["label"] = "B remote"
+        from gui.core.remote_revision import save_cfg
+        save_cfg(appconfig.CONFIG_PATH, remote)
+        cfg["accounts"] = [cfg["accounts"][1]]  # local deletes A
+        appconfig.save(cfg)
+        data = json.loads(appconfig.CONFIG_PATH.read_text(encoding="utf-8"))
+        self.assertEqual([a["id"] for a in data["accounts"]], ["b"])
+        self.assertEqual(data["accounts"][0]["label"], "B remote")
+        self.assertTrue(all(isinstance(a, dict) for a in data["accounts"]))
+
+    def test_remote_account_delete_beats_local_edit(self):
+        cfg = self._seed_accounts()
+        remote = deepcopy(cfg)
+        remote["accounts"] = [remote["accounts"][1]]  # remote deletes A
+        from gui.core.remote_revision import save_cfg
+        save_cfg(appconfig.CONFIG_PATH, remote)
+        cfg["accounts"][0]["label"] = "A local edit"
+        cfg["accounts"][1]["label"] = "B local edit"
+        appconfig.save(cfg)
+        data = json.loads(appconfig.CONFIG_PATH.read_text(encoding="utf-8"))
+        self.assertEqual([a["id"] for a in data["accounts"]], ["b"])
+        self.assertEqual(data["accounts"][0]["label"], "B local edit")
+
+    def test_remote_delete_wins_even_when_same_account_was_edited(self):
+        cfg = self._seed_accounts()
+        remote = deepcopy(cfg)
+        remote["accounts"] = [remote["accounts"][1]]
+        from gui.core.remote_revision import save_cfg
+        save_cfg(appconfig.CONFIG_PATH, remote)
+        cfg["accounts"][0]["label"] = "A changed locally"
+        appconfig.save(cfg)
+        data = json.loads(appconfig.CONFIG_PATH.read_text(encoding="utf-8"))
+        self.assertEqual([a["id"] for a in data["accounts"]], ["b"])
+
+    def test_merge_handles_both_sides_deleting_same_field(self):
+        merged = appconfig._merge_concurrent({"a": 1, "b": 2}, {"b": 3}, {"b": 2})
+        self.assertEqual(merged, {"b": 3})
+
+    def test_merge_keeps_live_account_object_identity(self):
+        cfg = self._seed_accounts()
+        account = cfg["accounts"][0]
+        remote = deepcopy(cfg)
+        remote["accounts"][0]["label"] = "A remote"
+        from gui.core.remote_revision import save_cfg
+        save_cfg(appconfig.CONFIG_PATH, remote)
+        cfg["appearance"]["theme"] = "dark"
+        appconfig.save(cfg)
+        self.assertIs(cfg["accounts"][0], account)
+        self.assertEqual(account["label"], "A remote")
 
     def test_corrupt_file_backed_up(self):
         appconfig.CONFIG_PATH.write_text("{corrupt!!", encoding="utf-8")

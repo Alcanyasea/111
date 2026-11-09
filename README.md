@@ -98,6 +98,12 @@ Windows 计划任务和 MAA 内保存的完成回调属于外部配置：项目�
 
 ## GUI 控制台
 
+### 手机远程控制（可选）
+
+仓库现在提供轻量的服务器控制平面与 Windows 本地 Agent：服务器只保存命令和脱敏状态，MuMu/MAA、账号密码和槽位数据仍在本机执行。部署说明见 [`docs/remote-control.md`](docs/remote-control.md)；示例服务文件位于 `remote_control/`。首次配对以本地配置为准，手机端不能录入密码或登录 token。
+
+如果只需要远程管理精确基建人员方案，使用 Telegram 方案：见 [`docs/telegram-base-schedule.md`](docs/telegram-base-schedule.md)。它只接受基建 JSON，另一位用户只能管理绑定账号，上传后由所有者发布。
+
 **打开方式（任选）**：
 - 桌面快捷方式「MAA 挂机控制台」（已创建，带图标）
 - 双击 `D:\1\启动控制台.bat`
@@ -283,7 +289,6 @@ D:\1\
 │   ├── theme.py / widgets.py      # 调色板与通用组件（状态徽章/卡片等）
 │   ├── core\                      # adb / 运行控制 / 日志解析 / 计划任务 / 通知
 │   ├── pages\                     # 仪表盘 / 账号管理 / 运行设置 / 运行历史 / 日志
-│   ├── mockup.html                # 界面设计草图（浏览器打开预览）
 │   └── requirements.txt           # PySide6 + PySide6-Fluent-Widgets
 ├── 软件\
 │   ├── MAA\                       # 官服 MAA（Official 客户端）
