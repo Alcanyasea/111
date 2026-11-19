@@ -30,6 +30,7 @@ $runStamp = '20261103_040000'
 $script:ranMaa = $false
 $script:refreshed = $false
 function Run-Switch { return 0 }
+function Stop-StaleMaa { }
 function Refresh-SlotData { $script:refreshed = $true; return $true }
 function Invoke-Plugin { return $true }
 function Run-MAA { $script:ranMaa = $true; return $true }
@@ -114,16 +115,56 @@ $result = Invoke-AccountRun $acc 1 $false
         self.assertTrue(r["switched"])
         self.assertTrue(r["result"]["OK"])
 
-    def test_refresh_failure_marks_account_failed(self):
+    def test_refresh_failure_preserves_completed_task(self):
         r = self.run_case(r'''
 function Refresh-SlotData { return $false }
 $result = Invoke-AccountRun $acc 1 $false
 @{result=$result; ranMaa=$script:ranMaa} | ConvertTo-Json -Depth 5
 ''')
         self.assertTrue(r["ranMaa"])
-        self.assertFalse(r["result"]["OK"])
-        self.assertEqual(r["result"]["Step"], "槽位回拉")
-        self.assertEqual(r["result"]["Reason"], "槽位回拉失败")
+        self.assertTrue(r["result"]["OK"])
+        self.assertEqual(r["result"]["Status"], "warning")
+        self.assertFalse(r["result"]["RetryAllowed"])
+        self.assertIn("槽位回拉", r["result"]["Warning"])
+
+    def test_refresh_exception_does_not_undo_completed_task(self):
+        r = self.run_case(r'''
+function Refresh-SlotData { throw 'device disconnected' }
+Invoke-AccountRun $acc 1 $false | ConvertTo-Json
+''')
+        self.assertTrue(r['OK'])
+        self.assertEqual(r['Status'], 'warning')
+
+    def test_unreadable_completion_is_unknown_and_not_retried(self):
+        r = self.run_case(r'''
+function Run-MAA { $script:LastMaaStatus = 'log-error'; return $false }
+Invoke-AccountRun $acc 1 $false | ConvertTo-Json
+''')
+        self.assertFalse(r['OK'])
+        self.assertEqual(r['Status'], 'unknown')
+        self.assertFalse(r['RetryAllowed'])
+
+    def test_restore_failure_is_visible_without_repeating_tasks(self):
+        r = self.run_case(r'''
+$accountTasksPy = 'tasks.py'
+function Invoke-Plugin {
+    param($pyPath, $tag, $name, $argList)
+    return ($argList[0] -ne 'restore')
+}
+Invoke-AccountRun $acc 1 $false | ConvertTo-Json
+''')
+        self.assertTrue(r['OK'])
+        self.assertEqual(r['Status'], 'warning')
+        self.assertIn('恢复', r['Warning'])
+
+    def test_reopened_maa_is_closed_before_switching(self):
+        r = self.run_case(r'''
+$script:open = $true
+function Stop-StaleMaa { $script:open = $false }
+function Run-Switch { if ($script:open) { return 1 }; return 0 }
+Invoke-AccountRun $acc 1 $false | ConvertTo-Json
+''')
+        self.assertTrue(r['OK'])
 
 
 class OptimizationRegressionTest(unittest.TestCase):

@@ -12,9 +12,10 @@ from PySide6.QtGui import QTextCursor
 from PySide6.QtWidgets import QHBoxLayout, QVBoxLayout, QWidget
 
 from qfluentwidgets import (BodyLabel, InfoBar, InfoBarPosition, LineEdit,
-                            MessageBox, PushButton, SwitchButton, TextEdit)
+                            PushButton, SwitchButton, TextEdit)
 
 import theme
+from sheets import MessageBox
 from core import logparse, runner
 from widgets import set_switch_checked_gray, style_button
 

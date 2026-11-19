@@ -47,9 +47,10 @@ function Save-FailureEvidence($Slot, $Server, $Step) {
     }
 }
 
-function New-AccountResult($Account, $Timer, [bool]$OK, [string]$Step = '', [string]$Reason = '', [bool]$Retried = $false) {
+function New-AccountResult($Account, $Timer, [bool]$OK, [string]$Step = '', [string]$Reason = '', [bool]$Retried = $false,
+    [string]$Warning = '', [switch]$Unknown) {
     $minutes = [math]::Round($Timer.Elapsed.TotalMinutes, 3)
-    if (-not $OK) {
+    if (-not $OK -or $Warning) {
         # 失败现场归档：debug 目录下一轮开头就清空，不在这里留一份就永远丢了。
         # 槽位/服务器由 Invoke-AccountRun 开头写入（失败分支有 6 处，不逐个传参）
         Save-FailureEvidence $script:EvidenceSlot $script:EvidenceServer $Step
@@ -57,6 +58,21 @@ function New-AccountResult($Account, $Timer, [bool]$OK, [string]$Step = '', [str
     return [pscustomobject]@{
         Account = $Account; OK = $OK; Duration = "$minutes min"; Minutes = $minutes
         Reason = $Reason; Step = $Step; Retried = $Retried
+        Status = $(if ($Unknown) { 'unknown' } elseif (-not $OK) { 'failed' } elseif ($Warning) { 'warning' } else { 'success' })
+        Warning = $Warning; RetryAllowed = (-not $OK -and -not $Unknown)
+    }
+}
+
+# 日报是只读旁路：采集失败不覆盖游戏任务的状态，也不能阻止下一账号。
+# 参数始终按数组传递，账号 ID / 路径含空格时不经 shell 再次拆分。
+function Invoke-CombatReport($Action, $AccountId, $Server, $AttemptId) {
+    if (-not $combatReportPy -or -not $AttemptId) { return }
+    try {
+        [void](Invoke-Plugin $combatReportPy '作战日报' '作战日报' (
+            @($Action, '--config', $configPath, '--account', $AccountId,
+              '--server', $Server, '--run-id', $AttemptId)) '本次日报数据不可用，挂机流程继续')
+    } catch {
+        Log ('  [WARN] 作战日报数据不可用：' + $_.Exception.Message)
     }
 }
 
@@ -71,19 +87,25 @@ function Invoke-AccountRun($acc, $idx, $IsRetry) {
     Log ' '
     Log ('********** [{0}/{1}] {2}{3} **********' -f $idx, $total, $label, $retryMark)
     $timer = [Diagnostics.Stopwatch]::StartNew()
-    if ($null -ne $acc.enabled -and -not $acc.enabled -and -not $SwitchTo) {
+    if ($null -ne $acc.enabled -and -not $acc.enabled -and -not $SwitchTo -and -not $AccountId) {
         Log '  [SKIP] disabled in config.json'
         return [pscustomobject]@{ Account=$label; OK=$true; Duration='skip'; Minutes=$null; Reason=''; Step=''; Retried=$false }
     }
-    $step = '切号'
+    $step = 'MAA 环境准备'
+    $warnings = [Collections.Generic.List[string]]::new()
     try {
+        # 用户可能在上一账号结束后又打开 MAA；每个账号开始前重新接管。
+        foreach ($maaDir in @($maaOfficialDir, $maaBilibiliDir) | Select-Object -Unique) {
+            Stop-StaleMaa $maaDir
+        }
+        $step = '切号'
         if ($slot -and (Test-Path -LiteralPath (Join-Path $scriptDir "accounts\$slot"))) {
             $code = Run-Switch 'slot_switch.ps1' @('-Server', $server, '-Slot', $slot)
-        } elseif ($server -eq 'bilibili') {
+        } elseif ($server -eq 'bilibili' -and -not $AccountId) {
             Log '  [WARN] B服无槽位，切换客户端后仍需登录校验'
             $code = Run-Switch 'switch_to_B服.ps1'
         } else {
-            Log '  [ERROR] 官服槽位缺失，请重新捕获该账号'
+            Log '  [ERROR] 登录槽位缺失，请重新捕获该账号'
             $code = 1
         }
         if ($code -ne 0) { return New-AccountResult $label $timer $false $step '切号失败' $IsRetry }
@@ -100,12 +122,11 @@ function Invoke-AccountRun($acc, $idx, $IsRetry) {
         }
         if ($code -ne 0) { return New-AccountResult $label $timer $false $step '登录校验失败' $IsRetry }
         if ($SwitchTo) {
-            $refreshOk = [bool](Refresh-SlotData $server $slot)
-            if (-not $refreshOk) {
-                return New-AccountResult $label $timer $false '槽位回拉' '槽位回拉失败' $IsRetry
-            }
+            try { $refreshOk = [bool](Refresh-SlotData $server $slot) }
+            catch { $refreshOk = $false }
+            $warning = if ($refreshOk) { '' } else { '切号已完成，但槽位回拉失败，保留原登录数据' }
             Log ('  [OK] 已切换到「' + $label + '」，模拟器保持运行（不跑日常）')
-            return New-AccountResult $label $timer $true
+            return New-AccountResult $label $timer $true -Warning $warning
         }
         if (-not $SkipMAA) {
             $step = '任务配置'
@@ -118,6 +139,11 @@ function Invoke-AccountRun($acc, $idx, $IsRetry) {
             if ($InfrastCollect) {
                 $stages += @{Path=$infrastCollectPy; Name='基建收菜'; Args=$pluginArgs}
             } else {
+                if ($accountTasksPy) {
+                    $stages += @{Path=$accountTasksPy; Name='账号任务预检'; Args=(
+                        @('preflight', '--config', $configPath, '--account', [string]$acc.id,
+                          '--server', $server))}
+                }
                 $stages += @{Path=$farmGuardPy; Name='任务开关自检'; Args=$pluginArgs}
                 $plan = $acc.PSObject.Properties['second_fight_plan']
                 $hasPlan = ($null -ne $plan -and $null -ne $plan.Value -and @($plan.Value).Count -gt 0)
@@ -127,9 +153,18 @@ function Invoke-AccountRun($acc, $idx, $IsRetry) {
                 # 关闭插件时的恢复配置也必须成功，防上一账号的精确排班残留。
                 $stages += @{Path=$baseSchedulePy; Name='基建插件'; Args=($pluginArgs + @('--batch', $bsBatch))}
                 $stages += @{Path=$fiammettaPy; Name='菲亚梅塔'; Args=$pluginArgs}
+                # 最后叠加本账号库存/培养方案：复制的是已应用本账号基建与关卡的
+                # Default，而不是前一号托管方案。关闭时同样调用，清除托管残留。
+                if ($accountTasksPy) {
+                    $stages += @{Path=$accountTasksPy; Name='账号任务'; Args=$pluginArgs}
+                }
             }
             foreach ($stage in $stages) {
                 $step = $stage.Name
+                # 与启动时同样的退出等待，避免配置阶段再次打开 MAA 后直接失败。
+                foreach ($maaDir in @($maaOfficialDir, $maaBilibiliDir) | Select-Object -Unique) {
+                    Stop-StaleMaa $maaDir
+                }
                 $script:LastPluginError = ''
                 if (-not (Invoke-Plugin $stage.Path $step $step $stage.Args '本账号停止运行')) {
                     $reason = "$step`失败"
@@ -140,12 +175,37 @@ function Invoke-AccountRun($acc, $idx, $IsRetry) {
             $step = 'MAA 运行'
             $exe = if ($server -eq 'bilibili') { $maaBilibili } else { $maaOfficial }
             $dir = if ($server -eq 'bilibili') { $maaBilibiliDir } else { $maaOfficialDir }
-            $ok = Run-MAA $exe $dir $label
+            $reportAttempt = ''
+            if (-not $InfrastCollect -and $combatReportPy) {
+                # 每次实际尝试独立，包括失败后的重试；同一次 collect 可幂等重做。
+                $reportAttempt = [string]$runStamp + '-' + [guid]::NewGuid().ToString('N')
+                Invoke-CombatReport 'boundary' ([string]$acc.id) $server $reportAttempt
+            }
+            try {
+                $script:LastMaaCleanupWarning = ''
+                $ok = Run-MAA $exe $dir $label
+                if ($script:LastMaaCleanupWarning) { $warnings.Add($script:LastMaaCleanupWarning) }
+            } finally {
+                if ($reportAttempt) {
+                    Invoke-CombatReport 'collect' ([string]$acc.id) $server $reportAttempt
+                }
+                if (-not $InfrastCollect -and $accountTasksPy) {
+                    try {
+                        if (-not (Invoke-Plugin $accountTasksPy '账号任务' '账号任务恢复' @('restore', '--config', $configPath, '--server', $server) '下次账号运行前会强制恢复')) {
+                            $warnings.Add(('账号任务方案恢复失败，下次运行前会重新检查。' + $script:LastPluginError).TrimEnd('。'))
+                        }
+                    } catch {
+                        $warnings.Add('账号任务方案恢复异常：' + $_.Exception.Message)
+                        Log ('  [WARN] 账号任务方案恢复失败：' + $_.Exception.Message)
+                    }
+                }
+            }
             $reason = ''
             if (-not $ok) {
                 $reason = switch ($script:LastMaaStatus) {
                     'stall' { 'MAA 无进展超时' }
                     'dead' { 'MAA 中途退出' }
+                    'interrupted' { 'MAA 进程中断，已执行部分任务，结果待确认' }
                     'dead-early' { 'MAA 启动即崩溃（已自动重试一次）' }
                     'launch-error' { 'MAA 启动或监测失败' }
                     'log-error' { 'MAA 完成后日志不可读，无法确认结果' }
@@ -159,15 +219,16 @@ function Invoke-AccountRun($acc, $idx, $IsRetry) {
             $reason = ''
         }
         # 必须等设备快照回拉完成才允许下一号改写设备；不再并行争用同一模拟器。
-        $refreshOk = [bool](Refresh-SlotData $server $slot)
-        if (-not $refreshOk -and $ok) {
-            $ok = $false
-            $reason = '槽位回拉失败'
-            $failedStep = '槽位回拉'
-        } else {
-            $failedStep = if ($ok) { '' } else { 'MAA 运行' }
+        try { $refreshOk = [bool](Refresh-SlotData $server $slot) }
+        catch { $refreshOk = $false }
+        if (-not $refreshOk) {
+            $warnings.Add('槽位回拉失败，保留原登录数据；不重复执行游戏任务')
         }
-        return New-AccountResult $label $timer $ok $failedStep $reason $IsRetry
+        $failedStep = if ($ok) { '' } else { 'MAA 运行' }
+        $unknown = (-not $ok -and $script:LastMaaStatus -in @('log-error', 'interrupted'))
+        $warning = $warnings -join '；'
+        if ($warning) { Log ('  [WARN] 收尾异常：' + $warning) }
+        return New-AccountResult $label $timer $ok $failedStep $reason $IsRetry -Warning $warning -Unknown:$unknown
     } catch {
         Log ('  [ERROR] ' + $step + '异常: ' + $_.Exception.Message)
         return New-AccountResult $label $timer $false $step ($step + '异常：' + $_.Exception.Message) $IsRetry

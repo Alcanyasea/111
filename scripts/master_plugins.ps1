@@ -8,8 +8,13 @@
 function Invoke-Plugin($pyPath, $tag, $name, $argList, $missNote) {
     # 插件自报的 ERROR 明细（如「任务队列缺少 Fight」）存这里，供失败通知引用
     $script:LastPluginError = ""
-    if (-not (Test-Path $venvPython) -or -not (Test-Path $pyPath)) {
-        Log ("  [WARN] " + $name + "不可用（venv python 或脚本缺失），" + $missNote)
+    if (-not $venvPython -or -not (Test-Path -LiteralPath $venvPython -PathType Leaf)) {
+        $script:LastPluginError = "插件 Python 不存在：$venvPython"
+    } elseif (-not $pyPath -or -not (Test-Path -LiteralPath $pyPath -PathType Leaf)) {
+        $script:LastPluginError = "插件脚本不存在：$pyPath"
+    }
+    if ($script:LastPluginError) {
+        Log ("  [WARN] " + $script:LastPluginError + "，" + $missNote)
         return $false
     }
     # 插件输出统一 UTF-8：控制台代码页为 cp1252 等编不了中文的环境下，插件
@@ -31,14 +36,19 @@ function Invoke-Plugin($pyPath, $tag, $name, $argList, $missNote) {
         [Console]::OutputEncoding = $oldConsoleEnc
         $env:PYTHONIOENCODING = $oldPythonEncoding
     }
+    $exceptionLine = ''
     foreach ($l in $out) {
         $line = [string]$l
         if ($line) {
-            if ($line -match '^ERROR\s+(.+)$') { $script:LastPluginError = $Matches[1] }
+            if ($line -match '^ERROR(?:\s*[:：]\s*|\s+)(.+)$') { $script:LastPluginError = $Matches[1] }
+            elseif ($line -cmatch '^(?:[\w.]+(?:Error|Exception)|Exception):\s+.+$') { $exceptionLine = $line }
             Log ("  [" + $tag + "] " + $line)
         }
     }
     if ($pluginExitCode -ne 0) {
+        if (-not $script:LastPluginError) {
+            $script:LastPluginError = if ($exceptionLine) { $exceptionLine } else { "插件退出码 $pluginExitCode，详见运行日志" }
+        }
         Log ("  [WARN] " + $name + "执行失败（exit " + $pluginExitCode + "），" + $missNote)
         return $false
     }

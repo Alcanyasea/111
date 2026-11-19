@@ -132,10 +132,10 @@ def clear_stale_lock():
     return pid
 
 
-def _launch_master(cfg, extra_args):
+def _launch_master(cfg, extra_args, script_name="master.ps1"):
     """启动 master.ps1 的 GUI 侧公共路径：extra_args 为运行模式参数。"""
     global _proc_ref
-    master = Path(cfg["paths"]["script_dir"]) / "master.ps1"
+    master = Path(cfg["paths"]["script_dir"]) / script_name
     args = [
         pwsh_exe(), "-NoProfile", "-ExecutionPolicy", "Bypass",
         "-File", str(master),
@@ -172,6 +172,19 @@ def start_collect(cfg):
     贸易站，master.ps1 负责备份并在结束恢复 MAA 配置。
     """
     return _launch_master(cfg, ["-InfrastCollect", "-NoShutdown"])
+
+
+def start_account(cfg, account_id, *, collect=False):
+    """手动执行一张账号卡片的任务，缺少单号入口时禁止回退到整轮。"""
+    if not account_id or not account_id.strip():
+        raise ValueError("缺少账号 ID")
+    script_name = "run_account.ps1"
+    if not (Path(cfg["paths"]["script_dir"]) / script_name).is_file():
+        raise FileNotFoundError("脚本目录缺少 run_account.ps1，请同步更新控制台和脚本")
+    args = ["-AccountId", account_id]
+    if collect:
+        args.append("-InfrastCollect")
+    return _launch_master(cfg, args, script_name)
 
 
 def start_switch(cfg, slot):

@@ -205,6 +205,13 @@ def _render_schedule_body(bs):
         lines.extend(_dorm_lines(b["dormitory"]))
         lines.append("办公室：%s" % _ops_text(b["office"]))
         lines.append("加工站：%s" % _ops_text(b["processing"]))
+        lines.append("回收站：%s" % ("保持原派驻" if b.get("recycle_skip") else _ops_text(b.get("recycle", []))))
+        training = b.get("training") or {}
+        if b.get("training_skip"):
+            lines.append("训练室：保持原派驻（候选暂不执行）")
+        lines.append("训练室协助者候选：%s" % _ops_text(training.get("operatorsA", [])))
+        lines.append("训练位候选：%s" % _ops_text(training.get("operatorsB", [])))
+        lines.append("继续专精（消耗材料）：%s" % ("开启" if b.get("continue_training") else "关闭"))
         fia = b.get("fiammetta") or {}
         if fia.get("enable") and fia.get("target"):
             lines.append("菲亚梅塔：换班前恢复「%s」" % fia["target"])
@@ -360,6 +367,10 @@ def _batch_room_units(batch):
         units.append(("宿舍%d" % i, _ops_text(row)))
     units.append((ROOM_NAMES["office"], _ops_text(batch["office"])))
     units.append((ROOM_NAMES["processing"], _ops_text(batch["processing"])))
+    units.append(("回收站", _ops_text(batch.get("recycle", []))))
+    for role, label in (("operatorsA", "训练室协助者"), ("operatorsB", "训练位")):
+        units.append((label, _ops_text((batch.get("training") or {}).get(role, []))))
+    units.append(("继续专精", "开启（消耗材料）" if batch.get("continue_training") else "关闭"))
     fia = batch.get("fiammetta") or {}
     units.append(("菲亚梅塔", ("恢复「%s」" % fia["target"]) if fia.get("enable") and fia.get("target") else "未启用"))
     return units

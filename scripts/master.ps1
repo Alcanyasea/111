@@ -3,14 +3,23 @@
 # -NoShutdown：手动操作不关机；定时任务按班次设置决定。
 # -SkipMAA：只验证切号/登录，保留模拟器。
 # -InfrastCollect：全部启用账号只跑收菜，使用独立方案，结束恢复 Default。
+# -AccountId <id>：手动只跑该号的日常或收菜，忽略自动班次名单，不关机。
 # -SwitchTo <slot>：只切号与登录验证；忽略停用和班次筛选，不跑任务、不关机。
 # -SwitchTo <slot> -NoLoginCheck：快速启动，不做更新/登录检查和槽位回拉。
 # 账号流程由 master_pipeline.ps1 负责；设备回拉与下一号切换严格串行。
 # MAA 生命周期在 master_maa.ps1；历史 JSON 和 GUI 日志协议保持兼容。
 param([switch]$NoShutdown, [switch]$SkipMAA, [switch]$InfrastCollect,
-    [string]$SwitchTo = "", [switch]$NoLoginCheck)
+    [string]$SwitchTo = "", [switch]$NoLoginCheck, [ValidateNotNullOrEmpty()][string]$AccountId)
 $ErrorActionPreference = "Continue"
 $ProgressPreference = "SilentlyContinue"
+
+if ($PSBoundParameters.ContainsKey('AccountId')) {
+    if ([string]::IsNullOrWhiteSpace($AccountId) -or $SwitchTo -or $NoLoginCheck -or $SkipMAA) {
+        Write-Error '单账号任务需要有效的账号 ID，仅支持日常运行或基建收菜。'
+        exit 1
+    }
+    $NoShutdown = $true
+}
 
 # 一次跳过必须在 master_lib 之前：不拿运行锁，不碰配置/日志/模拟器，也不关机。
 # 保留到下一班的边界，避免任务计划程序重复触发；过期文件不会影响后续班次。
@@ -57,6 +66,24 @@ if (-not $accountList -or $accountList.Count -eq 0) {
     Log "FATAL: 请在控制台「账号管理」页配置账号后重试"
     Release-Lock
     exit 1
+}
+
+if ($AccountId) {
+    $target = @($accountList | Where-Object { [string]$_.id -ceq $AccountId })
+    if ($target.Count -ne 1) {
+        Log "FATAL: 指定账号 ID '$AccountId' 不存在或不唯一，无法启动单账号任务"
+        Release-Lock
+        exit 1
+    }
+    $slot = [string]$target[0].slot
+    $owners = @($accountList | Where-Object { [string]$_.slot -eq $slot })
+    if ([string]::IsNullOrWhiteSpace($slot) -or $owners.Count -ne 1 -or
+        -not (Test-Path -LiteralPath (Join-Path $scriptDir "accounts\$slot") -PathType Container)) {
+        Log "FATAL: 指定账号的登录槽位缺失或不唯一，请在账号管理中重新捕获"
+        Release-Lock
+        exit 1
+    }
+    $accountList = $target
 }
 
 # ---- -SwitchTo：只切到指定槽位账号、不跑日常（GUI「账号管理 → 切换到此账号」）----
@@ -151,7 +178,7 @@ if ($scheduleEntries.Count -gt 0) {
 # -SwitchTo 已明确指定单个账号，不再按班次筛选；收菜模式同样不筛选——定时收菜
 # 与手动收菜口径一致，跑全部已启用账号（班次 accounts 只约束挂机跑理智/日常的
 # 账号范围）。筛选保留 config.accounts 原顺序。
-if (-not $SwitchTo -and -not $InfrastCollect -and $null -ne $pick) {
+if (-not $AccountId -and -not $SwitchTo -and -not $InfrastCollect -and $null -ne $pick) {
     $pickAccProp = $pick.PSObject.Properties['accounts']
     if ($null -ne $pickAccProp -and $null -ne $pickAccProp.Value) {
         $shiftIds = @($pickAccProp.Value | ForEach-Object { [string]$_ })
@@ -273,14 +300,14 @@ foreach ($acc in $accountList) {
 # 手动切号（-SwitchTo）人在电脑前，失败可手动再点，不走自动重试。
 if (-not $SwitchTo) {
     $attempted = @($results | Where-Object { $null -ne $_.Minutes })
-    $failedFirst = @($attempted | Where-Object { -not $_.OK })
+    $failedFirst = @($attempted | Where-Object { -not $_.OK -and $_.RetryAllowed -ne $false })
     if ($attempted.Count -gt 0 -and $failedFirst.Count -gt 0) {
         Log " "
         Log ("=== [RETRY] {0}/{1} 个账号失败，等待 {2} 秒后重试失败号 ===" -f $failedFirst.Count, $attempted.Count, $retryFailedDelaySec)
         Start-Sleep -Seconds $retryFailedDelaySec
         for ($i = 0; $i -lt $accountList.Count; $i++) {
             # $results 与 $accountList 按序一一对应（每个账号恰好追加一条）
-            if ($null -eq $results[$i] -or $results[$i].OK -or $null -eq $results[$i].Minutes) { continue }
+            if ($null -eq $results[$i] -or $results[$i].OK -or $results[$i].RetryAllowed -eq $false -or $null -eq $results[$i].Minutes) { continue }
             # 记下首跑失败原因：重试翻身的号推送「重试成功」时展示死因
             $prevReason = [string]$results[$i].Reason
             # 重试调用传入 $IsRetry=$true，失败返回自带 Retried 标记
@@ -303,7 +330,13 @@ if ($InfrastCollect) {
     if (Invoke-Plugin $infrastCollectPy "基建收菜" "基建收菜插件" @('restore', '--config', $configPath) "下次挂机启动时任务自检会强制切回 Default") {
         Log "=== [InfrastCollect] MAA 配置已切回 Default ==="
     } else {
-        Log "  [WARN] 收菜配置恢复失败，下次挂机将由任务自检恢复 Default"
+        $restoreWarning = '收菜配置恢复失败，下次挂机前会重新检查'
+        if ($script:LastPluginError) { $restoreWarning += '（' + $script:LastPluginError + '）' }
+        Log ("  [WARN] " + $restoreWarning)
+        foreach ($r in @($results | Where-Object { $null -ne $_.Minutes })) {
+            $r.Warning = (@($r.Warning, $restoreWarning) | Where-Object { $_ }) -join '；'
+            if ($r.OK) { $r.Status = 'warning' }
+        }
     }
 }
 if ($SwitchTo) {
@@ -329,17 +362,21 @@ if ($SwitchTo) {
 $totalDur = [math]::Round($totalSw.Elapsed.TotalMinutes, 1)
 # @(...) wrapper required - in PS 5.1, .Count on a single PSCustomObject returns $null
 $passed = @($results | Where-Object { $_.OK -and $null -ne $_.Minutes }).Count
-$failed = @($results | Where-Object { -not $_.OK }).Count
+$failed = @($results | Where-Object { -not $_.OK -and $_.Status -ne 'unknown' }).Count
+$warned = @($results | Where-Object { $_.Status -eq 'warning' }).Count
+$unknown = @($results | Where-Object { $_.Status -eq 'unknown' }).Count
 $skipped = @($results | Where-Object { $null -eq $_.Minutes }).Count
 $resultSummary = ("本轮共 {0} 个账号：成功 {1} · 失败 {2}" -f @($results).Count, $passed, $failed)
 if ($skipped -gt 0) { $resultSummary += " · 跳过 $skipped" }
+if ($warned -gt 0) { $resultSummary += " · 成功但收尾异常 $warned" }
+if ($unknown -gt 0) { $resultSummary += " · 结果待确认 $unknown" }
 
 Log " "
 Log "========================================"
 Log "SUMMARY"
 Log "========================================"
 foreach ($r in $results) {
-    $status = if ($r.OK) { "OK" } else { "FAIL" }
+    $status = if ($r.Status -eq 'unknown') { 'UNKNOWN' } elseif ($r.Status -eq 'warning') { 'WARN' } elseif ($r.OK) { "OK" } else { "FAIL" }
     Log ("  [{0}] {1} - {2}" -f $status, $r.Account, $r.Duration)
 }
 Log ("----------------------------------------")
@@ -354,7 +391,9 @@ Save-RunHistory $null
 Release-Lock
 
 # 成功 -> no popup, no confirmation needed
-if ($failed -eq 0) {
+if ($unknown -gt 0 -or $warned -gt 0) {
+    Log ("WARNING: 收尾异常 {0} · 结果待确认 {1} · FAILED {2}" -f $warned, $unknown, $failed)
+} elseif ($failed -eq 0) {
     Log "ALL ACCOUNTS COMPLETED SUCCESSFULLY"
 } else {
     Log ("WARNING: {0} account(s) FAILED!" -f $failed)
@@ -368,7 +407,12 @@ if ($failed -eq 0) {
 # 顺序上必须先于本机弹窗与关机：失败弹窗会阻塞等点击，无人值守时不能让它挡住推送
 if (-not $SwitchTo) {
     $modeLabel = if ($InfrastCollect) { "基建收菜" } else { "挂机" }
-    foreach ($r in ($results | Where-Object { -not $_.OK })) {
+    foreach ($r in ($results | Where-Object { $_.Status -in @('warning', 'unknown') })) {
+        $label = if ($r.Status -eq 'warning') { '完成，收尾异常' } else { '结果待确认' }
+        $detail = (@($r.Reason, $r.Warning) | Where-Object { $_ }) -join '；'
+        Send-RunNotify ("MAA {0}{1}：「{2}」" -f $modeLabel, $label, $r.Account) ("$detail`n为避免重复操作，本账号不自动重跑。`n$resultSummary")
+    }
+    foreach ($r in ($results | Where-Object { -not $_.OK -and $_.Status -ne 'unknown' })) {
         # 标题 = 账号 + 失败说明（Reason 本身已含步骤语义，如「切号失败」「MAA 无进展超时」）
         $failText = if ([string]$r.Reason) { [string]$r.Reason } else { "运行失败" }
         $title = "MAA {0}失败：「{1}」{2}" -f $modeLabel, $r.Account, $failText
@@ -376,12 +420,13 @@ if (-not $SwitchTo) {
         $push = ("失败步骤：{0}" -f $(if ([string]$r.Step) { [string]$r.Step } else { "未知" }))
         $push += ("`n{0}班 · 用时 {1} 分钟" -f $bsBatch, $r.Minutes)
         if ($r.Retried) { $push += " · 重试后仍失败" }
+        if ($r.Warning) { $push += "`n收尾异常：$($r.Warning)" }
         $push += "`n$resultSummary"
         Send-RunNotify $title $push
     }
     # 重试成功的号单独推送（重试无论成败都通知）：首跑报错的号用户必须知道
     # 最终结局——仍失败的走上面失败推送（带「重试后仍失败」），翻身的走这里
-    foreach ($r in ($results | Where-Object { $_.OK -and $_.Retried })) {
+    foreach ($r in ($results | Where-Object { $_.OK -and $_.Retried -and $_.Status -ne 'warning' })) {
         $firstReason = if ($r.PSObject.Properties['FirstFailReason'] -and [string]$r.FirstFailReason) {
             [string]$r.FirstFailReason
         } else { "运行失败" }
@@ -398,7 +443,7 @@ if (-not $SwitchTo) {
 # 确认今天跑过了。skipped（停用）的号不列在推送里（只列实际跑了的）。
 # 与失败推送同为「先推送后关机」次序：关机倒计时不能挡住推送发出
 if (-not $SwitchTo -and $config -and $null -ne $config.notify -and
-    $config.notify.on_success -and $failed -eq 0) {
+    $config.notify.on_success -and $failed -eq 0 -and $warned -eq 0 -and $unknown -eq 0) {
     $ranAccounts = @($results | Where-Object { $null -ne $_.Minutes })
     if ($ranAccounts.Count -gt 0) {
         $modeLabel = if ($InfrastCollect) { "基建收菜" } else { "挂机" }
@@ -418,7 +463,7 @@ if (-not $SwitchTo -and $config -and $null -ne $config.notify -and
 # 关机触发先于失败弹窗：弹窗阻塞等点击，不能挡住 60 秒倒计时。
 # GUI 手动运行传 -NoShutdown 跳过；-SwitchTo 切号后模拟器保持运行供手动游戏，绝不关机
 if (-not $NoShutdown -and -not $SwitchTo -and $shutdownEnabled) {
-    $shutdownWhy = if ($failed -eq 0) { "全部成功" } else { "失败已推送通知" }
+    $shutdownWhy = if ($unknown -gt 0 -or $warned -gt 0) { '收尾异常或待确认结果已推送通知' } elseif ($failed -eq 0) { "全部成功" } else { "失败已推送通知" }
     # 收菜模式（定时收菜）到这里说明该收菜计划项开了关机；挂机模式按班次显示
     $shutdownWhat = if ($InfrastCollect) { "定时收菜" } else { "$bsBatch 班" }
     Log ("{0}结束（{1}）- 60秒后自动关机" -f $shutdownWhat, $shutdownWhy)
@@ -432,13 +477,14 @@ if ($failed -gt 0) {
     $wshell = New-Object -ComObject WScript.Shell
     $body = "有 $failed 个账号失败！`n`n"
     foreach ($r in $results) {
-        $s = if ($r.OK) { "OK" } else { "FAIL" }
+        $s = if ($r.Status -eq 'unknown') { '待确认' } elseif ($r.Status -eq 'warning') { '完成但收尾异常' } elseif ($r.OK) { '成功' } else { '失败' }
         $mark = if ($r.OK -and $r.Retried) { "（重试成功）" } else { "" }
         $body += ("  [{0}] {1} - {2}{3}" -f $s, $r.Account, $r.Duration, $mark)
         if (-not $r.OK -and $r.Reason) {
-            $retryNote = if ($r.Retried) { "，重试后仍失败" } else { "" }
+            $retryNote = if ($r.Retried -and $r.Status -ne 'unknown') { "，重试后仍失败" } else { "" }
             $body += "（" + $r.Reason + $retryNote + "）"
         }
+        if ($r.Warning) { $body += '（' + $r.Warning + '）' }
         $body += "`n"
     }
     $body += "`nTotal: $totalDur min"

@@ -15,6 +15,8 @@ $logPath = Join-Path $maaDir 'debug/asst.log'
 $maaStallTimeoutSec = 0
 $script:launches = 0
 $script:kills = 0
+$script:MaaRestartGraceSec = 0
+function Get-CimInstance { @() }
 function Start-Sleep { }
 function Stop-StaleMaa { }
 function Stop-Process { param($Id, [switch]$Force, $ErrorAction) $script:kills++ }
@@ -169,8 +171,110 @@ $ok = Run-MAA 'fake.exe' $maaDir 'test'
 @{ok=$ok; status=$script:LastMaaStatus; launches=$script:launches} | ConvertTo-Json
 ''')
         self.assertFalse(result["ok"])
-        self.assertEqual(result["status"], "dead")
+        self.assertEqual(result["status"], "interrupted")
         self.assertEqual(result["launches"], 1)
+
+    def test_update_child_is_followed_without_launching_again(self):
+        result = self.run_case(r'''
+$script:MaaRestartGraceSec = 30
+$maaStallTimeoutSec = 100
+$script:child = [pscustomobject]@{Id=222; HasExited=$false; Path=(Join-Path $maaDir 'MAA.exe'); StartTime=(Get-Date)}
+function Start-Process {
+    $script:launches++
+    [pscustomobject]@{Id=111; HasExited=$true; StartTime=(Get-Date).AddSeconds(-5)}
+}
+function Get-CimInstance {
+    [pscustomobject]@{ProcessId=222; ParentProcessId=111; ExecutablePath=$script:child.Path}
+}
+function Get-Process { return $script:child }
+function Wait-Event {
+    if ($script:LastMaaActiveProcess.Id -eq 222) { [IO.File]::WriteAllText($signalFile, '') }
+}
+$ok = Run-MAA (Join-Path $maaDir 'MAA.exe') $maaDir 'test'
+@{ok=$ok; launches=$script:launches; kills=$script:kills} | ConvertTo-Json
+''')
+        self.assertTrue(result['ok'])
+        self.assertEqual(result['launches'], 1)
+        self.assertEqual(result['kills'], 1, '接续的新进程也必须收尾')
+
+    def test_unrelated_reopen_is_not_adopted_or_relaunched_over(self):
+        result = self.run_case(r'''
+$maaStallTimeoutSec = 100
+function Start-Process {
+    $script:launches++
+    [pscustomobject]@{Id=111; HasExited=$true; StartTime=(Get-Date).AddSeconds(-5)}
+}
+function Get-CimInstance {
+    [pscustomobject]@{ProcessId=222; ParentProcessId=999; ExecutablePath=(Join-Path $maaDir 'MAA.exe')}
+}
+$ok = Run-MAA (Join-Path $maaDir 'MAA.exe') $maaDir 'test'
+@{ok=$ok; status=$script:LastMaaStatus; launches=$script:launches; kills=$script:kills} | ConvertTo-Json
+''')
+        self.assertFalse(result['ok'])
+        self.assertEqual(result['status'], 'interrupted')
+        self.assertEqual(result['launches'], 1)
+        self.assertEqual(result['kills'], 0)
+
+    def test_known_chain_error_is_not_downgraded_when_log_becomes_unreadable(self):
+        result = self.run_case(r'''
+$state = New-MaaLogState $maaDir
+$state.Errors.Add('Fight')
+Remove-Item -LiteralPath $logPath
+[IO.File]::WriteAllText($signalFile, '')
+$state.Timer = [pscustomobject]@{Elapsed=[pscustomobject]@{TotalSeconds=0; TotalMinutes=0}}
+function Wait-Event { $state.Timer.Elapsed.TotalSeconds += 31 }
+$status = Wait-MAADone 10 $maaDir ([pscustomobject]@{HasExited=$true}) $state
+@{status=$status} | ConvertTo-Json
+''')
+        self.assertEqual(result['status'], 'chain-error')
+
+    def test_cleanup_exception_does_not_discard_confirmed_completion(self):
+        result = self.run_case(r'''
+function Start-Process {
+    [IO.File]::WriteAllText($signalFile, '')
+    [pscustomobject]@{HasExited=$false; Id=333}
+}
+function Stop-Process { throw 'access denied' }
+$ok = Run-MAA 'fake.exe' $maaDir 'test'
+@{ok=$ok; warning=$script:LastMaaCleanupWarning} | ConvertTo-Json
+''')
+        self.assertTrue(result['ok'])
+        self.assertIn('access denied', result['warning'])
+
+    def test_unreadable_log_timeout_is_unknown_not_retryable_stall(self):
+        result = self.run_case(r'''
+Remove-Item -LiteralPath $logPath
+function Start-Process { [pscustomobject]@{Id=111; HasExited=$false} }
+$ok = Run-MAA 'fake.exe' $maaDir 'test'
+@{ok=$ok; status=$script:LastMaaStatus} | ConvertTo-Json
+''')
+        self.assertFalse(result['ok'])
+        self.assertEqual(result['status'], 'interrupted')
+
+    def test_completion_from_unrelated_reopen_is_not_success(self):
+        result = self.run_case(r'''
+function Start-Process {
+    [IO.File]::WriteAllText($signalFile, '')
+    [pscustomobject]@{Id=111; HasExited=$true; StartTime=(Get-Date).AddSeconds(-5)}
+}
+function Get-CimInstance {
+    [pscustomobject]@{ProcessId=222; ParentProcessId=999; ExecutablePath=(Join-Path $maaDir 'MAA.exe')}
+}
+$ok = Run-MAA 'fake.exe' $maaDir 'test'
+@{ok=$ok; status=$script:LastMaaStatus} | ConvertTo-Json
+''')
+        self.assertFalse(result['ok'])
+        self.assertEqual(result['status'], 'interrupted')
+
+    def test_monitor_exception_after_launch_does_not_allow_repeat(self):
+        result = self.run_case(r'''
+function Start-Process { [pscustomobject]@{Id=111; HasExited=$false} }
+function Wait-MAADone { throw 'monitor unavailable' }
+$ok = Run-MAA 'fake.exe' $maaDir 'test'
+@{ok=$ok; status=$script:LastMaaStatus} | ConvertTo-Json
+''')
+        self.assertFalse(result['ok'])
+        self.assertEqual(result['status'], 'interrupted')
 
 
 class StaleMaaCleanupTest(unittest.TestCase):
@@ -180,14 +284,16 @@ class StaleMaaCleanupTest(unittest.TestCase):
 $script:stopped = [Collections.Generic.List[int]]::new()
 function Get-Process {
     param($Name, $ErrorAction)
-    return @(
+    $items = @(
         [pscustomobject]@{ Id=1; Path='D:\MAA\MAA-v6\MAA.exe' },
         [pscustomobject]@{ Id=2; Path='D:\MAA\MAA-v6-backup\MAA.exe' }
     )
+    foreach ($item in $items) { $item | Add-Member ScriptMethod WaitForExit { return $true } }
+    return $items
 }
 function Stop-Process {
-    param($Id, [switch]$Force, $ErrorAction)
-    $script:stopped.Add($Id)
+    param($InputObject, [switch]$Force, $ErrorAction)
+    $script:stopped.Add($InputObject.Id)
 }
 Stop-StaleMaa 'D:\MAA\MAA-v6'
 @{stopped=@($script:stopped)} | ConvertTo-Json

@@ -81,6 +81,9 @@ function Save-RunHistory($fatalReason) {
                 reason  = $reason
                 step    = [string]$r.Step   # 失败步骤名（切号/登录校验/任务开关自检/MAA 运行）
                 retried = [bool]$r.Retried  # 该号经过失败重试（成功与否都标）
+                status  = [string]$r.Status
+                warning = [string]$r.Warning
+                retry_allowed = [bool]$r.RetryAllowed
             }
         }
         $obj = [ordered]@{
@@ -93,6 +96,8 @@ function Save-RunHistory($fatalReason) {
             total_min = [math]::Round($totalSw.Elapsed.TotalMinutes, 1)
             passed    = 0
             failed    = 0
+            warned    = @($results | Where-Object { $_.Status -eq 'warning' }).Count
+            unknown   = @($results | Where-Object { $_.Status -eq 'unknown' }).Count
             fatal     = [string]$fatalReason
             accounts  = $accs
         }
@@ -100,7 +105,7 @@ function Save-RunHistory($fatalReason) {
             $obj.failed = 1   # 没跑起来（如模拟器启动失败）也留痕，历史页可见
         } else {
             $obj.passed = @($results | Where-Object { $_.OK -and $null -ne $_.Minutes }).Count
-            $obj.failed = @($results | Where-Object { -not $_.OK }).Count
+            $obj.failed = @($results | Where-Object { -not $_.OK -and $_.Status -ne 'unknown' }).Count
         }
         $json = ConvertTo-Json -InputObject $obj -Depth 5
         # UTF-8 无 BOM（PS 5.1 的 Out-File utf8 带 BOM，GUI 读带 BOM 文件要 utf-8-sig，统一无 BOM）

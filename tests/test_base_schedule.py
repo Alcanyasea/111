@@ -193,7 +193,8 @@ class CmdApplyTest(unittest.TestCase):
         args = argparse.Namespace(config="ignored", account="a1", server=None,
                                   disable=disable, batch=None)
         buf = io.StringIO()
-        with mock.patch.object(bs, "load_config", return_value=self.cfg), \
+        with mock.patch.object(bs, "ensure_maa_stopped"), \
+                mock.patch.object(bs, "load_config", return_value=self.cfg), \
                 mock.patch.object(bs, "_log_file",
                                   side_effect=lambda _cfg, msg: self.logs.append(msg)), \
                 contextlib.redirect_stdout(buf):

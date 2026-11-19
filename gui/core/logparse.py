@@ -14,7 +14,7 @@ from datetime import datetime
 from html import escape
 
 TS_RE = re.compile(r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}) - (.*)$")
-ACC_RE = re.compile(r"^  \[(OK|FAIL)\] (.+?) - ([\d.]+ min|skip)$")
+ACC_RE = re.compile(r"^  \[(OK|FAIL|WARN|UNKNOWN)\] (.+?) - ([\d.]+ min|skip)$")
 TOTAL_RE = re.compile(r"^Total: ([\d.]+) min \| Passed: (\d+) \| Failed: (\d+)$")
 BANNER_RE = re.compile(r"^\*{10} \[(\d+)/(\d+)\] (.+?) \*{10}$")
 
@@ -112,7 +112,8 @@ def _last_run_from_lines(lines):
             accounts.append({
                 "key": ACCOUNT_KEYS.get(am.group(2)) or am.group(2),
                 "name": am.group(2),
-                "ok": am.group(1) == "OK",
+                "ok": am.group(1) in ("OK", "WARN"),
+                "status": {"OK": "success", "FAIL": "failed", "WARN": "warning", "UNKNOWN": "unknown"}[am.group(1)],
                 "dur": None if skipped else float(dur_str[:-4]),
                 "skipped": skipped,
             })
@@ -145,7 +146,10 @@ def _last_run_from_lines(lines):
         "total_min": total_min,
         "passed": passed,
         "failed": failed,
-        "final": final,
+        "warned": sum(a['status'] == 'warning' for a in accounts),
+        "unknown": sum(a['status'] == 'unknown' for a in accounts),
+        "final": ('fail' if failed else 'unknown' if any(a['status'] == 'unknown' for a in accounts)
+                  else 'warning' if any(a['status'] == 'warning' for a in accounts) else final),
         "emulator_closed": emulator_closed,
     }
 

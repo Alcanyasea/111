@@ -16,15 +16,16 @@ import shutil
 from datetime import datetime
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (QHBoxLayout, QListWidget, QListWidgetItem,
                                QVBoxLayout, QWidget)
 
 from qfluentwidgets import (BodyLabel, FluentIcon, InfoBar, InfoBarPosition,
-                            MessageBox, PushButton)
+                            PushButton)
 
 import theme
+from sheets import MessageBox
 from core import runner
 from widgets import (Card, Pill, _rgba, empty_state, hline,
                      label as _styled_label, style_button)
@@ -77,6 +78,8 @@ def _label(text, size=None, weight="400", color=None, mono=False):
 
 
 class HistoryPage(QWidget):
+    refreshed = Signal()
+
     def __init__(self, cfg):
         super().__init__()
         self.cfg = cfg
@@ -100,6 +103,9 @@ class HistoryPage(QWidget):
         self.evidence_btn = style_button(PushButton("清空失败现场"), small=True)
         self.evidence_btn.clicked.connect(self._on_clear_evidence)
         bar.addWidget(refresh_btn)
+        report_btn = style_button(PushButton("作战日报"), small=True)
+        report_btn.clicked.connect(self._open_combat_reports)
+        bar.addWidget(report_btn)
         bar.addWidget(open_btn)
         bar.addWidget(clear_btn)
         bar.addWidget(self.evidence_btn)
@@ -159,6 +165,10 @@ class HistoryPage(QWidget):
         script_dir = (self.cfg.get("paths") or {}).get("script_dir") or default_scripts
         return Path(script_dir) / "run_history"
 
+    def _open_combat_reports(self):
+        from pages.combat_report_dialog import CombatReportDialog
+        CombatReportDialog(self.cfg, self._history_dir(), self).exec()
+
     def _load(self):
         recs = []
         d = self._history_dir()
@@ -178,7 +188,7 @@ class HistoryPage(QWidget):
         accs = rec.get("accounts") or []
         ok = sum(1 for a in accs if a.get("ok") and not a.get("skipped"))
         skip = sum(1 for a in accs if a.get("skipped"))
-        fail = sum(1 for a in accs if not a.get("ok"))
+        fail = sum(1 for a in accs if not a.get("ok") and not a.get("skipped") and a.get("status") != "unknown")
         return ok, skip, fail
 
     def _summary_text(self, rec):
@@ -192,6 +202,12 @@ class HistoryPage(QWidget):
             parts.append('<span style="color:%s">%d 失败</span>' % (theme.ERR, fail))
         if ok:
             parts.append("%d 成功" % ok)
+        warned = sum(a.get('status') == 'warning' for a in rec.get('accounts') or [])
+        unknown = sum(a.get('status') == 'unknown' for a in rec.get('accounts') or [])
+        if warned:
+            parts.append('%d 成功但收尾异常' % warned)
+        if unknown:
+            parts.append('%d 结果待确认' % unknown)
         if skip:
             parts.append("%d 跳过" % skip)
         if not parts:
@@ -238,6 +254,19 @@ class HistoryPage(QWidget):
             self.list.setCurrentRow(-1)
             self._show_detail(None)
         self._update_evidence_summary()
+        self.refreshed.emit()
+
+    def latest_summary(self):
+        if not self._records:
+            return None, "暂无记录", ""
+        rec = self._records[0]
+        return rec["_file"], _fmt_dt(rec.get("start"), short=True), self._plain_summary(rec)
+
+    def select_record(self, filename):
+        for index, rec in enumerate(self._records):
+            if rec["_file"] == filename:
+                self.list.setCurrentRow(index)
+                return
 
     def _on_select(self, cur, _prev=None):
         if self._suppress_select:
@@ -298,8 +327,9 @@ class HistoryPage(QWidget):
         else:
             ok, _skip, fail = self._counts(rec)
             pill = Pill()
-            pill.set_state("ok" if not fail else "fail",
-                           "全部成功" if not fail else "%d 失败" % fail)
+            attention = any(a.get('status') in ('warning', 'unknown') for a in rec.get('accounts') or [])
+            pill.set_state("fail" if fail else ("wait" if attention else "ok"),
+                           "%d 失败" % fail if fail else ("有收尾异常或待确认结果" if attention else "全部成功"))
             meta.addWidget(pill)
         dur = _fmt_dur(rec.get("total_min"))
         if dur:
@@ -345,14 +375,15 @@ class HistoryPage(QWidget):
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(10)
         pill = Pill()
-        pill.set_state("wait" if skipped else ("ok" if ok else "fail"),
-                       "跳过" if skipped else ("成功" if ok else "失败"))
+        special = {'warning': '成功但收尾异常', 'unknown': '结果待确认'}.get(a.get('status'))
+        pill.set_state("wait" if skipped or special else ("ok" if ok else "fail"),
+                       "跳过" if skipped else (special or ("成功" if ok else "失败")))
         lay.addWidget(pill)
         name = _label(str(a.get("name") or "—"), size=theme.FS_BODY, weight="500")
         lay.addWidget(name)
         lay.addStretch(1)
-        reason = str(a.get("reason") or "")
-        if not ok and not skipped and reason:
+        reason = '；'.join(str(v) for v in (a.get('reason'), a.get('warning')) if v)
+        if not skipped and reason:
             tip = _label(reason, size=theme.FS_CAPTION, color="ALERT")
             lay.addWidget(tip)
         dur = _fmt_dur(a.get("dur_min"))

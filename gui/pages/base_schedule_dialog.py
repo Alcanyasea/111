@@ -16,18 +16,21 @@ import sys
 from pathlib import Path
 
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import (QDialog, QFileDialog, QGridLayout, QHBoxLayout,
-                               QScrollArea, QStackedWidget, QVBoxLayout,
+from PySide6.QtWidgets import (QGridLayout, QHBoxLayout,
+                               QScrollArea, QSizePolicy, QStackedWidget, QVBoxLayout,
                                QWidget)
 
 from qfluentwidgets import (BodyLabel, ComboBox, InfoBar, InfoBarPosition,
-                            LineEdit, MessageBox, MessageBoxBase,
-                            PrimaryPushButton, PushButton, SubtitleLabel,
+                            LineEdit, PrimaryPushButton, PushButton,
                             SwitchButton)
 
 import config as appconfig
 import theme
-from widgets import (Card, set_switch_checked_gray, style_button,
+from motion import PageStack
+from pages.home import navigation
+from sheet_files import FileDialog as QFileDialog
+from sheets import MessageBox, MessageBoxBase, SheetDialog
+from widgets import (Card, label, set_switch_checked_gray, style_button,
                      style_primary_button, style_scroll_area)
 
 PLUGIN_DIR = Path(__file__).resolve().parents[2] / "plugins" / "base_schedule"
@@ -46,7 +49,7 @@ TRADING_OPTIONS = [
 ]
 
 # MAA「菲亚梅塔恢复目标」候选项（与 MaaWpfGui 的基建设置一致）
-FIAMMETTA_TARGETS = ("清流", "可露希尔", "但书", "巫恋", "龙舌兰", "歌蕾蒂娅")
+FIAMMETTA_TARGETS = ("清流", "可露希尔", "但书", "巫恋", "龙舌兰", "歌蕾蒂娅", "琴柳", "承曦格雷伊", "温蒂", "槐琥", "至简", "旅骨")
 
 
 def _batch_labels(cfg):
@@ -66,20 +69,22 @@ def _safe_filename(text):
 
 
 class _PresetNameBox(MessageBoxBase):
-    """「保存为预设」的名称输入弹窗（qfluentwidgets MessageBoxBase）。"""
+    """保存当前账号的一套命名排班。"""
 
     def __init__(self, parent, default="", acc_label=""):
-        super().__init__(parent)
-        self.viewLayout.addWidget(SubtitleLabel("保存为预设"))
-        tip = BodyLabel("预设保存整套排班（布局、无人机、各批次干员与菲亚梅塔），"
-                        "只属于账号「%s」，其他账号看不到（不互通）。" % acc_label)
+        super().__init__(parent, title="保存为预设", size=(460, 260))
+        tip = label("为账号「%s」保存布局、无人机和各批次的干员与菲亚梅塔设置。" % acc_label,
+                    13, color="TEXT_2")
         tip.setWordWrap(True)
-        theme.bind(tip, lambda: "color: %s; font-size: 12px;" % theme.TEXT_2)
+        tip.setTextFormat(Qt.PlainText)
         self.viewLayout.addWidget(tip)
+        self.viewLayout.addSpacing(6)
+        self.viewLayout.addWidget(label("预设名称", 13, "600"))
         self.name_edit = LineEdit()
         self.name_edit.setPlaceholderText("预设名称，如「333 日常」")
         self.name_edit.setClearButtonEnabled(True)
         self.name_edit.setText(default)
+        self.name_edit.setAccessibleName("预设名称")
         self.viewLayout.addWidget(self.name_edit)
         self.name_hint = BodyLabel("")
         self.name_hint.setWordWrap(True)
@@ -87,7 +92,7 @@ class _PresetNameBox(MessageBoxBase):
         self.viewLayout.addWidget(self.name_hint)
         self.yesButton.setText("保存")
         self.cancelButton.setText("取消")
-        self.widget.setMinimumWidth(420)
+        self.name_edit.setFocus()
 
     def validate(self):
         name = self.name_edit.text().strip()
@@ -101,9 +106,10 @@ class _PresetNameBox(MessageBoxBase):
         return False
 
 
-class BaseScheduleDialog(QDialog):
+class BaseScheduleDialog(SheetDialog):
     def __init__(self, cfg, acc, parent=None):
-        super().__init__(parent)
+        super().__init__(parent, title="精确基建派驻",
+                         subtitle=acc.get("label") or "当前账号", size=(900, 640))
         self.cfg = cfg
         self.acc = acc
         self.batches = appconfig.schedule_batches(cfg)
@@ -119,24 +125,30 @@ class BaseScheduleDialog(QDialog):
         self._loading = False
 
         self.setWindowTitle("精确基建派驻 - %s" % acc.get("label", ""))
-        self.setModal(True)
-        self.resize(880, 720)
-        theme.bind(self, lambda: "QDialog { background: %s; }" % theme.BG)
-
-        root = QVBoxLayout(self)
-        root.setContentsMargins(22, 18, 22, 16)
-        root.setSpacing(12)
+        root = self.body
+        self.tabs = navigation(("批次派驻", "布局与无人机", "预设与文件"), compact=True)
+        root.addWidget(self.tabs, 0, Qt.AlignLeft)
+        sections = PageStack()
+        root.addWidget(sections, 1)
+        self.tabs.currentChanged.connect(sections.setCurrentIndex)
+        batch_page = QWidget()
+        batch_layout = QVBoxLayout(batch_page)
+        batch_layout.setContentsMargins(1, 1, 1, 1)
+        sections.addWidget(batch_page)
+        settings = self._scroll_section(sections)
+        library = self._scroll_section(sections)
 
         preset_row = QHBoxLayout()
         preset_row.setSpacing(10)
-        preset_row.addWidget(BodyLabel("预设:"))
+        library.addWidget(label("账号预设", 15, "600"))
         self.preset_combo = ComboBox()
-        self.preset_combo.setMinimumWidth(230)
+        self.preset_combo.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
+        self.preset_combo.setAccessibleName("账号预设")
         self.preset_combo.setToolTip(
             "选择一个预设——仅选中，不改动当前排班内容；"
             "点「应用」才会把它的整套排班填入当前弹窗。")
         self.preset_combo.currentIndexChanged.connect(self._on_preset_selected)
-        preset_row.addWidget(self.preset_combo)
+        preset_row.addWidget(self.preset_combo, 1)
         self.preset_apply_btn = style_button(PushButton("应用"))
         self.preset_apply_btn.setToolTip(
             "把选中的预设（布局、无人机、菲亚梅塔与各批次干员）填入当前弹窗，"
@@ -156,20 +168,23 @@ class BaseScheduleDialog(QDialog):
         self.preset_del_btn.setToolTip("删除当前选中的预设。")
         self.preset_del_btn.clicked.connect(self._on_preset_delete)
         preset_row.addWidget(self.preset_del_btn)
-        preset_row.addStretch(1)
         self.plan_lab = BodyLabel("")
+        self.plan_lab.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        self.plan_lab.setWordWrap(True)
         self.plan_lab.setToolTip(
             "显示当前弹窗里的排班对应哪套预设方案：与某预设完全一致（布局、无人机、"
             "各重叠批次）时显示其名称，否则显示「自定义」；未启用精确基建时显示"
             "「未启用」。手动改动任意内容会立即重新判定。")
         theme.bind(self.plan_lab,
                    lambda: "color: %s; font-size: 12px;" % theme.TEXT_2)
-        preset_row.addWidget(self.plan_lab)
-        root.addLayout(preset_row)
+        library.addLayout(preset_row)
+        library.addSpacing(12)
+        library.addWidget(label("排班文件", 15, "600"))
 
         top = QHBoxLayout()
         top.setSpacing(10)
-        top.addWidget(BodyLabel("布局:"))
+        settings.addWidget(label("基建设施", 15, "600"))
+        top.addWidget(BodyLabel("布局"))
         self.layout_combo = ComboBox()
         self.layout_combo.addItems([
             "333 布局（贸易3台 · 制造3台 · 发电3台）",
@@ -181,18 +196,21 @@ class BaseScheduleDialog(QDialog):
         self.layout_combo.blockSignals(False)
         top.addWidget(self.layout_combo)
         top.addStretch(1)
-        top.addWidget(BodyLabel("批次:"))
+        settings.addLayout(top)
+        settings.addSpacing(10)
+        settings.addWidget(label("无人机投放", 15, "600"))
+        batch_row = QHBoxLayout()
+        batch_row.addWidget(label("派驻批次", 15, "600"))
         self.batch_combo = ComboBox()
         self.batch_combo.addItems([self.batch_labels[b] for b in self.batches])
         self.batch_combo.currentIndexChanged.connect(self._on_batch_changed)
-        top.addWidget(self.batch_combo)
-        root.addLayout(top)
+        batch_row.addWidget(self.batch_combo)
+        batch_row.addStretch()
+        batch_layout.addLayout(batch_row)
 
         drones_row = QHBoxLayout()
         drones_row.setSpacing(10)
-        drones_row.addWidget(BodyLabel("无人机:"))
-        self.drones_switch = set_switch_checked_gray(SwitchButton())
-        self.drones_switch.setText("启用")
+        self.drones_switch = set_switch_checked_gray(SwitchButton(), "每批次投放")
         self.drones_switch.setChecked(bool(self.bs.get("drones", {}).get("enable")))
         self.drones_switch.checkedChanged.connect(
             lambda *_: self._refresh_plan_label())
@@ -221,15 +239,13 @@ class BaseScheduleDialog(QDialog):
         self.drones_order_combo.currentIndexChanged.connect(self._refresh_plan_label)
         drones_row.addWidget(self.drones_order_combo)
         drones_row.addStretch(1)
-        root.addLayout(drones_row)
+        settings.addLayout(drones_row)
         self._refresh_drones_index()
 
         # 菲亚梅塔心情恢复（按批次：跟着上面的「批次」下拉切换）
         fia_row = QHBoxLayout()
         fia_row.setSpacing(10)
-        fia_row.addWidget(BodyLabel("菲亚梅塔:"))
-        self.fia_switch = set_switch_checked_gray(SwitchButton())
-        self.fia_switch.setText("本批次换班前恢复心情")
+        self.fia_switch = set_switch_checked_gray(SwitchButton(), "菲亚梅塔换班前恢复心情")
         fia_row.addWidget(self.fia_switch)
         fia_row.addSpacing(8)
         fia_row.addWidget(BodyLabel("恢复目标"))
@@ -253,7 +269,7 @@ class BaseScheduleDialog(QDialog):
                    lambda: "color: %s; font-size: 12px;" % theme.TEXT_3)
         fia_row.addWidget(self.fia_batch_lab)
         fia_row.addStretch(1)
-        root.addLayout(fia_row)
+        batch_layout.addLayout(fia_row)
         self.fia_switch.checkedChanged.connect(
             lambda _=None: self._refresh_fiammetta())
         self.fia_switch.checkedChanged.connect(
@@ -264,14 +280,17 @@ class BaseScheduleDialog(QDialog):
         self.hint = BodyLabel()
         self.hint.setWordWrap(True)
         theme.bind(self.hint, lambda: "color: %s; font-size: 12px;" % theme.TEXT_2)
-        root.addWidget(self.hint)
+        settings.addSpacing(10)
+        settings.addWidget(label("派驻规则", 15, "600"))
+        settings.addWidget(self.hint)
+        settings.addStretch(1)
 
         self.stack = QStackedWidget()
         for i, b in enumerate(self.batches):
             page = self._build_page(b)
             self.stack.addWidget(page)
             self.pages[b] = page
-        root.addWidget(self.stack, 1)
+        batch_layout.addWidget(self.stack, 1)
 
         btns = QHBoxLayout()
         btns.setSpacing(10)
@@ -288,9 +307,15 @@ class BaseScheduleDialog(QDialog):
         self.export_btn.clicked.connect(self._on_export)
         self.cancel_btn = style_button(PushButton("取消"))
         self.save_btn = style_primary_button(PrimaryPushButton("保存并生成计划"))
-        btns.addWidget(self.import_btn)
-        btns.addWidget(self.export_btn)
-        btns.addStretch(1)
+        files = QHBoxLayout()
+        files.addWidget(self.import_btn)
+        files.addWidget(self.export_btn)
+        files.addStretch()
+        library.addLayout(files)
+        library.addWidget(label("支持一图流及 MAA 自定义基建 JSON。导入后可先检查各批次，再保存并生成计划。",
+                                12, color="TEXT_2"))
+        library.addStretch(1)
+        btns.addWidget(self.plan_lab, 1)
         btns.addWidget(self.cancel_btn)
         btns.addWidget(self.save_btn)
         root.addLayout(btns)
@@ -303,24 +328,30 @@ class BaseScheduleDialog(QDialog):
 
     # ---------- 界面构建 ----------
 
+    @staticmethod
+    def _scroll_section(sections):
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        style_scroll_area(scroll)
+        inner = QWidget()
+        layout = QVBoxLayout(inner)
+        layout.setContentsMargins(2, 6, 12, 2)
+        layout.setSpacing(8)
+        scroll.setWidget(inner)
+        sections.addWidget(scroll)
+        return layout
+
     def _refresh_hint(self):
         if self.bs.get("enabled"):
-            head = "该账号已启用精确基建：运行时按下面各批次计划让 MAA 精确派驻干员。"
+            head = "该账号已启用精确基建。"
         else:
             head = "该账号当前未启用：请在账号列表打开「精确基建」开关后才会生效，否则仍使用 MAA 自带基建换班。"
-        head += (" 批次随启动时间自动划分：本次运行发生在哪个时间点之后，"
-                 "就使用对应批次（如 8点/12点/24点）。")
         self.hint.setText(
-            head + " 制造站/贸易站每台先选产品类别（制造：赤金/原石碎片/作战记录；"
-            "贸易：赤金/原石碎片订单），MAA 应用计划时会按类别匹配游戏内对应设施"
-            "并设置配方。干员休整（宿舍）：填入的干员放入，剩余空位自动补满"
-            "（全部留空也自动安排）。其他设施：全部留空时 MAA 自动补满；"
-            "只填了部分时，剩余位置保持空着（MAA 自定义模式不支持自动补位）。"
-            "干员名需与游戏内名称一致（MAA 靠截图识别干员）。"
-            "无人机：顶部开启后，每个班次换班时都会按设置向目标站台投放无人机。"
-            "菲亚梅塔：按批次单独设置（跟着「批次」下拉切换）——该批次开启后，"
-            "换班开始前会先把恢复目标与满心情的菲亚梅塔放进宿舍互换心情"
-            "（菲亚梅塔随后留在宿舍恢复），再执行换班。")
+            head + "运行时按启动时间选择对应批次。请填写游戏内的干员名称。\n"
+            "贸易站与制造站按所选产品匹配设施并设置配方。宿舍的空位会自动补满，"
+            "其他设施全部留空时自动安排，部分填写时保留剩余空位。\n"
+            "无人机设置适用于所有批次。菲亚梅塔在「批次派驻」中逐批设置，"
+            "换班前与目标在宿舍互换心情，随后留在宿舍恢复。")
 
     # ---------- 当前方案标识 ----------
 
@@ -418,7 +449,6 @@ class BaseScheduleDialog(QDialog):
                 start = 0
             for c, e in enumerate(edits):
                 grid.addWidget(e, r, start + c)
-        grid.setColumnStretch(max(1, start + 8), 1)
         card.vbox.addLayout(grid)
         return card
 
@@ -438,7 +468,8 @@ class BaseScheduleDialog(QDialog):
             grid.addWidget(st["combo"], r, 1, Qt.AlignmentFlag.AlignVCenter)
             for c, e in enumerate(st["edits"]):
                 grid.addWidget(e, r, 2 + c)
-        grid.setColumnStretch(5, 1)
+        for column in range(2, 5):
+            grid.setColumnStretch(column, 1)
         card.vbox.addLayout(grid)
         return card
 
@@ -453,6 +484,18 @@ class BaseScheduleDialog(QDialog):
         meeting = self._make_edits(data["meeting"], ["干员 1", "干员 2"])
         office = self._make_edits(data["office"], ["干员 1"])
         processing = self._make_edits(data["processing"], ["干员 1"])
+        recycle = self._make_edits(data.get("recycle", ["", ""]), ["干员 1", "干员 2"])
+        training = {}
+        for role in ("operatorsA", "operatorsB"):
+            edit = LineEdit()
+            edit.setPlaceholderText("候选按顺序填写，用逗号分隔；留空保持原进驻")
+            edit.setText("，".join(data.get("training", {}).get(role, [])))
+            edit.textChanged.connect(self._refresh_plan_label)
+            training[role] = edit
+        continue_training = set_switch_checked_gray(SwitchButton(), "继续专精（消耗材料，默认关闭）")
+        continue_training.setChecked(data.get("continue_training") is True)
+        continue_training.checkedChanged.connect(self._refresh_plan_label)
+        continue_training.setToolTip("需要 MAA 基建任务含训练室。仅继续当前训练，训练中训练位由 MAA 锁定。")
         manufacture = [
             self._make_station(row, MANUFACTURE_OPTIONS)
             for row in self._take(data["manufacture"], m, 3,
@@ -473,6 +516,14 @@ class BaseScheduleDialog(QDialog):
         em["meeting"] = [meeting]
         em["office"] = [office]
         em["processing"] = [processing]
+        em["recycle"] = [recycle]
+        for room in ("recycle", "training"):
+            keep = set_switch_checked_gray(SwitchButton(), "保持原派驻（跳过换人）")
+            keep.setChecked(data.get(room + "_skip") is True)
+            keep.checkedChanged.connect(self._refresh_plan_label)
+            em[room + "_skip"] = keep
+        em["training"] = training
+        em["continue_training"] = continue_training
         em["manufacture"] = manufacture
         em["trading"] = trading
         em["power"] = power
@@ -507,6 +558,16 @@ class BaseScheduleDialog(QDialog):
             "加工站（1 人，可留空）",
             [("", processing)],
         ))
+        recycle_card = self._facility_card("回收站（2 人，需 MAA 基建任务含回收站）", [("", recycle)])
+        recycle_card.vbox.addSpacing(8)
+        recycle_card.vbox.addWidget(em["recycle_skip"])
+        v.addWidget(recycle_card)
+        training_card = self._facility_card("训练室（需 MAA 基建任务含训练室）", [
+            ("协助者", [training["operatorsA"]]), ("训练位", [training["operatorsB"]])])
+        training_card.vbox.addSpacing(8)
+        training_card.vbox.addWidget(em["training_skip"])
+        training_card.vbox.addWidget(continue_training)
+        v.addWidget(training_card)
         v.addStretch(1)
 
         scroll.setWidget(inner)
@@ -962,6 +1023,14 @@ class BaseScheduleDialog(QDialog):
 
     def _capture(self, batch):
         em = self.edit_map[batch]
+        self.data[batch]["recycle"] = [e.text().strip() for e in em["recycle"][0]]
+        self.data[batch]["training"] = {key: [name.strip() for name in re.split(r"[,，\n]", edit.text()) if name.strip()] for key, edit in em["training"].items()}
+        self.data[batch]["continue_training"] = em["continue_training"].isChecked()
+        for room in ("recycle", "training"):
+            if em[room + "_skip"].isChecked():
+                self.data[batch][room + "_skip"] = True
+            else:
+                self.data[batch].pop(room + "_skip", None)
         self.data[batch]["control"] = [e.text().strip() for e in em["control"][0]]
         self.data[batch]["meeting"] = [e.text().strip() for e in em["meeting"][0]]
         self.data[batch]["office"] = [e.text().strip() for e in em["office"][0]]
@@ -1035,12 +1104,10 @@ class BaseScheduleDialog(QDialog):
                                                         or "排班")
         fname, _ = QFileDialog.getSaveFileName(
             self, "导出排班文件", str(start / default_name),
-            "JSON 文件 (*.json);;所有文件 (*)")
+            "JSON 文件 (*.json);;所有文件 (*)", required_suffix=".json")
         if not fname:
             return
         out = Path(fname)
-        if out.suffix.lower() != ".json":
-            out = out.with_suffix(".json")
         tmp = out.with_name(out.name + ".tmp")
         try:
             tmp.write_text(json.dumps(doc, ensure_ascii=False, indent=2),

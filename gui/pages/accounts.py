@@ -10,6 +10,7 @@
   master.ps1 按它逐个切号运行（正在挂机时改动从下次运行生效）。
 - 切换账号不再走游戏内点击流程：master.ps1 用 slot_switch.ps1 重启游戏+推入数据。
 """
+import copy
 import os
 import subprocess
 import uuid
@@ -18,12 +19,12 @@ from pathlib import Path
 from PySide6.QtCore import (QEasingCurve, QPoint, QPropertyAnimation, QRect,
                             Qt, QThread, QTimer, Signal)
 from PySide6.QtGui import QColor, QPainter
-from PySide6.QtWidgets import (QApplication, QDialog, QGraphicsDropShadowEffect,
-                               QGraphicsOpacityEffect, QGridLayout, QHBoxLayout,
-                               QLabel, QPlainTextEdit, QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QApplication, QGraphicsDropShadowEffect,
+                               QGraphicsOpacityEffect, QFrame, QHBoxLayout,
+                               QLabel, QPlainTextEdit, QPushButton, QSizePolicy, QVBoxLayout, QWidget)
 
 from qfluentwidgets import (BodyLabel, ComboBox, FluentIcon, InfoBar,
-                            InfoBarPosition, LineEdit, MessageBox,
+                            InfoBarPosition, LineEdit,
                             PrimaryPushButton, PushButton, ScrollArea,
                             SubtitleLabel, SwitchButton)
 
@@ -32,15 +33,17 @@ import theme
 from core import runner, secret, token_check
 from core.poller import FuncWorker
 from core.util import CREATE_NO_WINDOW, decode_console, pwsh_exe
+from motion import PageStack, press_feedback
+from pages.home import navigation
 from pages.stage_plan_dialog import show_stage_plan_dialog
+from sheets import MessageBox, SheetDialog
 from widgets import (Card, IconBadge, Pill, _label_transparent, dark_log_qss,
-                     empty_state, set_switch_checked_gray, style_button,
+                     empty_state, label, set_switch_checked_gray, style_button,
                      style_primary_button, style_scroll_area,
                      style_tinted_button)
 
 # ---- 拖动排序的版式与节奏（数值参考 SortableJS / react-beautiful-dnd）----
-GRID_COLS = 2          # 每行 2 张卡片
-GRID_SPACING = 20      # 卡片间距（px）
+GRID_SPACING = 10      # 账号行之间的间距（px）
 CARD_MIN_H = 96        # 卡片最小高度，实际取内容高度（名字 + 元信息两行后略增）
 MOVE_MS = 150          # 其他卡片让位动画时长（SortableJS 默认 150ms）
 DROP_MS = 170          # 松手落位动画时长（按距离微调）
@@ -167,6 +170,9 @@ class CaptureWorker(QThread):
             self.done.emit(-1)
             return
         try:
+            # 在 Popen 返回前关闭对话框时，GUI 线程尚未拿到子进程。
+            if self.isInterruptionRequested():
+                self.kill()
             for raw in iter(self.proc.stdout.readline, b""):
                 self.line.emit(decode_console(raw).rstrip())
         finally:
@@ -178,15 +184,17 @@ class CaptureWorker(QThread):
             self.done.emit(self.proc.wait())
 
     def kill(self):
+        self.requestInterruption()
         if self.proc is not None and self.proc.poll() is None:
             self.proc.kill()
 
 
-class CaptureDialog(QDialog):
+class CaptureDialog(SheetDialog):
     """添加/重新捕获账号：填账号密码 → 跑 capture_account.ps1，实时显示输出。"""
 
     def __init__(self, cfg, acc=None, page=None, parent=None):
-        super().__init__(parent)
+        super().__init__(parent, title="捕获账号" if acc is None else "重新捕获账号",
+                         size=(840, 466))
         self.cfg = cfg
         self.acc = acc          # None=新增；dict=重新捕获（预填）
         self.page = page        # AccountsPage，成功后刷新列表
@@ -195,19 +203,18 @@ class CaptureDialog(QDialog):
         self._slot = ""
         self._closing = False
         self._password_broken = False   # 原密文无法解密 → 保存时不得用空值覆盖
-        self.setWindowTitle("捕获账号" if acc is None else "重新捕获账号")
-        self.setModal(True)
-        self.resize(560, 560)
-        theme.bind(self, lambda: "QDialog { background: %s; }" % theme.BG)
-
-        root = QVBoxLayout(self)
-        root.setContentsMargins(20, 18, 20, 16)
-        root.setSpacing(12)
-
-        form = QWidget()
+        columns = QHBoxLayout()
+        columns.setSpacing(18)
+        self.body.addLayout(columns, 1)
+        form = QFrame()
+        form.setObjectName("captureFields")
+        theme.bind(form, lambda: "QFrame#captureFields { background:%s; border-radius:14px; }"
+                   % theme.ROW_INSET)
         f = QVBoxLayout(form)
-        f.setContentsMargins(0, 0, 0, 0)
-        f.setSpacing(8)
+        f.setContentsMargins(16, 14, 16, 14)
+        f.setSpacing(10)
+        f.addWidget(label("登录资料", 16, "600", transparent=True))
+        columns.addWidget(form, 4)
 
         def make_row(label_text, widget):
             row = QHBoxLayout()
@@ -215,7 +222,7 @@ class CaptureDialog(QDialog):
             lab = BodyLabel(label_text)
             theme.bind(lab, lambda: "color: %s; %s"
                        % (theme.TEXT_2, theme.font_stack(theme.FS_BODY)))
-            lab.setFixedWidth(64)
+            lab.setFixedWidth(44)
             row.addWidget(lab)
             row.addWidget(widget, 1)
             return row
@@ -234,36 +241,39 @@ class CaptureDialog(QDialog):
         self.pass_edit.setEchoMode(LineEdit.EchoMode.Password)
         self.pass_edit.setPlaceholderText("密码")
         f.addLayout(make_row("密码", self.pass_edit))
-        root.addWidget(form)
+        f.addStretch()
 
         self.hint_label = BodyLabel(
-            "账号密码以 Windows DPAPI 加密保存在本机 config.json（仅当前 Windows 用户"
-            "能解密）。密码含 % ^ _ + = [ ] 等特殊字符或登录出现验证码时，脚本会自动"
-            "提示你在模拟器窗口手动完成登录。")
+            "密码由 Windows DPAPI 加密，仅当前 Windows 用户可解密。遇到特殊字符或验证码时，"
+            "请按提示到模拟器中完成登录。")
         self.hint_label.setWordWrap(True)
         # 提示行配色随运行状态变（正常灰 / 失败红 / 通过绿）：
         # 状态记在 _hint_state，配方读它，主题切换时按当前状态重套
         self._hint_state = "normal"
         theme.bind(self.hint_label, self._hint_qss)
-        root.addWidget(self.hint_label)
+        f.addWidget(self.hint_label)
 
+        output = QVBoxLayout()
+        output.setSpacing(8)
+        output.addWidget(label("捕获日志", 16, "600"))
         self.log_view = QPlainTextEdit()
         self.log_view.setReadOnly(True)
         self.log_view.setStyleSheet(dark_log_qss())
-        self.log_view.setMinimumHeight(220)
-        root.addWidget(self.log_view, 1)
+        self.log_view.setPlaceholderText("开始捕获后，这里会显示登录进度。")
+        output.addWidget(self.log_view, 1)
+        columns.addLayout(output, 5)
 
         btns = QHBoxLayout()
         btns.setSpacing(10)
         self.start_btn = style_primary_button(PrimaryPushButton("开始捕获"))
         self.close_btn = style_button(PushButton("关闭"))
-        btns.addWidget(self.start_btn)
         btns.addStretch(1)
         btns.addWidget(self.close_btn)
-        root.addLayout(btns)
+        btns.addWidget(self.start_btn)
+        self.body.addLayout(btns)
 
         self.start_btn.clicked.connect(self.on_start)
-        self.close_btn.clicked.connect(self.on_close)
+        self.close_btn.clicked.connect(self.reject)
 
         if acc is not None:
             self.name_edit.setText(acc.get("label", ""))
@@ -296,6 +306,7 @@ class CaptureDialog(QDialog):
         sb.setValue(sb.maximum())
 
     def _set_running(self, running):
+        self.close_btn.setText("停止捕获" if running else "关闭")
         self.start_btn.setEnabled(not running)
         self.name_edit.setEnabled(not running)
         self.server_combo.setEnabled(not running)
@@ -371,7 +382,7 @@ class CaptureDialog(QDialog):
                 self._verify_token()
         else:
             self._append_log(">>> 捕获失败（退出码 %d）。可修改后重试；登录态已自动恢复。" % code)
-            self._show_error("捕获失败，详见下方日志。可修改后点「开始捕获」重试。")
+            self._show_error("捕获失败，详见捕获日志。可修改后点「开始捕获」重试。")
 
     def _verify_token(self):
         """捕获成功后立即探测新 token（<1 秒），结果直接显示在提示行。"""
@@ -394,7 +405,7 @@ class CaptureDialog(QDialog):
             self._set_hint("✓ 新 token 验证通过，账号已可正常挂机", "ok")
         else:
             self._set_hint(
-                "⚠ token 验证未通过（%s），仪表盘会保持标红" % (st.get("detail") or "未知原因"),
+                "⚠ token 验证未通过（%s），「账号 → 运行状态」会保持标红" % (st.get("detail") or "未知原因"),
                 "err")
 
     def _apply_result(self):
@@ -416,8 +427,16 @@ class CaptureDialog(QDialog):
                                       or []),
             "second_fight_use_optional": bool(
                 (self.acc or {}).get("second_fight_use_optional", True)),
-            "base_schedule": appconfig.default_base_schedule(
-                batches=appconfig.schedule_batches(self.cfg)),
+            "maa_tasks": copy.deepcopy(
+                (self.acc or {}).get("maa_tasks") or {
+                    "depot": {"enabled": False, "plans": [],
+                               "sort_by_progress": False, "count_dual_chip": False},
+                    "progress": {"enabled": False, "plans": []},
+                }),
+            "base_schedule": copy.deepcopy(self.acc["base_schedule"])
+                if self.acc is not None and "base_schedule" in self.acc
+                else appconfig.default_base_schedule(
+                    batches=appconfig.schedule_batches(self.cfg)),
         }
         if self.acc is not None:
             self.acc.update(entry)
@@ -429,151 +448,204 @@ class CaptureDialog(QDialog):
         # 父子链排进延迟删除队列，之后对已销毁 C++ 对象的访问会抛 RuntimeError
         return
 
-    def on_close(self):
-        self._closing = True
-        if self.worker is not None:
-            self.worker.kill()
-            if not self.worker.wait(3000):
-                # PowerShell 偶发僵死：terminate 兜底；仍不退出就摘掉 parent，
-                # 让线程随进程退出，避免对话框析构时杀掉运行中的 QThread 直接 abort
-                self.worker.terminate()
-                if not self.worker.wait(1000):
-                    self.worker.setParent(None)
-                    _detached_threads.append(self.worker)
+    def _app_state_changed(self, state):
+        # 验证码要求到模拟器手动操作，切出应用不能打断捕获。
+        if self.worker is None and self._token_worker is None:
+            super()._app_state_changed(state)
+
+    def reject(self):
+        if not self._closing and self.worker is not None and self.worker.isRunning():
+            box = MessageBox("停止本次捕获？", "中途停止可能需要在模拟器里重新登录。", self)
+            box.yesButton.setText("停止捕获")
+            box.cancelButton.setText("继续捕获")
+            confirmed = box.exec()
+            box.deleteLater()
+            if not confirmed:
+                return
+        super().reject()
+
+    def done(self, result):
+        if not self._closing:
+            self._closing = True
+            if self.worker is not None:
+                self.worker.kill()
+            # done 信号可能在 QThread.run 真正返回前到达，所以也检查已回调的子线程。
+            for thread in self.findChildren(QThread):
+                if thread.isRunning():
+                    thread.setParent(None)
+                    _detached_threads.append(thread)
+                    thread.finished.connect(thread.deleteLater)
+                    thread.destroyed.connect(lambda _=None, t=thread: _detached_threads.remove(t))
+                    if thread.isFinished():
+                        thread.deleteLater()
             self.worker = None
-        # token 验证线程：探测一般 <1 秒，仍在跑就断开父级随进程收尾
-        if self._token_worker is not None and self._token_worker.isRunning():
-            self._token_worker.setParent(None)
-            _detached_threads.append(self._token_worker)
-        self._token_worker = None
-        self.reject()
-
-    def closeEvent(self, event):
-        self.on_close()
-        event.accept()
+            self._token_worker = None
+        super().done(result)
 
 
-class AccountDetailDialog(QDialog):
-    """账号详细控制：捕获、基建配置、候选关卡、删除都集中在这里。"""
+def _detail_action(title, hint, icon, callback, *, danger=False):
+    """整行可点的设置入口，子标签让鼠标事件直接到按钮。"""
+    button = QPushButton()
+    button.setAutoDefault(False)
+    button.setAccessibleName(title)
+    button.setAccessibleDescription(hint)
+    button.setCursor(Qt.PointingHandCursor)
+    button.setProperty("pressRadius", 12)
+    layout = QHBoxLayout(button)
+    layout.setContentsMargins(13, 8, 14, 8)
+    layout.setSpacing(12)
+    badge = QLabel()
+    badge.setAlignment(Qt.AlignCenter)
+    badge.setFixedSize(33, 33)
+    def badge_style():
+        ink = theme.ERR if danger else theme.ACCENT
+        badge.setPixmap(icon.icon(color=ink).pixmap(17, 17))
+        return "background:%s; border-radius:10px;" % theme.mix(theme.CARD, ink, .12)
+    theme.bind(badge, badge_style)
+    layout.addWidget(badge)
+    texts = QVBoxLayout()
+    texts.setSpacing(2)
+    texts.addWidget(label(title, 15, "600", color="ERR" if danger else "TEXT", transparent=True))
+    description = label(hint, 12, color="TEXT_2", transparent=True)
+    description.setWordWrap(True)
+    texts.addWidget(description)
+    layout.addLayout(texts, 1)
+    layout.addWidget(label("›", 20, color="TEXT_2", transparent=True))
+    for child in button.findChildren(QLabel):
+        child.setAttribute(Qt.WA_TransparentForMouseEvents)
+    theme.bind(button, lambda: "QPushButton {background:%s; border:1px solid transparent;"
+               "border-radius:12px;} QPushButton:hover {background:%s;}"
+               "QPushButton:focus {border-color:%s;} QPushButton:pressed {background:%s;}"
+               % (theme.ROW_INSET, theme.mix(theme.ROW_INSET, theme.ACCENT, .08),
+                  theme.ACCENT, theme.mix(theme.ROW_INSET, theme.ACCENT, .15)))
+    button.setMinimumHeight(60)
+    button.clicked.connect(callback)
+    return press_feedback(button)
+
+
+class AccountDetailDialog(SheetDialog):
+    """覆盖主窗口的账号详情，遮罩接收外部点击，内部编辑器保留各自的保存流程。"""
 
     def __init__(self, cfg, acc, page=None, parent=None):
-        super().__init__(parent)
+        super().__init__(parent, size=(718, 372))
         self.cfg = cfg
         self.acc = acc
         self.page = page
-        self.move_delta = 0   # 关闭窗口后由列表执行的上移/下移（-1/+1）
-        self.deleted = False  # 关闭窗口后由列表刷新（删除改变了账号列表）
-        self.export_wanted = False   # 关闭窗口后请求导出该账号（主窗口接手）
-        self.switch_wanted = False   # 关闭窗口后请求切换到该账号（主窗口接手）
-        self.setWindowTitle("账号详情 - %s" % (acc.get("label") or ""))
-        self.setModal(True)
-        self.resize(560, 480)
-        theme.bind(self, lambda: "QDialog { background: %s; }" % theme.BG)
-
-        root = QVBoxLayout(self)
-        root.setContentsMargins(20, 18, 20, 16)
-        root.setSpacing(14)
-
-        # 头部：序号圆标（真实运行顺序，此前写死 "1"）+ 名称 + 服务器/槽位 + UID 状态
-        server = acc.get("server", "official")
-        head = QHBoxLayout()
-        head.setSpacing(12)
-        try:
-            head.addWidget(IconBadge(str(self.cfg["accounts"].index(acc) + 1)))
-        except (ValueError, KeyError, AttributeError):
-            pass   # 账号已不在列表（极端时序）：徽章可缺，详情照常打开
-        name_box = QVBoxLayout()
-        name_box.setSpacing(2)
-        name = SubtitleLabel(acc.get("label") or "?")
-        _label_transparent(name)
-        meta = BodyLabel("%s · 槽位 %s" % (SERVER_LABELS.get(server, server),
-                                           acc.get("slot", "未设置")))
-        theme.bind(meta, lambda: "color: %s; %s background: transparent;"
-                   % (theme.TEXT_2, theme.font_stack(theme.FS_CAPTION)))
-        name_box.addWidget(name)
-        name_box.addWidget(meta)
-        head.addLayout(name_box)
-        head.addStretch(1)
+        self.move_delta = 0
+        self.deleted = False
+        self.export_wanted = False
+        self.switch_wanted = False
+        self.capture_opened = False
+        self.body.setContentsMargins(0, 0, 0, 0)
+        columns = QHBoxLayout()
+        columns.setContentsMargins(10, 10, 18, 10)
+        columns.setSpacing(18)
+        self.body.addLayout(columns)
+        identity = QFrame()
+        identity.setFixedWidth(202)
+        identity.setObjectName("accountIdentity")
+        theme.bind(identity, lambda: "QFrame#accountIdentity {background:%s; border-radius:15px;}"
+                   % theme.mix(theme.CARD, theme.ACCENT, .10))
+        profile = QVBoxLayout(identity)
+        profile.setContentsMargins(18, 22, 16, 20)
+        profile.setSpacing(5)
+        avatar = QLabel()
+        avatar.setFixedSize(48, 48)
+        avatar.setAlignment(Qt.AlignCenter)
+        def avatar_style():
+            avatar.setPixmap(FluentIcon.PEOPLE.icon(color=theme.PRIMARY_FG).pixmap(25, 25))
+            return "background:%s; border-radius:16px;" % theme.PRIMARY_BG
+        theme.bind(avatar, avatar_style)
+        profile.addWidget(avatar)
+        profile.addSpacing(10)
+        self.name_label = label("", 24, "700", transparent=True)
+        self.name_label.setTextFormat(Qt.PlainText)
+        profile.addWidget(self.name_label)
+        self.server_label = label("", 14, color="TEXT_2", transparent=True)
+        self.server_label.setTextFormat(Qt.PlainText)
+        profile.addWidget(self.server_label)
+        profile.addStretch()
+        profile.addWidget(label("登录槽位", 12, color="TEXT_2", transparent=True))
+        self.slot_label = label("", 15, "600", transparent=True)
+        self.slot_label.setTextFormat(Qt.PlainText)
+        profile.addWidget(self.slot_label)
+        profile.addSpacing(7)
         self.uid_pill = Pill()
-        head.addWidget(self.uid_pill, 0, Qt.AlignmentFlag.AlignVCenter)
-        root.addLayout(head)
+        profile.addWidget(self.uid_pill, 0, Qt.AlignLeft)
+        columns.addWidget(identity)
 
-        line = QWidget()
-        line.setFixedHeight(1)
-        theme.bind(line, lambda: "background: %s;" % theme.BORDER)
-        root.addWidget(line)
+        body = QVBoxLayout()
+        body.setContentsMargins(0, 12, 0, 8)
+        body.setSpacing(12)
+        body.addWidget(label("账号详情", 23, "700"))
+        self.tabs = navigation(("日常方案", "登录与资料", "账号管理"), compact=True)
+        body.addWidget(self.tabs, 0, Qt.AlignLeft)
+        self.sections = PageStack()
+        self.tabs.currentChanged.connect(self.sections.setCurrentIndex)
+        body.addWidget(self.sections, 1)
+        columns.addLayout(body, 1)
 
-        sec = BodyLabel("常用功能")
-        theme.bind(sec, lambda: "color: %s; %s background: transparent;"
-                   % (theme.TEXT_2, theme.font_stack(theme.FS_BODY, "600")))
-        root.addWidget(sec)
+        daily = self._section()
+        daily.addWidget(_detail_action("精确基建", "安排房间、干员与换班批次", FluentIcon.TILES,
+                                       self._on_base_config))
+        daily.addWidget(_detail_action("第二理智候选关卡", "设置该账号刷图时可选的关卡", FluentIcon.GAME,
+                                       self._on_fight_plan))
+        daily.addWidget(_detail_action("库存与干员培养", "配置库存目标和培养计划", FluentIcon.LIBRARY,
+                                       self._on_account_tasks))
+        daily.addStretch()
 
-        grid = QGridLayout()
-        grid.setSpacing(10)
-        self.capture_btn = style_button(PushButton("重新捕获登录数据"))
-        self.capture_btn.setToolTip("清空登录态并重新登录，拉取该账号的登录数据")
-        self.bs_btn = style_button(PushButton("精确基建配置"))
-        self.bs_btn.setToolTip(
-            "配置该账号精确基建派驻（布局/批次/干员/无人机/菲亚梅塔恢复）")
-        self.fight_btn = style_button(PushButton("第二理智候选关卡"))
-        self.fight_btn.setToolTip("按 MAA 候选关卡界面修改该账号刷图候选")
-        self.export_btn = style_button(PushButton("导出干员资料"))
-        self.export_btn.setToolTip(
-            "立即为该账号运行 MAA 干员识别（约 3 分钟）：切号 → 更新等待 → "
-            "登录校验 → 识别，结果写入 exports\\。\n与挂机、MAA 更新互斥。")
-        self.switch_btn = style_button(PushButton("切换到此账号"))
-        self.switch_btn.setToolTip(
-            "只切到该账号并完成登录校验，不跑日常任务：\n"
-            "结束后模拟器保持运行，可直接手动游戏。\n与挂机、收菜、导出互斥。")
-        self.delete_btn = style_button(PushButton("删除该账号"), "danger")
-        for i, b in enumerate((self.capture_btn, self.bs_btn,
-                               self.fight_btn, self.export_btn,
-                               self.switch_btn, self.delete_btn)):
-            b.setMinimumHeight(38)
-            grid.addWidget(b, i // 2, i % 2)
-        grid.setColumnStretch(0, 1)
-        grid.setColumnStretch(1, 1)
-        root.addLayout(grid)
+        access = self._section()
+        access.addWidget(_detail_action("切换到此账号", "校验登录后留在游戏内，方便手动游玩",
+                                        FluentIcon.PEOPLE, self._on_switch))
+        access.addWidget(_detail_action("重新捕获登录数据", "重新登录并更新本机保存的凭据",
+                                        FluentIcon.FINGERPRINT, self._on_capture))
+        busy = page is not None and page.export_busy()
+        export = _detail_action("导出干员资料", "已有导出任务正在运行" if busy else "通过 MAA 识别并导出干员资料",
+                                FluentIcon.DOWNLOAD, self._on_export)
+        export.setEnabled(not busy)
+        access.addWidget(export)
+        access.addStretch()
 
-        # 运行顺序：列表里可直接拖动卡片，这里再给一份「上移/下移」按钮
-        order_row = QHBoxLayout()
-        order_row.setSpacing(10)
-        order_lab = BodyLabel("运行顺序")
-        theme.bind(order_lab, lambda: "color: %s; %s background: transparent;"
-                   % (theme.TEXT_2, theme.font_stack(theme.FS_CAPTION)))
-        order_row.addWidget(order_lab)
-        self.up_btn = style_button(PushButton("↑ 上移"), small=True)
-        self.up_btn.setToolTip("与上一个账号交换位置（运行顺序 = 列表顺序）")
-        self.down_btn = style_button(PushButton("↓ 下移"), small=True)
-        self.down_btn.setToolTip("与下一个账号交换位置（运行顺序 = 列表顺序）")
-        order_row.addWidget(self.up_btn)
-        order_row.addWidget(self.down_btn)
-        order_row.addStretch(1)
-        root.addLayout(order_row)
+        manage = self._section()
+        accounts = cfg.get("accounts", [])
+        index = accounts.index(acc) if acc in accounts else -1
+        order = QHBoxLayout()
+        order.setSpacing(8)
+        order.addWidget(label("运行顺序", 15, "600"))
+        if index >= 0:
+            order.addWidget(label("第 %d / %d 位" % (index + 1, len(accounts)), 13, color="TEXT_2"))
+        order.addStretch()
+        for text, delta in (("上移", -1), ("下移", 1)):
+            button = style_button(QPushButton(text), small=True)
+            button.setAutoDefault(False)
+            button.setEnabled(index >= 0 and 0 <= index + delta < len(accounts))
+            button.clicked.connect(lambda checked=False, delta=delta: self._on_move(delta))
+            order.addWidget(button)
+        manage.addLayout(order)
+        manage.addStretch()
+        manage.addWidget(_detail_action("从运行列表移除", "保留本机登录槽位，移除前需要确认",
+                                        FluentIcon.DELETE, self._on_delete, danger=True))
+        self._refresh_identity()
 
-        self.hint = BodyLabel(
-            "「启用 / 精确基建」开关在账号卡片上直接操作；"
-            "导出干员资料点上方按钮，立即导这一个号（与挂机互斥）。"
-            "运行顺序 = 账号列表顺序，列表里按住卡片（或账号名）拖到目标位置即可调整。")
-        self.hint.setWordWrap(True)
-        theme.bind(self.hint, lambda: "color: %s; %s background: transparent;"
-                   % (theme.TEXT_3, theme.font_stack(theme.FS_CAPTION)))
-        root.addWidget(self.hint)
-        root.addStretch(1)
+    def _section(self):
+        pane = QWidget()
+        layout = QVBoxLayout(pane)
+        layout.setContentsMargins(1, 1, 1, 1)
+        layout.setSpacing(7)
+        self.sections.addWidget(pane)
+        return layout
 
-        self.delete_btn.clicked.connect(self._on_delete)
-
-        self.capture_btn.clicked.connect(self._on_capture)
-        self.bs_btn.clicked.connect(self._on_base_config)
-        self.fight_btn.clicked.connect(self._on_fight_plan)
-        self.export_btn.clicked.connect(self._on_export)
-        self.switch_btn.clicked.connect(self._on_switch)
-        # 已有导出在跑：按钮直接置灰（其余互斥情形点击时由主窗口提示）
-        if self.page is not None and self.page.export_busy():
-            self.export_btn.setEnabled(False)
-        self.up_btn.clicked.connect(lambda: self._on_move(-1))
-        self.down_btn.clicked.connect(lambda: self._on_move(1))
-        self._refresh_uid()
+    def _refresh_identity(self):
+        name = self.acc.get("label") or "未命名账号"
+        self.setWindowTitle("账号详情 · " + name)
+        self.ensurePolished()
+        for widget, value in ((self.name_label, name), (self.slot_label, self.acc.get("slot") or "未设置")):
+            widget.setText(widget.fontMetrics().elidedText(value, Qt.ElideRight, 164))
+            widget.setToolTip(value)
+        server = self.acc.get("server", "official")
+        self.server_label.setText(SERVER_LABELS.get(server, server))
+        uid = slot_uid(self.cfg, self.acc.get("slot", ""))
+        self.uid_pill.set_state("ok" if uid else "wait", ("UID " + uid) if uid else "未捕获登录数据")
 
     def _on_move(self, delta):
         """只记录意图并关窗：列表（卡片的父级）负责真正移动，避免重建时窗口还挂着。"""
@@ -591,19 +663,12 @@ class AccountDetailDialog(QDialog):
         self.switch_wanted = True
         self.accept()
 
-    def _refresh_uid(self):
-        uid = slot_uid(self.cfg, self.acc.get("slot", ""))
-        if uid:
-            self.uid_pill.set_state("ok", "已捕获 UID %s" % uid)
-        else:
-            self.uid_pill.set_state("wait", "未捕获")
-
     def _on_capture(self):
         dlg = CaptureDialog(self.cfg, self.acc, page=self.page, parent=self)
         dlg.exec()
-        self._refresh_uid()
-        if self.page is not None:
-            self.page.refresh()
+        dlg.deleteLater()
+        self.capture_opened = True
+        self._refresh_identity()
 
     def _on_base_config(self):
         from pages.base_schedule_dialog import show_base_schedule_dialog
@@ -611,6 +676,10 @@ class AccountDetailDialog(QDialog):
 
     def _on_fight_plan(self):
         show_stage_plan_dialog(self.cfg, self.acc, parent=self)
+
+    def _on_account_tasks(self):
+        from pages.account_tasks_dialog import show_account_tasks_dialog
+        show_account_tasks_dialog(self.cfg, self.acc, parent=self)
 
     def _on_delete(self):
         box = MessageBox(
@@ -624,8 +693,7 @@ class AccountDetailDialog(QDialog):
         self.cfg["accounts"].remove(self.acc)
         appconfig.save(self.cfg)
         self.deleted = True
-        # 只记录删除并关窗，page.refresh() 由卡片在 exec() 返回后执行：
-        # 弹窗未关就重建列表会把自己（卡片的子级）排进延迟删除队列
+        # 退出详情后由列表重建卡片。
         self.accept()
 
 
@@ -664,7 +732,7 @@ class CardGridArea(QWidget):
 
 
 class AccountCard(Card):
-    """两列网格中的账号卡片：表面只放「精确基建 / 启用」两个开关，
+    """账号列表行：左侧身份、中部开关、右侧单号操作，
     点击名字可直接改名，点击卡片空白处打开详细控制界面。
 
     卡片整张可点击（开详情），所以悬停给一档「 CARD 混入 5% 文字色」的
@@ -693,7 +761,8 @@ class AccountCard(Card):
         row = QHBoxLayout()
         row.setSpacing(10)
         self.badge = IconBadge(str(index + 1))
-        row.addWidget(self.badge)
+        self.badge.setFixedSize(38, 38)
+        row.addWidget(self.badge, 0, Qt.AlignVCenter)
         self.name_box = QVBoxLayout()
         self.name_box.setSpacing(2)
         self.name_label = ClickLabel(acc.get("label") or "?")
@@ -715,8 +784,12 @@ class AccountCard(Card):
                            " %s }" % (theme.TEXT_2,
                                       theme.font_stack(theme.FS_CAPTION)))
         self.name_box.addWidget(self.meta_label)
-        row.addLayout(self.name_box)
-        row.addStretch(1)
+        self.uid_pill = Pill()
+        self.name_box.addWidget(self.uid_pill, 0, Qt.AlignLeft)
+        for text_label in (self.name_label, self.meta_label):
+            text_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        row.addLayout(self.name_box, 1)
+
 
         self.base_sw = set_switch_checked_gray(SwitchButton())
         self.base_sw.setOnText("精确基建")
@@ -736,26 +809,25 @@ class AccountCard(Card):
         self.sw.setChecked(bool(acc.get("enabled", True)))
         self.sw.checkedChanged.connect(self._on_toggle)
         row.addWidget(self.sw, 0, Qt.AlignmentFlag.AlignVCenter)
-        self.vbox.addLayout(row)
-        self.vbox.addSpacing(8)
-
-        # 捕获状态（UID）在左（跟在名字下方，属账号元信息），
-        # 「快速启动」在右：与顶行开关同一条右缘操作轴
-        uid_row = QHBoxLayout()
-        uid_row.setSpacing(8)
-        self.uid_pill = Pill()
-        uid_row.addWidget(self.uid_pill)
-        uid_row.addStretch(1)
-        self.launch_btn = style_tinted_button(PushButton("▶ 快速启动"), small=True)
+        row.addSpacing(8)
+        self.launch_btn = style_button(QPushButton("快速启动"), small=True)
         self.launch_btn.setToolTip(
             "只把该账号的登录数据（token）推入游戏并启动模拟器：不等待游戏更新、"
             "不做登录校验，导入完成即可手动游戏（无需输账号密码）。\n"
             "若槽位里的 token 已失效，游戏会停在登录界面，需手动登录或重新捕获。\n"
             "与挂机、收菜、导出互斥。")
         self.launch_btn.clicked.connect(self._on_launch)
-        uid_row.addWidget(self.launch_btn)
-        self.vbox.addLayout(uid_row)
-        self.vbox.addSpacing(2)
+        row.addWidget(self.launch_btn)
+        self.collect_btn = style_tinted_button(QPushButton("收菜"), small=True, icon=FluentIcon.LEAF)
+        self.run_btn = style_primary_button(QPushButton("运行"), small=True, icon=FluentIcon.PLAY_SOLID)
+        self.collect_btn.setToolTip("只为此账号执行一次基建收菜")
+        self.run_btn.setToolTip("只为此账号执行一次完整日常挂机")
+        if page is not None:
+            self.collect_btn.clicked.connect(lambda: page.task_requested.emit(self.acc, True))
+            self.run_btn.clicked.connect(lambda: page.task_requested.emit(self.acc, False))
+        row.addWidget(self.collect_btn)
+        row.addWidget(self.run_btn)
+        self.vbox.addLayout(row)
         self.refresh_uid()
 
     def refresh_uid(self):
@@ -793,11 +865,8 @@ class AccountCard(Card):
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
             pos = event.position().toPoint()
-            # 两个开关与「快速启动」按钮自己的区域绝不触发详情/拖动
-            # （即使事件冒泡回卡片）
-            if not (self.base_sw.geometry().contains(pos)
-                    or self.sw.geometry().contains(pos)
-                    or self.launch_btn.geometry().contains(pos)):
+            controls = (self.base_sw, self.sw, self.launch_btn, self.collect_btn, self.run_btn)
+            if not any(control.geometry().contains(pos) for control in controls):
                 self._press_pos = pos
                 self._maybe_click = True
         super().mousePressEvent(event)
@@ -854,12 +923,13 @@ class AccountCard(Card):
         dlg.exec()
         if dlg.move_delta and self.page is not None:
             self.page.move_relative(self.index, dlg.move_delta)
-        if dlg.deleted and self.page is not None:
+        if (dlg.deleted or dlg.capture_opened) and self.page is not None:
             self.page.refresh()
         if dlg.export_wanted and self.page is not None:
             self.page.export_requested.emit(self.acc)
         if dlg.switch_wanted and self.page is not None:
             self.page.switch_requested.emit(self.acc)
+        dlg.deleteLater()
 
     def _start_rename(self):
         """点击账号名字：原地换成输入框，回车/失焦保存，Esc 取消。"""
@@ -923,6 +993,7 @@ class AccountsPage(ScrollArea):
     export_requested = Signal(object)
     switch_requested = Signal(object)
     start_requested = Signal(object)
+    task_requested = Signal(object, bool)  # 账号，是否只收菜
 
     def __init__(self, cfg):
         super().__init__()
@@ -950,21 +1021,18 @@ class AccountsPage(ScrollArea):
         root.setContentsMargins(12, 16, 12, 16)
         root.setSpacing(20)
 
-        # 「添加账号」操作放最上面；账号卡片与仪表盘一样直接铺在页面背景上
-        action = Card()
         bar = QHBoxLayout()
-        bar.setSpacing(10)
-        self.add_btn = style_primary_button(PrimaryPushButton("添加账号"))
+        heading = QVBoxLayout()
+        heading.setSpacing(4)
+        heading.addWidget(label("我的账号", 30, "700"))
+        heading.addWidget(label("拖动账号即可调整运行顺序", 14, color="TEXT_2"))
+        bar.addLayout(heading)
+        bar.addStretch()
+        self.add_btn = style_primary_button(QPushButton("添加账号"), icon=FluentIcon.ADD)
         self.add_btn.setToolTip("添加账号：输入名称/服务器/账号/密码，自动登录并保存登录数据")
         self.add_btn.clicked.connect(self._on_add)
         bar.addWidget(self.add_btn)
-        bar.addStretch(1)
-        order_hint = BodyLabel("按住卡片（或账号名）拖动：其他账号会让位预览，松手即调整运行顺序")
-        theme.bind(order_hint, lambda: "color: %s; %s background: transparent;"
-                   % (theme.TEXT_2, theme.font_stack(theme.FS_CAPTION)))
-        bar.addWidget(order_hint)
-        action.vbox.addLayout(bar)
-        root.addWidget(action)
+        root.addLayout(bar)
 
         # 卡片区：绝对定位 + 动画，故不使用布局管理器
         self.grid_area = CardGridArea(self)
@@ -987,6 +1055,7 @@ class AccountsPage(ScrollArea):
     def _on_add(self):
         dlg = CaptureDialog(self.cfg, None, page=self, parent=self)
         dlg.exec()
+        dlg.deleteLater()
         self.refresh()
 
     def set_export_busy(self, busy):
@@ -997,7 +1066,7 @@ class AccountsPage(ScrollArea):
         return self._export_busy
 
     def refresh(self):
-        # 清空并重建账号卡片（固定每行 2 个，位置由 slot_rect 计算）
+        # 清空并重建账号卡片（每个账号一行，位置由 slot_rect 计算）
         if self._drag_card is not None:
             self.cancel_drag()
         for card in self.cards:
@@ -1020,16 +1089,10 @@ class AccountsPage(ScrollArea):
         self.relayout()
 
     # ---- 版式：卡片按「槽位」绝对定位 ----
-    def slot_rect(self, index, count=None):
-        """第 index 个槽位的矩形（grid_area 坐标）。最后一张落单时横跨整行。"""
-        n = len(self.cards) if count is None else count
-        width = max(1, self.grid_area.width())
-        card_w = max(160, (width - (GRID_COLS - 1) * GRID_SPACING) // GRID_COLS)
-        row, _col = divmod(index, GRID_COLS)
-        y = row * (self.card_h + GRID_SPACING)
-        if n % GRID_COLS and index == n - 1:
-            return QRect(0, y, width, self.card_h)
-        return QRect(_col * (card_w + GRID_SPACING), y, card_w, self.card_h)
+    def slot_rect(self, index):
+        """第 index 个账号行的完整点击与拖放区域。"""
+        return QRect(0, index * (self.card_h + GRID_SPACING),
+                     max(1, self.grid_area.width()), self.card_h)
 
     def relayout(self):
         """按当前卡片顺序重排（窗口尺寸变化时直接对齐，不做动画）。"""
@@ -1038,17 +1101,16 @@ class AccountsPage(ScrollArea):
         self._in_relayout = True
         try:
             n = len(self.cards)
-            rows = (n + GRID_COLS - 1) // GRID_COLS
-            if rows:
+            if n:
                 self.grid_area.setFixedHeight(
-                    rows * self.card_h + (rows - 1) * GRID_SPACING)
+                    n * self.card_h + (n - 1) * GRID_SPACING)
             else:
                 self.grid_area.setFixedHeight(self.empty_label.sizeHint().height())
             self.empty_label.setGeometry(0, 0, max(1, self.grid_area.width()),
                                          self.empty_label.sizeHint().height())
             for i, card in enumerate(self.cards):
                 self._stop_ani(card)
-                card.setGeometry(self.slot_rect(i, n))
+                card.setGeometry(self.slot_rect(i))
         finally:
             self._in_relayout = False
 
@@ -1059,7 +1121,7 @@ class AccountsPage(ScrollArea):
             return 0
         best, best_dist = 0, None
         for i in range(n):
-            center = self.slot_rect(i, n).center()
+            center = self.slot_rect(i).center()
             dist = (center.x() - pos.x()) ** 2 + (center.y() - pos.y()) ** 2
             if best_dist is None or dist < best_dist:
                 best, best_dist = i, dist
@@ -1137,7 +1199,7 @@ class AccountsPage(ScrollArea):
         preview = others[:slot] + [self._drag_card] + others[slot:]
         self._drag_preview = preview
         for i, card in enumerate(preview):
-            self._animate_card(card, self.slot_rect(i, len(preview)))
+            self._animate_card(card, self.slot_rect(i))
 
     def end_drag(self):
         """松手：定稿顺序 + 拖影飞回槽位（卡片同步淡入）。"""
@@ -1146,7 +1208,7 @@ class AccountsPage(ScrollArea):
             return
         preview = list(self._drag_preview) or list(self._drag_order)
         slot = preview.index(card)
-        target = self.slot_rect(slot, len(preview))
+        target = self.slot_rect(slot)
         # 拖影与 card 同属一个坐标系换算：grid_area → viewport
         target_vp = QRect(self.grid_area.mapTo(self.viewport(), target.topLeft()),
                           target.size())
@@ -1247,7 +1309,7 @@ class AccountsPage(ScrollArea):
             proxy.deleteLater()
         # 预览期间其他卡片已经让位，这里按「未改变的顺序」把它们移回去
         for i, c in enumerate(self.cards):
-            self._animate_card(c, self.slot_rect(i, len(self.cards)))
+            self._animate_card(c, self.slot_rect(i))
         if card is not None:
             self._finish_landing(card)
 
@@ -1295,7 +1357,7 @@ class AccountsPage(ScrollArea):
         self.cards = cards
         for i, c in enumerate(cards):
             c.set_index(i)
-            self._animate_card(c, self.slot_rect(i, len(cards)))
+            self._animate_card(c, self.slot_rect(i))
         tip = "「%s」现在排在第 %d 位，运行顺序即列表顺序" % (
             acc.get("label") or "", dest + 1)
         if runner.is_running():

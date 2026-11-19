@@ -25,9 +25,8 @@ DEFAULT_CONFIG = Path(__file__).resolve().parents[2] / "config.json"
 
 # 插件公共工具（plugins\common.py）——此前本文件与其它四个插件各复制一份
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from common import (atomic_json_write as _atomic_json_write, find_account,
-                    load_config, log_file, maa_dir_for as _maa_dir,
-                    read_json as _read_json)
+from common import find_account, load_config, run_plugin_command, log_file, maa_dir_for as _maa_dir
+from maa_config_io import read_object, write_transaction
 
 
 def _log_file(cfg, msg):
@@ -51,9 +50,10 @@ FARM_SCHEME = "Default"
 def apply_guard(maa_dir):
     """锁定 Default 方案：Current 归位 + 关键任务补开。返回 (ok, message)。"""
     gui_new = Path(maa_dir) / "config" / "gui.new.json"
-    data = _read_json(gui_new)
-    if not isinstance(data, dict):
-        return False, "读取 %s 失败" % gui_new
+    try:
+        data = read_object(gui_new)
+    except (OSError, ValueError) as exc:
+        return False, str(exc)
     cfgs = data.get("Configurations")
     conf = cfgs.get(FARM_SCHEME) if isinstance(cfgs, dict) else None
     if not isinstance(conf, dict):
@@ -88,21 +88,25 @@ def apply_guard(maa_dir):
         pointer = "Current 已归位 Default"
         changed = True
 
-    if changed:
-        _atomic_json_write(gui_new, data)
+    writes = [(gui_new, data)] if changed else []
 
     # gui.json（旧版设置文件）的 Current 一并归位；读不了就算了，任务队列以
     # gui.new.json 为准，别为它挡住挂机
     note = ""
     gui_json = Path(maa_dir) / "config" / "gui.json"
-    gj = _read_json(gui_json)
+    try:
+        gj = read_object(gui_json, optional=True)
+    except (OSError, ValueError) as exc:
+        gj = None
+        note = "；已跳过旧版配置：%s" % exc
     if isinstance(gj, dict) and gj.get("Current") != FARM_SCHEME:
         gj["Current"] = FARM_SCHEME
-        _atomic_json_write(gui_json, gj)
+        writes.append((gui_json, gj))
         note = "；gui.json 同步归位"
-    elif not isinstance(gj, dict):
-        note = "；gui.json 不可读（已忽略）"
-
+    try:
+        write_transaction(writes)
+    except OSError as exc:
+        return False, "恢复 Default 失败：%s" % exc
     if count:
         return True, "任务开关已补开：%s（共 %d 项）%s%s" % (
             "、".join(fixed), count,
@@ -113,7 +117,7 @@ def apply_guard(maa_dir):
 
 
 def cmd_apply(args):
-    cfg = load_config(args.config)
+    cfg = load_config(args.config, required=True)
     acc = find_account(cfg, args.account)
     if acc is None:
         print("ERROR account not found: %s" % args.account)
@@ -121,9 +125,8 @@ def cmd_apply(args):
 
     server = args.server or acc.get("server") or "official"
     maa_dir = _maa_dir(cfg, server)
-    if not maa_dir or not Path(maa_dir).exists():
-        _log_file(cfg, "WARN 未找到 %s 的 MAA 目录：%s" % (server, maa_dir))
-        print("ERROR no maa dir")
+    if not maa_dir or not maa_dir.is_dir():
+        print("ERROR 未找到 %s 的 MAA 目录：%s" % (server, maa_dir or "未配置"))
         return 2
 
     ok, msg = apply_guard(maa_dir)
@@ -141,7 +144,7 @@ def main(argv=None):
     a.add_argument("--server", choices=["official", "bilibili"], default=None)
     a.set_defaults(func=cmd_apply)
     args = p.parse_args(argv)
-    return args.func(args)
+    return run_plugin_command(args)
 
 
 if __name__ == "__main__":

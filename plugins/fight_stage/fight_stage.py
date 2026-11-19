@@ -13,7 +13,6 @@ Current）里第二个理智作战任务的 StagePlan，与 MAA「候选关卡�
 """
 
 import argparse
-import json
 import sys
 from pathlib import Path
 
@@ -22,8 +21,8 @@ DEFAULT_CONFIG = Path(__file__).resolve().parents[2] / "config.json"
 
 # 插件公共工具（plugins\common.py）——此前本文件与其它四个插件各复制一份
 sys.path.insert(0, str(PLUGIN_DIR.parent))
-from common import (atomic_json_write as _atomic_json_write, find_account,
-                    load_config, log_file, maa_dir_for as _maa_dir)
+from common import find_account, load_config, run_plugin_command, log_file, maa_dir_for as _maa_dir
+from maa_config_io import read_object, write_transaction
 
 
 def _log_file(cfg, msg):
@@ -44,12 +43,13 @@ def apply_plan_to_maa(maa_dir, plan, use_optional=True):
     if not gui_new.exists():
         return False, "未找到 %s" % gui_new
     try:
-        data = json.loads(gui_new.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
+        data = read_object(gui_new)
+    except (OSError, ValueError) as exc:
         return False, "读取 %s 失败：%s" % (gui_new, exc)
 
     cur = data.get("Current") or "Default"
-    section = (data.get("Configurations") or {}).get(cur)
+    configs = data.get("Configurations")
+    section = configs.get(cur) if isinstance(configs, dict) else None
     if not isinstance(section, dict):
         return False, "MAA 当前配置「%s」不存在" % cur
     queue = section.get("TaskQueue")
@@ -63,20 +63,21 @@ def apply_plan_to_maa(maa_dir, plan, use_optional=True):
 
     if not use_optional and len(plan) > 1:
         plan = plan[:1]
-    task["StagePlan"] = plan
-    task["UseOptionalStage"] = bool(use_optional)
-    task["StageResetMode"] = "Ignore" if use_optional else "Current"
-    try:
-        _atomic_json_write(gui_new, data)
-    except OSError as exc:
-        return False, "写入 %s 失败：%s" % (gui_new, exc)
+    desired = {"StagePlan": plan, "UseOptionalStage": bool(use_optional),
+               "StageResetMode": "Ignore" if use_optional else "Current"}
+    if any(task.get(key) != value for key, value in desired.items()):
+        task.update(desired)
+        try:
+            write_transaction([(gui_new, data)])
+        except OSError as exc:
+            return False, "写入 %s 失败：%s" % (gui_new, exc)
     names = ["当前/上次" if not str(s).strip() else str(s) for s in plan]
     return True, "第二个理智作战候选关卡已映射为 %s（%s）" % (
         "、".join(names), gui_new.name)
 
 
 def cmd_apply(args):
-    cfg = load_config(args.config)
+    cfg = load_config(args.config, required=True)
     acc = find_account(cfg, args.account)
     if acc is None:
         print("ERROR account not found: %s" % args.account)
@@ -96,11 +97,9 @@ def cmd_apply(args):
 
     server = args.server or acc.get("server") or "official"
     maa_dir = _maa_dir(cfg, server)
-    if not maa_dir or not Path(maa_dir).exists():
-        _log_file(cfg, "WARN 未找到 %s 的 MAA 目录：%s，跳过第二理智关卡写入"
-                  % (server, maa_dir))
-        print("WARN no maa dir")
-        return 0
+    if not maa_dir or not maa_dir.is_dir():
+        print("ERROR 未找到 %s 的 MAA 目录：%s" % (server, maa_dir or "未配置"))
+        return 2
 
     ok, msg = apply_plan_to_maa(maa_dir, plan, use_optional=use_optional)
     _log_file(cfg, "账号「%s」候选关卡：%s" % (acc.get("label") or args.account, msg))
@@ -117,7 +116,7 @@ def main(argv=None):
     a.add_argument("--server", choices=["official", "bilibili"], default=None)
     a.set_defaults(func=cmd_apply)
     args = p.parse_args(argv)
-    return args.func(args)
+    return run_plugin_command(args)
 
 
 if __name__ == "__main__":

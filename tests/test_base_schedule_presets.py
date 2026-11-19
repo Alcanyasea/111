@@ -23,10 +23,10 @@ from tests.test_support import appconfig  # noqa: E402
 from pages import base_schedule_dialog as bsdlg_mod  # noqa: E402
 from pages.base_schedule_dialog import BaseScheduleDialog  # noqa: E402
 
-import qfluentwidgets  # noqa: E402
+from sheets import MessageBox  # noqa: E402
 
 # _apply_preset 末尾的摘要 MessageBox 会模态 exec() 阻塞测试：统一补丁为立即返回
-_REAL_MSGBOX_EXEC = qfluentwidgets.MessageBox.exec
+_REAL_MSGBOX_EXEC = MessageBox.exec
 
 
 def _noop_msgbox_exec(self, *args, **kwargs):
@@ -73,11 +73,11 @@ class PresetDialogTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.app = QApplication.instance() or QApplication([])
-        qfluentwidgets.MessageBox.exec = _noop_msgbox_exec
+        MessageBox.exec = _noop_msgbox_exec
 
     @classmethod
     def tearDownClass(cls):
-        qfluentwidgets.MessageBox.exec = _REAL_MSGBOX_EXEC
+        MessageBox.exec = _REAL_MSGBOX_EXEC
         cls.app.processEvents()
 
     def _dlg(self, acc=None):

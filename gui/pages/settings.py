@@ -5,17 +5,21 @@ from pathlib import Path
 
 from PySide6.QtCore import Qt, QRectF, Signal
 from PySide6.QtGui import QColor, QPainter, QPainterPath, QPen
-from PySide6.QtWidgets import QFileDialog, QHBoxLayout, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QHBoxLayout, QVBoxLayout, QWidget
 
 from qfluentwidgets import (BodyLabel, ComboBox, InfoBar, InfoBarPosition,
-                            LineEdit, MessageBox, PrimaryPushButton, PushButton,
-                            ScrollArea, SpinBox, SwitchButton)
+                            LineEdit, PrimaryPushButton, PushButton,
+                            SpinBox, SwitchButton)
 
 import config as appconfig
 import theme
+from sheet_files import FileDialog as QFileDialog
+from sheets import MessageBox
 from core import cleanup, maa_setup, notify, poller, runner
+from pages.dashboard import StatusCard
+from pages.home import SectionPage, scroll_cards
 from widgets import (Card, set_switch_checked_gray, style_button,
-                     style_primary_button, style_scroll_area)
+                     style_primary_button)
 
 PATH_KEYS = (
     ("maa_official", "MAA 官服"),
@@ -85,7 +89,7 @@ class PaletteSwatch(QWidget):
             p.drawRoundedRect(r, 8, 8)
 
 
-class SettingsPage(ScrollArea):
+class SettingsPage(QWidget):
     def __init__(self, cfg, on_theme_change=None):
         super().__init__()
         self.cfg = cfg
@@ -94,14 +98,13 @@ class SettingsPage(ScrollArea):
         self._apply_pending = False  # 同步期间又保存过：结束后再同步一次
         self._setup_worker = None    # MAA 服务器配置后台线程（可能复制整套目录）
         self._notify_worker = None   # 测试推送后台线程（HTTP 最长十几秒）
-        self.view = QWidget()
-        self.setWidget(self.view)
-        self.setWidgetResizable(True)
-        # 视口透明化 + 浅色细滚动条；右侧让出 12px 给滑块
-        style_scroll_area(self)
-        root = QVBoxLayout(self.view)
-        root.setContentsMargins(12, 16, 12, 16)
-        root.setSpacing(16)
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 12)
+        self.status_card = StatusCard()
+        self.status_card.open_official_btn.clicked.connect(
+            lambda: self.status_card.on_open_maa(self.cfg, "official"))
+        self.status_card.open_bili_btn.clicked.connect(
+            lambda: self.status_card.on_open_maa(self.cfg, "bilibili"))
 
         # ---- 外观（明暗主题 × 配色方案）----
         self.appearance_card = Card("外观")
@@ -153,20 +156,7 @@ class SettingsPage(ScrollArea):
         self.appearance_card.vbox.addSpacing(2)
         self.appearance_card.vbox.addWidget(palette_hint)
         self.appearance_card.vbox.addSpacing(10)
-        root.addWidget(self.appearance_card)
         self._sync_palette_swatches()
-
-        # ---- 宽窗口双栏：左 = 程序路径 / 连接与超时 / 通知推送；
-        #      右 = 行为开关 / MAA 服务器配置 / 数据清理 / 保存。
-        #      窄窗口下各卡片本就是可压缩的行式布局，滚动区兜底 ----
-        cols = QHBoxLayout()
-        cols.setSpacing(16)
-        left_col = QVBoxLayout()
-        left_col.setContentsMargins(0, 0, 0, 0)
-        left_col.setSpacing(16)
-        right_col = QVBoxLayout()
-        right_col.setContentsMargins(0, 0, 0, 0)
-        right_col.setSpacing(16)
 
         # ---- 程序路径 ----
         self.path_card = Card("程序路径")
@@ -185,7 +175,6 @@ class SettingsPage(ScrollArea):
             self.path_card.vbox.addLayout(row)
             self.path_card.vbox.addSpacing(10)
             self.path_edits[key] = edit
-        left_col.addWidget(self.path_card)
 
         # ---- 连接与超时 / 行为开关：固定上下两张通栏卡片，不随宽度重排 ----
         self.conn_card = Card("连接与超时")
@@ -215,7 +204,7 @@ class SettingsPage(ScrollArea):
         self.behavior_card.vbox.addWidget(update_hint)
         self.behavior_card.vbox.addSpacing(10)
         shutdown_hint = BodyLabel(
-            "每个启动时间的「关机」开关在仪表盘「班次计划」中设置（60 秒倒计时）")
+            "每个启动时间的「关机」开关在「计划 → 日常挂机」中设置（60 秒倒计时）")
         theme.bind(shutdown_hint, lambda: "color: %s; %s" % (theme.TEXT_3, theme.font_stack(theme.FS_CAPTION)))
         shutdown_hint.setWordWrap(True)
         self.behavior_card.vbox.addWidget(shutdown_hint)
@@ -223,8 +212,6 @@ class SettingsPage(ScrollArea):
         acc_hint = BodyLabel("账号增删 / 启用 / 捕获请到「账号管理」页")
         theme.bind(acc_hint, lambda: "color: %s; %s" % (theme.TEXT_3, theme.font_stack(theme.FS_CAPTION)))
         self.behavior_card.vbox.addWidget(acc_hint)
-        left_col.addWidget(self.conn_card)
-        right_col.addWidget(self.behavior_card)
 
         # ---- MAA 服务器配置 ----
         self.maa_setup_card = Card("MAA 服务器配置")
@@ -248,7 +235,6 @@ class SettingsPage(ScrollArea):
         setup_row.addStretch(1)
         self.maa_setup_card.vbox.addLayout(setup_row)
         self.maa_setup_card.vbox.addSpacing(10)
-        right_col.addWidget(self.maa_setup_card)
 
         # ---- 通知推送 ----
         self.notify_card = Card("通知推送")
@@ -293,7 +279,6 @@ class SettingsPage(ScrollArea):
         test_row.addStretch(1)
         self.notify_card.vbox.addLayout(test_row)
         self.notify_card.vbox.addSpacing(10)
-        left_col.addWidget(self.notify_card)
 
         # ---- 数据清理 ----
         self.clean_card = Card("数据清理")
@@ -315,7 +300,6 @@ class SettingsPage(ScrollArea):
         theme.bind(self.clean_hint, lambda: "color: %s; %s" % (theme.TEXT_3, theme.font_stack(theme.FS_CAPTION)))
         self.clean_card.vbox.addWidget(self.clean_hint)
         self.clean_card.vbox.addSpacing(10)
-        right_col.addWidget(self.clean_card)
 
         # ---- 保存 ----
         self.action_card = Card()
@@ -332,16 +316,14 @@ class SettingsPage(ScrollArea):
         theme.bind(hint, lambda: "color: %s; %s" % (theme.TEXT_3, theme.font_stack(theme.FS_CAPTION)))
         bar.addWidget(hint)
         self.action_card.vbox.addLayout(bar)
-        right_col.addWidget(self.action_card)
-        left_col.addStretch(1)
-        right_col.addStretch(1)
-        cols.addLayout(left_col, 1)
-        cols.addLayout(right_col, 1)
-        root.addLayout(cols)
-        root.addStretch(1)
-        # 版式固定双列不随宽度重排：窗口最小宽度已由主窗口限制在
-        # 双列能完整显示的尺寸（见 MainWindow.setMinimumSize）
-
+        root.addWidget(SectionPage([
+            ("模拟器与 MAA", scroll_cards(self.status_card, self.path_card, self.conn_card,
+                                         self.maa_setup_card)),
+            ("运行行为", scroll_cards(self.behavior_card)),
+            ("通知", scroll_cards(self.notify_card)),
+            ("外观与维护", scroll_cards(self.appearance_card, self.clean_card)),
+        ]), 1)
+        root.addWidget(self.action_card)
         self.load_from_cfg()
 
     def _pick_palette(self, name):

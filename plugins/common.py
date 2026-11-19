@@ -25,23 +25,35 @@ from project_paths import relocate_project_paths
 DEFAULT_CONFIG = Path(__file__).resolve().parents[1] / "config.json"
 
 
-def load_config(path):
+def load_config(path, *, required=False):
     """读 config.json；文件缺失/损坏返回 {}（各插件自行判空兜底）。
 
     读取顺带触发每日滚动备份（backup_daily）：master 的所有插件路径都在
     这里读配置，凌晨计划任务第一个账号跑起来时即完成当天备份。
     """
     try:
-        with open(path, "r", encoding="utf-8") as f:
+        with open(path, "r", encoding="utf-8-sig") as f:
             cfg = json.load(f)
+        if not isinstance(cfg, dict) or (required and not isinstance(cfg.get("accounts"), list)):
+            raise ValueError("控制台配置应包含 accounts 列表")
         relocate_project_paths(cfg, path)
-    except (OSError, json.JSONDecodeError):
+    except (OSError, ValueError) as exc:
+        if required:
+            raise ValueError(f"读取控制台配置 {path} 失败：{exc}") from exc
         cfg = {}
     try:
         backup_daily(path)
     except Exception:  # 备份是兜底措施，任何异常都不能影响插件主流程
         pass
     return cfg
+
+
+def run_plugin_command(args):
+    try:
+        return args.func(args)
+    except (OSError, ValueError) as exc:
+        print("ERROR %s" % exc)
+        return 2
 
 
 def _config_complete(path):
@@ -52,7 +64,7 @@ def _config_complete(path):
     备份上去冲掉最后一份完好记录。
     """
     try:
-        data = json.loads(Path(path).read_text(encoding="utf-8"))
+        data = json.loads(Path(path).read_text(encoding="utf-8-sig"))
     except (OSError, ValueError):
         return False
     return isinstance(data, dict) and isinstance(data.get("accounts"), list)
@@ -110,8 +122,8 @@ def backup_daily(config_path, log=None):
 def read_json(path):
     """读任意 JSON 文件；缺失/损坏/被占用返回 None，不抛异常。"""
     try:
-        return json.loads(Path(path).read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+        return json.loads(Path(path).read_text(encoding="utf-8-sig"))
+    except (OSError, ValueError):
         return None
 
 

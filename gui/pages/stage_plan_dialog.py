@@ -11,7 +11,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QTimer
-from PySide6.QtWidgets import (QComboBox, QDialog, QFrame, QHBoxLayout, QLabel,
+from PySide6.QtWidgets import (QComboBox, QFrame, QHBoxLayout, QSizePolicy,
                                QScrollArea, QVBoxLayout, QWidget)
 
 from qfluentwidgets import (InfoBar, InfoBarPosition,
@@ -19,6 +19,7 @@ from qfluentwidgets import (InfoBar, InfoBarPosition,
 
 import config as appconfig
 import theme
+from sheets import SheetDialog
 from widgets import (label as _styled_label, set_switch_checked_gray,
                      style_button, style_primary_button, style_scroll_area)
 
@@ -219,11 +220,12 @@ def _label(text, size="12px", color=None, weight="400", transparent=False):
                          transparent=transparent, family=False)
 
 
-class StagePlanDialog(QDialog):
+class StagePlanDialog(SheetDialog):
     """候选关卡：滚动选择 + 已选关卡显示为固定大小标签。"""
 
     def __init__(self, cfg, acc, parent=None):
-        super().__init__(parent)
+        super().__init__(parent, title="第二理智作战 · 候选关卡",
+                         subtitle=acc.get("label") or "当前账号", size=(760, 510))
         self.cfg = cfg
         self.acc = acc
         self.server = acc.get("server", "official")
@@ -234,53 +236,19 @@ class StagePlanDialog(QDialog):
         self.selected = []
 
         self.setWindowTitle("候选关卡 - %s" % (acc.get("label") or ""))
-        self.setModal(True)
-        self.resize(740, 520)
-        theme.bind(self, lambda: "QDialog { background: %s; }" % theme.BG)
-
-        root = QVBoxLayout(self)
-        root.setContentsMargins(24, 20, 24, 20)
-        root.setSpacing(14)
-
-        # 顶部标题
-        header = QFrame()
-        theme.bind(header, lambda: "QFrame { background: %s; border: 1px solid %s;"
-                   " border-radius: 12px; }" % (theme.CARD, theme.BORDER))
-        hb = QHBoxLayout(header)
-        hb.setContentsMargins(18, 14, 18, 14)
-        hb.setSpacing(12)
-        badge = QLabel("关")
-        badge.setFixedSize(42, 42)
-        badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        badge.setStyleSheet(
-            "QLabel { background: qlineargradient(x1:0,y1:0,x2:1,y2:1,"
-            " stop:0 %s, stop:1 %s); color: #fff; font-size: 17px;"
-            " font-weight: 700; border-radius: 10px; }" % theme.ACCENT_O1)
-        hb.addWidget(badge)
-        tb = QVBoxLayout()
-        tb.setSpacing(2)
-        tb.addWidget(_label("第二理智作战 · 候选关卡", "15px",
-                            "TEXT", "600"))
-        tb.addWidget(_label("新加的关卡排在最前；顺序即尝试顺序，末尾固定保底 1-7",
-                            "12px", "TEXT_2"))
-        self.source_lab = _label("", "11px", "TEXT_3", transparent=True)
-        tb.addWidget(self.source_lab)
-        hb.addLayout(tb)
-        hb.addStretch(1)
-        self.optional_sw = set_switch_checked_gray(SwitchButton("使用备选关卡"))
-        hb.addWidget(self.optional_sw, 0, Qt.AlignmentFlag.AlignVCenter)
-        root.addWidget(header)
-
-        # 选择器：一个可滚动下拉 + 添加按钮
-        picker = QFrame()
-        theme.bind(picker, lambda: "QFrame { background: %s; border: 1px solid %s;"
-                   " border-radius: 10px; }" % (theme.CARD, theme.BORDER))
-        pb = QHBoxLayout(picker)
-        pb.setContentsMargins(14, 10, 14, 10)
+        root = self.body
+        source = QHBoxLayout()
+        source.addWidget(_label("关卡列表", "15px", "TEXT", "600"))
+        self.source_lab = _label("", "12px", "TEXT_2")
+        self.source_lab.setWordWrap(True)
+        self.source_lab.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        source.addWidget(self.source_lab, 1)
+        root.addLayout(source)
+        pb = QHBoxLayout()
         pb.setSpacing(10)
-        pb.addWidget(_label("添加关卡：", "13px", "TEXT_2", "600"))
         self.picker = QComboBox()
-        self.picker.setMinimumWidth(260)
+        self.picker.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.picker.setAccessibleName("选择要添加的关卡")
         self.picker.setMaxVisibleItems(10)
         theme.bind(
             self.picker,
@@ -294,20 +262,21 @@ class StagePlanDialog(QDialog):
         self._populate_picker()
         self.picker.currentIndexChanged.connect(self._refresh_add_btn)
         pb.addWidget(self.picker, 1)
-        self.add_btn = style_primary_button(PrimaryPushButton("添加候选关卡"))
+        self.add_btn = style_button(PushButton("添加候选关卡"))
         self.add_btn.clicked.connect(self._on_pick_stage)
         pb.addWidget(self.add_btn)
-        root.addWidget(picker)
+        root.addLayout(pb)
 
         # 已选标签区
-        list_card = QFrame()
-        theme.bind(list_card, lambda: "QFrame { background: %s; border: 1px solid %s;"
-                   " border-radius: 12px; }" % (theme.CARD, theme.BORDER))
-        lc = QVBoxLayout(list_card)
-        lc.setContentsMargins(14, 12, 14, 12)
-        lc.setSpacing(8)
-        lc.addWidget(_label("已选候选（顺序即尝试顺序）", "13px",
-                            "TEXT_2", "600"))
+        order = QHBoxLayout()
+        order.addWidget(_label("作战顺序", "15px", "TEXT", "600"))
+        order.addStretch()
+        self.optional_sw = set_switch_checked_gray(SwitchButton(), "使用备选关卡")
+        order.addWidget(self.optional_sw)
+        root.addLayout(order)
+        self.summary = _label("", "12px", "TEXT_2")
+        self.summary.setWordWrap(True)
+        root.addWidget(self.summary)
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setAlignment(Qt.AlignmentFlag.AlignLeft
@@ -318,18 +287,11 @@ class StagePlanDialog(QDialog):
         self.tags_layout.setContentsMargins(0, 0, 6, 0)
         self.tags_layout.setSpacing(10)
         scroll.setWidget(host)
-        lc.addWidget(scroll, 1)
-        root.addWidget(list_card, 1)
+        root.addWidget(scroll, 1)
 
         # 底部
-        bar = QFrame()
-        theme.bind(bar, lambda: "QFrame { background: %s; border: 1px solid %s;"
-                   " border-radius: 12px; }" % (theme.CARD, theme.BORDER))
-        bb = QHBoxLayout(bar)
-        bb.setContentsMargins(14, 10, 14, 10)
+        bb = QHBoxLayout()
         bb.setSpacing(10)
-        self.summary = _label("", "12px", "TEXT_2")
-        bb.addWidget(self.summary)
         bb.addStretch(1)
         cancel_btn = style_button(PushButton("取消"))
         cancel_btn.clicked.connect(self.reject)
@@ -337,7 +299,7 @@ class StagePlanDialog(QDialog):
         save_btn.clicked.connect(self._on_save)
         bb.addWidget(cancel_btn)
         bb.addWidget(save_btn)
-        root.addWidget(bar)
+        root.addLayout(bb)
 
         plan, use_optional = self._initial_state()
         self.selected = list(plan)
@@ -415,8 +377,8 @@ class StagePlanDialog(QDialog):
         chip = QFrame()
         chip.setObjectName("stageTag")
         chip.setFixedHeight(40)
-        theme.bind(chip, lambda: "QFrame { background: %s; border: 1px solid %s;"
-                   " border-radius: 8px; }" % (theme.BG, theme.BORDER))
+        theme.bind(chip, lambda: "QFrame#stageTag {background:%s; border-radius:9px;}"
+                   % theme.mix(theme.CARD, theme.ACCENT, .07))
         lay = QHBoxLayout(chip)
         lay.setContentsMargins(10, 4, 6, 4)
         lay.setSpacing(6)
@@ -439,6 +401,11 @@ class StagePlanDialog(QDialog):
             btn = PushButton(text)
             btn.setFixedSize(30, 28)
             btn.setToolTip(tip)
+            btn.setAccessibleName("%s候选 %d" % (tip, index + 1))
+            if text == "↑":
+                btn.setEnabled(index > 0)
+            elif text == "↓":
+                btn.setEnabled(index + 1 < len(self.selected))
             btn.clicked.connect(fn)
             lay.addWidget(btn)
         return chip
@@ -521,9 +488,8 @@ class StagePlanDialog(QDialog):
     def _refresh_summary(self):
         if self.optional_sw.isChecked():
             # 保存时会在末尾追加保底 1-7，摘要按最终生效的顺序显示
-            self.summary.setText("当前：%s"
-                                 % format_stage_plan(list(self.selected)
-                                                     + [FALLBACK_STAGE]))
+            self.summary.setText("按顺序尝试 %d 个关卡。新添加的关卡排在首位，1-7 固定在末尾保底。"
+                                 % (len(self.selected) + 1))
         else:
             first = self.selected[0] if self.selected else FALLBACK_STAGE
             self.summary.setText("当前：%s（仅刷第一项）"

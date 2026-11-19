@@ -14,34 +14,32 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-from PySide6.QtCore import (QEasingCurve, QPoint, QParallelAnimationGroup,
-                            QPropertyAnimation, Qt, QTimer)
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QColor, QFont, QIcon, QLinearGradient, QPainter, QPixmap
-from PySide6.QtWidgets import (QApplication, QGraphicsOpacityEffect,
-                               QHBoxLayout, QLabel, QMenu, QMessageBox, QSystemTrayIcon,
-                               QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QApplication, QFrame, QHBoxLayout, QMenu,
+                               QSystemTrayIcon, QVBoxLayout)
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
 
-from qfluentwidgets import (FluentIcon, FluentWindow, InfoBar, InfoBarIcon,
-                            InfoBarManager, InfoBarPosition, MessageBox,
-                            NavigationItemPosition, PrimaryPushButton,
-                            PushButton, Theme, setTheme, setThemeColor)
+from qfluentwidgets import (FluentWidget, InfoBar, InfoBarIcon, InfoBarManager,
+                            InfoBarPosition, PushButton, Theme,
+                            setTheme, setThemeColor)
 
-from widgets import (BusyStrip, refresh_card_shadows, style_button,
-                     style_primary_button)
+from sheets import MessageBox
+from widgets import label, refresh_card_shadows, style_button
+from motion import PageStack
 
 import config as appconfig
 import theme
-from core import cleanup, logparse, poller, proc, runner, scheduler
+from core import cleanup, logparse, poller, proc, runner
 from core import maa_update
 from pages.accounts import AccountsPage
-from pages.dashboard import DashboardPage
+from pages.dashboard import AccountStatusPage, CollectScheduleCard, ScheduleCard
+from pages.home import HomePage, SectionPage, Sidebar, next_plan, scroll_cards
 from pages.history import HistoryPage
 from pages.logs import LogsPage
 from pages.settings import SettingsPage
-from widgets import Pill
 
-PAGE_TITLES = ["仪表盘", "账号管理", "运行历史", "日志", "运行设置"]
+PAGE_TITLES = ("主页", "账号", "计划", "记录", "设置")
 
 # 当前主窗口引用（main() 里创建；主题切换就地换肤，不再重建窗口）
 _win = None
@@ -139,89 +137,11 @@ if _top_right_mgr is not None:
     _top_right_mgr.margin = 126
 
 
-class HeaderBar(QWidget):
-    """运行控制栏：macOS「大标题」式页头 —— 不再用卡片包框，
-    大号页标题 + 状态徽章 + 次要说明靠左，停止/立即运行按钮靠右，
-    与下方内容区之间留白分隔，整体像系统设置页的顶部。"""
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setObjectName("headerBar")
-        self.setStyleSheet("QWidget#headerBar { background: transparent; }")
-        # 外层纵向布局：上行是标题/按钮行，底边压一条运行光带（空闲时隐藏）
-        outer = QVBoxLayout(self)
-        outer.setContentsMargins(2, 6, 2, 0)
-        outer.setSpacing(6)
-        lay = QHBoxLayout()
-        lay.setContentsMargins(0, 0, 0, 0)
-        lay.setSpacing(12)
-        self.title = QLabel("仪表盘")
-        theme.bind(self.title, lambda: "font-family: %s; %s color: %s;"
-                   " background: transparent;"
-                   % (theme.FONT_FAMILY, theme.font_stack(theme.FS_DISPLAY, "700"),
-                      theme.TEXT))
-        lay.addWidget(self.title)
-        self.chip = Pill("空闲", dot=True)
-        lay.addWidget(self.chip, 0, Qt.AlignmentFlag.AlignVCenter)
-        self.detail = QLabel("")
-        theme.bind(self.detail, lambda: "font-family: %s; %s color: %s;"
-                   " background: transparent;"
-                   % (theme.FONT_FAMILY, theme.font_stack(theme.FS_CAPTION),
-                      theme.TEXT_2))
-        lay.addWidget(self.detail, 0, Qt.AlignmentFlag.AlignVCenter)
-        lay.addStretch(1)
-        self.stop_btn = style_button(PushButton("停止"))
-        self.stop_btn.setToolTip(
-            "停止当前挂机（结束 master.ps1 与 MAA 进程），\n"
-            "并取消已排定的自动关机。空闲时不可用。")
-        self.collect_btn = style_button(PushButton("基建收菜"))
-        self.collect_btn.setToolTip(
-            "对所有已启用账号只收基建：制造站产物 + 贸易站订单。\n"
-            "全部房间 skip：不更换干员、不换班，不动班次计划。\n"
-            "不跑理智/招募等任务，结束后自动恢复 MAA 配置。\n"
-            "与挂机互斥，运行中不可用。")
-        self.run_btn = style_primary_button(PrimaryPushButton("立即运行"))
-        self.run_btn.setToolTip(
-            "手动运行一次完整挂机流程（启动模拟器 → 切号 → 跑 MAA → 关模拟器）。\n"
-            "手动运行不会自动关机（无论成败）。")
-        lay.addWidget(self.stop_btn)
-        lay.addSpacing(2)
-        lay.addWidget(self.collect_btn)
-        lay.addSpacing(2)
-        lay.addWidget(self.run_btn)
-        outer.addLayout(lay)
-        # 运行中的动态光带：通栏贴在页头底边，空闲时隐藏不占空间
-        self.busy = BusyStrip(self)
-        outer.addWidget(self.busy)
-
-    def set_narrow(self, narrow):
-        """窄窗口：隐藏页头状态说明文字，给右侧运行按钮让位（周期刷新原样保留）。"""
-        self.detail.setVisible(not narrow)
-
-    def update_state(self, running, detail):
-        self.chip.set_state("run" if running else "ok",
-                            "运行中" if running else "空闲")
-        self.detail.setText(detail)
-        self.stop_btn.setEnabled(running)
-        self.collect_btn.setEnabled(not running)
-        self.run_btn.setEnabled(not running)
-        if running:
-            self.busy.start()
-        else:
-            self.busy.stop()
-
-
-class MainWindow(FluentWindow):
-    # __init__ 早期（设背景色等）就会触发 resizeEvent，此时实例属性尚未建好：
-    # 给默认值 + resizeEvent 里 getattr 防御，避免 AttributeError
-    _header_narrow = False
-    _content_margins = None
-    header = None
-
+class MainWindow(FluentWidget):
     def __init__(self):
         super().__init__()
         self.cfg = appconfig.load()
-        self._task_info = None
+        self._adb_ok = None
 
         # 主题：明暗（明亮/暗夜）× 配色方案（暖雾灰/暖沙/青瓷/雾蓝/藕荷），读自 config.json
         appearance = self.cfg.get("appearance") or {}
@@ -236,78 +156,77 @@ class MainWindow(FluentWindow):
         self._app_icon = make_icon()
         self.setWindowIcon(self._app_icon)
         self._init_tray()
-        self.setWindowTitle("MAA 挂机控制台")
-        self.titleBar.setTitle("MAA 挂机控制台")
-        # 标题栏关闭按钮默认悬停是红色，统一改成黑/灰系（随明暗主题）
+        self.setWindowTitle("明日方舟控制台")
         self._apply_close_btn_colors()
         self.resize(1180, 780)
-        # 缩放下限与固定双列配套：1000 时侧栏保持收起，内容区视口
-        # 912px ≥ 班次/收菜并排所需（~892px），所有页面完整显示不横向滚动
         self.setMinimumSize(1000, 560)
-        # 侧边栏收窄：能完整显示「仪表盘/账号管理/运行设置/日志」即可
-        # （必须先设宽度再 expand，expand 时按 expandWidth 定宽）
-        # 侧栏自动展开门槛提到 1190（默认 1008）：窗口 < 1190 时侧栏保持
-        # 收起（48px），固定双列版式才有足够视口；≥1190 展开后（200px）
-        # 视口仍有 902px，同样放得下。只在菜单按钮上手动展开为浮层
-        self.navigationInterface.setMinimumExpandWidth(1190)
-        self.navigationInterface.setExpandWidth(200)
-        self.navigationInterface.expand(useAni=False)
 
-        # 四个页面（objectName 是 addSubInterface 的路由键，不能为空）
-        self.dash = DashboardPage(self.cfg)
+        self.home = HomePage()
         self.accounts_p = AccountsPage(self.cfg)
-        self.settings_p = SettingsPage(self.cfg,
-                                       on_theme_change=self._on_theme_change)
+        self.account_status = AccountStatusPage(self.cfg)
+        self.accounts = SectionPage([("账号管理", self.accounts_p),
+                                     ("运行状态", self.account_status)])
+        self.schedule_card = ScheduleCard(self.cfg)
+        self.collect_card = CollectScheduleCard(self.cfg)
+        self.plans = SectionPage([("日常挂机", scroll_cards(self.schedule_card)),
+                                  ("基建收菜", scroll_cards(self.collect_card))])
         self.history_p = HistoryPage(self.cfg)
         self.logs_p = LogsPage(self.cfg)
-        self.dash.setObjectName("dashboard")
-        self.accounts_p.setObjectName("accounts")
-        self.settings_p.setObjectName("settings")
-        self.history_p.setObjectName("history")
-        self.logs_p.setObjectName("logs")
-        # 侧边栏分组：概览与账号在上，运行记录（历史/日志）居中，
-        # 低频的「运行设置」沉底 —— 与常见桌面应用导航一致
-        self.addSubInterface(self.dash, FluentIcon.HOME, "仪表盘")
-        self.addSubInterface(self.accounts_p, FluentIcon.PEOPLE, "账号管理")
-        self.navigationInterface.addSeparator()
-        self.addSubInterface(self.history_p, FluentIcon.HISTORY, "运行历史")
-        self.addSubInterface(self.logs_p, FluentIcon.DOCUMENT, "日志")
-        self.navigationInterface.addSeparator(NavigationItemPosition.BOTTOM)
-        self.addSubInterface(self.settings_p, FluentIcon.SETTING, "运行设置",
-                             NavigationItemPosition.BOTTOM)
+        self.records = SectionPage([("运行历史", self.history_p), ("实时日志", self.logs_p)])
+        self.settings_p = SettingsPage(self.cfg, on_theme_change=self._on_theme_change)
+        self.stack = PageStack()
+        for page in (self.home, self.accounts, self.plans, self.records, self.settings_p):
+            self.stack.addWidget(page)
 
-        # 在内容区顶部插入大标题页头（透明背景，与内容区留白分隔）。
-        # 注意：标题栏是悬浮在窗口顶部的覆盖层，内容区必须留出 48px 上边距
-        # 让位，否则页头会钻到标题栏/关闭按钮下面（qfluentwidgets 布局特性）
-        # stackedWidget 原本在 widgetLayout 里，先摘出来再包进新容器。
-        self.widgetLayout.removeWidget(self.stackedWidget)
-        self.header = HeaderBar()
-        self._header_narrow = False
-        right = QWidget()
-        v = QVBoxLayout(right)
-        self._content_margins = v
-        # 左右 44px 留白：卡片不贴窗口边，右侧还留出悬浮滚动条的位置
-        v.setContentsMargins(44, 62, 44, 12)
-        v.setSpacing(6)
-        v.addWidget(self.header)
-        v.addWidget(self.stackedWidget)
-        self.hBoxLayout.addWidget(right, 1)
-        # 原内容区布局已空，移除避免占位；新容器后加入会盖住标题栏，必须重新置顶
-        self.hBoxLayout.removeItem(self.widgetLayout)
-        self.titleBar.raise_()
-        self.header.run_btn.clicked.connect(self.on_run)
-        self.header.collect_btn.clicked.connect(self.on_collect)
-        self.header.stop_btn.clicked.connect(self.on_stop)
+        self.nav = Sidebar(PAGE_TITLES)
+        self.nav.currentChanged.connect(self.stack.setCurrentIndex)
+        self.chip = label("", 14, color="TEXT_2", transparent=True)
+        self.stop_btn = style_button(PushButton("停止"), small=True)
+        self.stop_btn.setToolTip("停止当前流程并取消已排定的自动关机")
+        self.stop_btn.clicked.connect(self.on_stop)
+        title = self.titleBar
+        title.setObjectName("consoleTitle")
+        title.setAttribute(Qt.WidgetAttribute.WA_StyledBackground)
+        theme.bind(title, lambda: "#consoleTitle {background:%s; border-bottom:1px solid %s;}"
+                   % (theme.CARD, theme.BORDER))
+        title.setFixedHeight(52)
+        title.hBoxLayout.setContentsMargins(20, 0, 0, 0)
+        title.iconLabel.setFixedSize(26, 26)
+        title.iconLabel.setPixmap(self._app_icon.pixmap(26, 26))
+        theme.bind(title.titleLabel, lambda: "font-size:16px; font-weight:600;"
+                   " color:%s; padding-left:10px; background:transparent;" % theme.TEXT)
+        title.hBoxLayout.insertWidget(3, self.chip)
+        title.hBoxLayout.insertWidget(4, self.stop_btn)
+        title.hBoxLayout.insertSpacing(5, 12)
+
+        rail = QFrame()
+        rail.setObjectName("sectionRail")
+        theme.bind(rail, lambda: "QFrame#sectionRail {background:%s; border-right:1px solid %s;}"
+                   % (theme.CARD, theme.BORDER))
+        rail_layout = QVBoxLayout(rail)
+        rail_layout.setContentsMargins(0, 14, 0, 0)
+        rail_layout.addWidget(self.nav, 0, Qt.AlignTop)
+        rail_layout.addStretch()
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, title.height(), 16, 0)
+        layout.setSpacing(16)
+        layout.addWidget(rail)
+        layout.addWidget(self.stack, 1)
+        title.raise_()
+        self.home.run_btn.clicked.connect(self.on_run)
+        self.home.collect_btn.clicked.connect(self.on_collect)
+        self.home.accounts_btn.clicked.connect(self._open_accounts)
+        self.home.plan.link.clicked.connect(self._open_plan)
+        self.home.history.link.clicked.connect(self._open_last_record)
+        self.home.progress_btn.clicked.connect(self._open_logs)
         self.accounts_p.export_requested.connect(self.on_export_account)
         self.accounts_p.switch_requested.connect(self.on_switch_account)
         self.accounts_p.start_requested.connect(self.on_start_account)
-        self.dash.export_done.connect(self._on_export_done)
-        # 关闭 qfluentwidgets 自带的「向上弹出」切换动画，改用 iOS 式
-        # 推入/推出过渡（_on_page_changed 里按切换方向滑入滑出）
-        self.stackedWidget.setAnimationEnabled(False)
-        self._prev_page = 0
-        self._page_ani = None
-        self.stackedWidget.currentChanged.connect(self._on_page_changed)
+        self.accounts_p.task_requested.connect(self.on_account_task)
+        self.account_status.export_done.connect(self._on_export_done)
+        self.history_p.refreshed.connect(self._update_history_summary)
+        self._update_history_summary()
+        self.stack.currentChanged.connect(self._refresh_visible_page)
 
         # 状态轮询
         self.timer = QTimer(self)
@@ -315,118 +234,70 @@ class MainWindow(FluentWindow):
         self.timer.start(2000)
         # 后台轮询：计划任务 / ADB 检查不走界面线程，避免点击卡顿
         self.poller = poller.SchedulerPoller(self)
-        self.poller.result.connect(self._on_task_info)
-        self.poller.result.connect(self.dash.schedule_card.refresh_scheduler)
-        self.poller.collect_result.connect(self.dash.collect_card.refresh_scheduler)
+        self.poller.result.connect(self.schedule_card.refresh_scheduler)
+        self.poller.collect_result.connect(self.collect_card.refresh_scheduler)
         self.adb_poller = poller.AdbPoller(self.cfg, self)
-        self.adb_poller.result.connect(self.dash.set_adb_state)
+        self.adb_poller.result.connect(self._set_adb_state)
         self.poller.start()
         self.adb_poller.start()
         self.refresh_status()
 
-    def resizeEvent(self, event):
-        """窗口缩放：边距收窄 + 页头隐藏次级文字，保证窄窗内容完整可见。"""
-        super().resizeEvent(event)
-        w = self.width()
-        narrow = w < 960   # 页头按钮行放不下说明文字的宽度
-        if narrow != self._header_narrow:
-            self._header_narrow = narrow
-            if self.header is not None:
-                self.header.set_narrow(narrow)
-        margins = self._content_margins
-        if margins is not None:
-            # 边距档位与侧栏展开门槛对齐（1190）：展开态视口足够宽时才用
-            # 44px 大留白，收起态全程 20px，避免中段宽度视口回缩造成溢出
-            m = 44 if w >= 1190 else 20
-            margins.setContentsMargins(m, 62, m, 12)
+    def _show_section(self, page, tab):
+        page.tabs.setCurrentIndex(tab)
+        self.nav.setCurrentIndex(self.stack.indexOf(page))
 
-    def _on_page_changed(self, index):
-        if 0 <= index < len(PAGE_TITLES):
-            self.header.title.setText(PAGE_TITLES[index])
-        if index == self._prev_page:
-            return
-        self._ios_switch(self._prev_page, index)
-        self._prev_page = index
+    def _open_accounts(self):
+        self._show_section(self.accounts, 0)
+        if not self.cfg.get("accounts"):
+            self.accounts_p.add_btn.click()
+        self.refresh_status()
 
-    def _ios_switch(self, old_index, new_index):
-        """iOS 式页面切换：新页按方向滑入并淡入，旧页反向视差滑出并淡出。
+    def _open_plan(self):
+        self._show_section(self.plans, self._next_plan_index)
 
-        参考 UINavigationController push/pop：前进时新页从右推入、旧页向左
-        退后半屏并变暗；后退时镜像反向。曲线 OutCubic、330ms，接近 iOS
-        手势转场的手感。快速连点时先立即收尾上一次过渡再开始新的。
-        """
-        sw = self.stackedWidget
-        old_w, new_w = sw.widget(old_index), sw.widget(new_index)
-        if old_w is None or new_w is None or old_w is new_w:
-            return
-        if self._page_ani is not None:
-            self._page_ani.stop()      # stop 会触发 finished → 立即收尾
-            self._page_ani = None
+    def _open_last_record(self):
+        self._show_section(self.records, 0)
+        self.history_p.select_record(self._last_file)
 
-        rect = sw.rect()
-        w, h = rect.width(), rect.height()
-        if w <= 0 or h <= 0:
-            return
-        sign = 1 if new_index > old_index else -1
+    def _open_logs(self):
+        self._show_section(self.records, 1)
 
-        old_w.setGeometry(rect)
-        old_w.show()
-        old_w.raise_()
-        new_w.setGeometry(rect.translated(sign * w, 0))
-        new_w.show()
-        new_w.raise_()
+    def _update_history_summary(self):
+        self._last_file, when, text = self.history_p.latest_summary()
+        self.home.history.time.setText(when)
+        self.home.history.detail.setText(text)
+        self.home.history.link.setEnabled(bool(self._last_file))
 
-        old_eff = QGraphicsOpacityEffect(old_w)
-        old_w.setGraphicsEffect(old_eff)
-        new_eff = QGraphicsOpacityEffect(new_w)
-        new_w.setGraphicsEffect(new_eff)
+    def _update_plan_summary(self):
+        tasks = (self.schedule_card, self.collect_card)
+        next_task = next_plan(*(card.scheduler_info for card in tasks))
+        self._next_plan_index = 0
+        if next_task:
+            self._next_plan_index, _ = next_task
+            card = tasks[self._next_plan_index]
+            when = card.next_val.text()
+            detail = self.plans.tabs.tabText(self._next_plan_index)
+        else:
+            when = "查询中…" if any(card.scheduler_info is None for card in tasks) else "暂无班次"
+            detail = ""
+        self.home.plan.time.setText(when)
+        self.home.plan.detail.setText(detail)
 
-        group = QParallelAnimationGroup(self)
+    def _refresh_visible_page(self, _index):
+        if self.stack.currentWidget() is self.home:
+            self.refresh_status()
+        elif self.stack.currentWidget() is self.settings_p:
+            self._refresh_connections()
 
-        def _slide(target, start, end):
-            ani = QPropertyAnimation(target, b"pos", group)
-            ani.setStartValue(QPoint(start, 0))
-            ani.setEndValue(QPoint(end, 0))
-            return ani
+    def _set_adb_state(self, ok):
+        self._adb_ok = ok
+        if self.stack.currentWidget() is self.settings_p:
+            self._refresh_connections()
 
-        def _fade(eff, start, end):
-            ani = QPropertyAnimation(eff, b"opacity", group)
-            ani.setStartValue(start)
-            ani.setEndValue(end)
-            return ani
-
-        slide_new = _slide(new_w, sign * w, 0)
-        fade_new = _fade(new_eff, 0.30, 1.0)
-        # 旧页只退 22%（视差），方向与新页相反；整体淡出让灰底透出
-        slide_old = _slide(old_w, 0, int(-sign * w * 0.22))
-        fade_old = _fade(old_eff, 1.0, 0.0)
-        for ani in (slide_new, fade_new, slide_old, fade_old):
-            ani.setDuration(330)
-            ani.setEasingCurve(QEasingCurve.Type.OutCubic)
-            group.addAnimation(ani)
-
-        group.finished.connect(lambda: self._finish_switch(old_w, new_w))
-        self._page_ani = group
-        group.start()
-
-    def _finish_switch(self, old_w, new_w):
-        """过渡收尾：移除透明度特效、隐藏旧页并把两页几何归位。"""
-        self._page_ani = None
-        sw = self.stackedWidget
-        for w in (old_w, new_w):
-            try:
-                w.setGraphicsEffect(None)
-            except RuntimeError:
-                return                 # 窗口/页面已销毁
-        if sw.currentWidget() is not old_w:
-            old_w.hide()
-        rect = sw.rect()
-        old_w.setGeometry(rect)
-        new_w.setGeometry(rect)
-
-    def _on_task_info(self, info):
-        """后台线程返回的计划任务信息。"""
-        self._task_info = info
+    def _refresh_connections(self):
+        card = self.settings_p.status_card
+        card.refresh(self.cfg, self._adb_ok)
+        card.refresh_versions(self.cfg)
 
     def _on_theme_change(self, name, palette_name=None):
         """运行设置页切换外观（明暗主题 × 配色方案）：保存配置后就地换肤。"""
@@ -464,8 +335,9 @@ class MainWindow(FluentWindow):
             if hasattr(w, "_updateBackgroundColor"):
                 w._updateBackgroundColor()
             w.update()
-        self.dash.refresh()
+        self.account_status.refresh()
         self.history_p.refresh()
+        self._refresh_connections()
 
     def _apply_close_btn_colors(self):
         """标题栏关闭按钮悬停/按下配色：明暗两套观感（替代 qfluentwidgets 默认红）。"""
@@ -546,13 +418,15 @@ class MainWindow(FluentWindow):
                 if idx and total and total > 1:
                     detail += " · 第 %d/%d 个" % (idx, total)
             else:
-                detail = "启动中，日志页查看实时进度"
+                detail = "启动中，可查看实时日志"
         else:
-            if self._task_info is None:
-                detail = "系统空闲 · 正在查询计划任务…"
-            else:
-                detail = "系统空闲 · 下次 %s" % scheduler.next_run_text(self._task_info)
-        self.header.update_state(running, detail)
+            detail = ""
+        self.home.set_run_state(self.cfg.get("accounts", []), running, detail)
+        self.chip.setText('<span style="color:%s">●</span>  %s' %
+                          (theme.RUN if running else theme.OK, "运行中" if running else "空闲"))
+        self.chip.setToolTip(detail)
+        self.stop_btn.setVisible(running)
+        self._update_plan_summary()
         self._tray.setToolTip("MAA 挂机控制台 · " + ("运行中" if running else "空闲"))
 
     def closeEvent(self, event):
@@ -566,13 +440,13 @@ class MainWindow(FluentWindow):
                 _detached_threads.append(p)
         # 导出子进程独立于控制台存活：断开工作线程父级，关窗不中断导出，
         # 结果仍写入 exports\（实时日志窗口随主窗口关闭）
-        detached = self.dash.detach_export_worker()
+        detached = self.account_status.detach_export_worker()
         if detached is not None:
             _detached_threads.append(detached)
         # token 自检线程（HTTP 探测）先等收尾；极端网络卡死时转后台，
         # 结果仍会写入槽位状态文件，下次打开控制台照常显示
-        self.dash.wait_token_check(12000)
-        token_w = self.dash.detach_token_worker()
+        self.account_status.wait_token_check(12000)
+        token_w = self.account_status.detach_token_worker()
         if token_w is not None:
             _detached_threads.append(token_w)
         event.accept()
@@ -580,14 +454,14 @@ class MainWindow(FluentWindow):
     def on_run(self):
         if runner.is_running():
             return
-        if self.dash.export_running() or _export_threads_alive():
+        if self.account_status.export_running() or _export_threads_alive():
             InfoBar.warning("干员导出进行中", "导出正在占用模拟器，请等导出结束后再运行挂机",
                             parent=self, position=InfoBarPosition.TOP_RIGHT,
                             duration=5000)
             return
         runner.clear_stale_lock()
         runner.start(self.cfg)
-        InfoBar.success("已启动挂机流程", "日志页可查看实时进度",
+        InfoBar.success("已启动挂机流程", "可在「记录 → 实时日志」查看进度",
                         parent=self, position=InfoBarPosition.TOP_RIGHT, duration=4000)
         self.refresh_status()
 
@@ -595,22 +469,44 @@ class MainWindow(FluentWindow):
         """基建收菜：逐个已启用账号收制造站/贸易站产物并自动换休宿舍，不碰班次计划。"""
         if runner.is_running():
             return
-        if self.dash.export_running() or _export_threads_alive():
+        if self.account_status.export_running() or _export_threads_alive():
             InfoBar.warning("干员导出进行中", "导出正在占用模拟器，请等导出结束后再收菜",
                             parent=self, position=InfoBarPosition.TOP_RIGHT,
                             duration=5000)
             return
         enabled = [a for a in self.cfg.get("accounts", []) if a.get("enabled", True)]
         if not enabled:
-            InfoBar.warning("没有可收菜的账号", "所有账号均已停用；请在「账号管理」启用至少一个",
+            InfoBar.warning("没有可收菜的账号", "所有账号均已停用；请在「账号 → 账号管理」启用至少一个",
                             parent=self, position=InfoBarPosition.TOP_RIGHT,
                             duration=5000)
             return
         runner.clear_stale_lock()
         runner.start_collect(self.cfg)
-        InfoBar.success("已启动基建收菜", "日志页可查看实时进度",
+        InfoBar.success("已启动基建收菜", "可在「记录 → 实时日志」查看进度",
                         parent=self, position=InfoBarPosition.TOP_RIGHT, duration=4000)
         self.refresh_status()
+
+    def on_account_task(self, acc, collect):
+        """卡片操作带稳定账号 ID，无需修改自动班次或启用状态。"""
+        action = "收菜" if collect else "运行"
+        name = acc.get("label") or acc.get("id") or "未命名账号"
+        title = "无法为「%s」%s" % (name, action)
+        if runner.is_running() or self.account_status.export_running() or _export_threads_alive():
+            reason = "模拟器正被其他流程占用，请在当前流程结束后重试。"
+        elif not acc.get("slot"):
+            reason = "该账号没有登录槽位，请先捕获登录数据。"
+        else:
+            try:
+                runner.start_account(self.cfg, acc.get("id"), collect=collect)
+            except (ValueError, OSError) as exc:
+                reason = str(exc)
+            else:
+                InfoBar.info("已提交「%s」的%s任务" % (name, action), "可在「记录 → 实时日志」查看进度",
+                             parent=self, position=InfoBarPosition.TOP_RIGHT, duration=4000)
+                self.refresh_status()
+                return
+        InfoBar.warning(title, reason, parent=self, position=InfoBarPosition.TOP_RIGHT,
+                        duration=5000)
 
     def on_export_account(self, acc):
         """账号详情里点了「导出干员资料」：互斥检查 + 确认后只导这一个号。"""
@@ -619,7 +515,7 @@ class MainWindow(FluentWindow):
                             parent=self, position=InfoBarPosition.TOP_RIGHT,
                             duration=4000)
             return
-        if self.dash.export_running() or _export_threads_alive():
+        if self.account_status.export_running() or _export_threads_alive():
             InfoBar.info("导出进行中", "干员导出正在后台执行，请稍候",
                          parent=self, position=InfoBarPosition.TOP_RIGHT,
                          duration=4000)
@@ -641,7 +537,7 @@ class MainWindow(FluentWindow):
         if not box.exec():
             return
         self.accounts_p.set_export_busy(True)
-        self.dash.start_export(acc)
+        self.account_status.start_export(acc)
 
     def on_switch_account(self, acc):
         """账号详情里点了「切换到此账号」：互斥检查 + 确认后只切号不跑日常。
@@ -654,7 +550,7 @@ class MainWindow(FluentWindow):
                             parent=self, position=InfoBarPosition.TOP_RIGHT,
                             duration=4000)
             return
-        if self.dash.export_running() or _export_threads_alive():
+        if self.account_status.export_running() or _export_threads_alive():
             InfoBar.warning("干员导出进行中", "导出正在占用模拟器，请等导出结束后再切换",
                             parent=self, position=InfoBarPosition.TOP_RIGHT,
                             duration=5000)
@@ -695,7 +591,7 @@ class MainWindow(FluentWindow):
                             parent=self, position=InfoBarPosition.TOP_RIGHT,
                             duration=4000)
             return
-        if self.dash.export_running() or _export_threads_alive():
+        if self.account_status.export_running() or _export_threads_alive():
             InfoBar.warning("干员导出进行中", "导出正在占用模拟器，请等导出结束后再启动",
                             parent=self, position=InfoBarPosition.TOP_RIGHT,
                             duration=5000)
@@ -785,23 +681,6 @@ def _patch_gray_info_bar():
     InfoBar.new = classmethod(_new)
 
 
-def _patch_gray_message_box():
-    """MessageBox 统一成 macOS 式圆角浮窗：主题底色、发丝描边、按钮区同底色。"""
-    orig_init = MessageBox.__init__
-
-    def _init(self, title, content, parent=None):
-        orig_init(self, title, content, parent)
-        self.widget.setStyleSheet(
-            "QFrame#centerWidget { background: %s; border: 1px solid %s;"
-            " border-radius: 12px; }"
-            "QFrame#buttonGroup { background: transparent; border: none;"
-            " border-bottom-left-radius: 12px; border-bottom-right-radius: 12px; }"
-            "QPushButton { border-radius: 6px; }"
-            % (theme.CARD, theme.POP_BORDER))
-
-    MessageBox.__init__ = _init
-
-
 def main():
     # 显式声明应用身份（AUMID）：pythonw 裸跑时任务栏按钮默认用 exe 的
     # Python 图标；声明后任务栏/托盘/通知都改用 setWindowIcon 的图标
@@ -820,7 +699,6 @@ def main():
     atexit.register(_release_single_instance)
     # 主题（明亮/暗夜）在 MainWindow.__init__ 里按配置应用
     _patch_gray_info_bar()
-    _patch_gray_message_box()
     global _win, _single_server
     _single_server = QLocalServer()
     _single_server.listen(_SINGLE_KEY)
@@ -828,7 +706,10 @@ def main():
     try:
         _win = MainWindow()
     except appconfig.ConfigLoadError as exc:
-        QMessageBox.critical(None, "无法安全读取配置", str(exc))
+        notice = MessageBox("无法安全读取配置", str(exc))
+        notice.yesButton.setText("关闭")
+        notice.cancelButton.hide()
+        notice.exec()
         _single_server.close()
         _release_single_instance()
         return 1

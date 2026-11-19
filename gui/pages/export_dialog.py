@@ -4,52 +4,54 @@
 与 MAA 更新弹窗同款交互：点「后台运行」只是收起窗口，导出继续；
 结果在右上角通知条提示。
 """
-from PySide6.QtWidgets import (QDialog, QHBoxLayout, QLabel, QPlainTextEdit,
-                               QVBoxLayout)
+from PySide6.QtCore import Qt
+from PySide6.QtWidgets import QHBoxLayout, QPlainTextEdit
 
-from qfluentwidgets import BodyLabel, PushButton
+from qfluentwidgets import PushButton
 
-import theme
-from widgets import dark_log_qss, style_button
+from sheets import SheetDialog
+from widgets import dark_log_qss, label, style_button
 
 
-class ExportDialog(QDialog):
+class ExportDialog(SheetDialog):
     """导出实时日志窗口。关闭只是后台运行，不中断导出。"""
 
     def __init__(self, accounts, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle("干员资料导出")
-        self.resize(640, 480)
-        theme.bind(self, lambda: "QDialog { background: %s; }" % theme.BG)
-        root = QVBoxLayout(self)
-        root.setContentsMargins(20, 18, 20, 16)
-        root.setSpacing(10)
-
+        super().__init__(parent, title="干员资料导出", size=(720, 452))
         names = "、".join(a.get("label") or a.get("slot") or "?" for a in accounts)
-        head = QLabel(
-            "本次导出 %d 个账号：%s\n"
-            "逐号切号 → 更新等待 → 登录校验 → MAA 干员识别，"
-            "结果写入 exports\\（约 3 分钟/号）。" % (len(accounts), names))
-        theme.bind(head, lambda: "font-family: %s; font-size: 12.5px; color: %s;"
-                   % (theme.FONT_FAMILY, theme.TEXT_2))
-        root.addWidget(head)
+        head = label("导出账号（%d）   %s" % (len(accounts), names), 16, "600")
+        head.setTextFormat(Qt.PlainText)
+        head.setWordWrap(True)
+        self.body.addWidget(head)
+        info = label("MAA 会依次切号、校验登录并识别干员，结果保存在 exports 文件夹。约 3 分钟 / 账号。",
+                     13, color="TEXT_2")
+        info.setWordWrap(True)
+        self.body.addWidget(info)
 
         self.log_view = QPlainTextEdit()
         self.log_view.setReadOnly(True)
         self.log_view.setMaximumBlockCount(5000)
+        self.log_view.setAccessibleName("导出日志")
+        self.log_view.setPlaceholderText("正在等待导出日志…")
         self.log_view.setStyleSheet(dark_log_qss())
-        root.addWidget(self.log_view, 1)
+        self.body.addWidget(self.log_view, 1)
 
         btns = QHBoxLayout()
-        tip = BodyLabel("关闭窗口不会中断导出，完成后右上有提示")
-        theme.bind(tip, lambda: "font-family: %s; font-size: 12px; color: %s;"
-                   % (theme.FONT_FAMILY, theme.TEXT_3))
-        close_btn = style_button(PushButton("后台运行"))
-        close_btn.clicked.connect(self.accept)
-        btns.addWidget(tip)
+        self.status_label = label("收起后继续导出，完成时会通知你。", 13, color="TEXT_2")
+        self.close_btn = style_button(PushButton("后台运行"))
+        self.close_btn.clicked.connect(self.reject)
+        btns.addWidget(self.status_label)
         btns.addStretch(1)
-        btns.addWidget(close_btn)
-        root.addLayout(btns)
+        btns.addWidget(self.close_btn)
+        self.body.addLayout(btns)
+
+    def finish(self, ok, summary):
+        status = "导出完成" if ok else "导出未全部成功"
+        self.append("")
+        self.append("==== %s ====" % status)
+        self.append(summary)
+        self.status_label.setText(status)
+        self.close_btn.setText("关闭")
 
     def append(self, text):
         self.log_view.appendPlainText(text)

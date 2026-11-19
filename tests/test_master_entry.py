@@ -34,13 +34,19 @@ function Release-Lock { $script:events.Add('unlock') }
 function Clear-CacheData { }
 function Clear-UnnecessaryData { }
 function Start-MuMu { return $true }
+function Stop-StaleMaa { }
 function shutdown { throw 'Unexpected real shutdown path' }
 function Start-Process { throw 'Unexpected unisolated process launch' }
 function New-Object {
     param($ComObject)
     if ($ComObject -ne 'WScript.Shell') { throw 'Unexpected object creation' }
     $fake = [pscustomobject]@{}
-    $fake | Add-Member ScriptMethod Popup { return 0 }
+    $fake | Add-Member ScriptMethod Popup {
+        param($Body)
+        $script:events.Add("popup|$Body")
+        Save-RunHistory
+        return 0
+    }
     return $fake
 }
 '''
@@ -55,16 +61,21 @@ function Run-Switch {
     }
     return 0
 }
-function Refresh-SlotData($Server, $Slot) { $script:events.Add("refresh|$Slot"); return $true }
+function Refresh-SlotData($Server, $Slot) { $script:events.Add("refresh|$Slot"); return (-not $fixture.refresh_fail) }
 function Invoke-Plugin {
     param($pyPath, $tag, $name, $argList, $missNote)
     $script:events.Add("plugin|$pyPath|$($argList[0])")
+    if ($fixture.restore_fail -and $argList[0] -eq 'restore') { return $false }
     return $true
 }
 '''
 MAA = r'''
 function Run-MAA($exe, $dir, $label) {
     $script:events.Add("maa|$label")
+    if ($fixture.maa_status) {
+        $value = if ($fixture.maa_status -is [string]) { $fixture.maa_status } else { $fixture.maa_status.$label }
+        if ($value) { $script:LastMaaStatus = $value; return $false }
+    }
     if ($fixture.fail_always -and $label -eq 'one') {
         $script:LastMaaStatus = 'stall'
         return $false
@@ -96,16 +107,18 @@ class MasterEntryTest(unittest.TestCase):
                   legacy_schedule=False, notify_on_success=False,
                   legacy_times=("0٤:00", "16:00"),
                   legacy_enabled=(True, True),
-                  legacy_shutdown=(False, False)):
+                  legacy_shutdown=(False, False), refresh_fail=False, maa_status='', restore_fail=False,
+                  accounts=None, expected_exit=0, entry="master.ps1"):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            for name in ("master.ps1", "master_pipeline.ps1"):
+            for name in ("master.ps1", "master_pipeline.ps1", "run_account.ps1"):
                 shutil.copyfile(ROOT / "scripts" / name, root / name)
             for name, body in (("master_lib.ps1", LIB), ("master_plugins.ps1", PLUGINS),
                                ("master_maa.ps1", MAA), ("master_history.ps1", HISTORY)):
                 (root / name).write_text(body, encoding="utf-8")
-            accounts = [dict(id=f"a{i}", label=label, slot=f"slot {i}", server="official", enabled=True)
-                        for i, label in enumerate(("one", "two"), 1)]
+            if accounts is None:
+                accounts = [dict(id=f"a{i}", label=label, slot=f"slot {i}", server="official", enabled=True)
+                            for i, label in enumerate(("one", "two"), 1)]
             for acc in accounts:
                 (root / "accounts" / acc["slot"]).mkdir(parents=True)
             if disabled:
@@ -116,6 +129,8 @@ class MasterEntryTest(unittest.TestCase):
             if collect_times is None:
                 collect_times = [{"time": "00:00", "enabled": True, "shutdown": True}]
             fixture = {"accounts": accounts, "fail_first": fail_first,
+                       "refresh_fail": refresh_fail, "maa_status": maa_status,
+                       "restore_fail": restore_fail,
                        "fail_always": fail_always, "config": {
                            "notify": {"enabled": notify_on_success,
                                       "on_success": notify_on_success},
@@ -133,11 +148,15 @@ class MasterEntryTest(unittest.TestCase):
                     "morning_shutdown": legacy_shutdown[0],
                     "evening_shutdown": legacy_shutdown[1]}
             (root / "fixture.json").write_text(json.dumps(fixture), encoding="utf-8")
-            proc = subprocess.run([PWSH, "-NoProfile", "-File", str(root / "master.ps1"),
-                                   "-NoShutdown", *args], capture_output=True,
+            flags = ["-NoShutdown"] if entry == "master.ps1" else []
+            proc = subprocess.run([PWSH, "-NoProfile", "-File", str(root / entry),
+                                   *flags, *args], capture_output=True,
                                   encoding="utf-8", errors="replace", timeout=20,
                                   creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
-            self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+            self.assertEqual(proc.returncode, expected_exit, proc.stdout + proc.stderr)
+            if expected_exit:
+                self.assertFalse((root / "result.json").exists())
+                return
             self.assertEqual(proc.stderr, "", proc.stderr)
             return json.loads((root / "result.json").read_text(encoding="utf-8"))
 
@@ -147,6 +166,34 @@ class MasterEntryTest(unittest.TestCase):
         events = r["events"]
         self.assertLess(events.index("refresh|slot 1"), events.index("slot_switch.ps1|slot 2"))
         self.assertTrue(all(x["OK"] for x in r["results"]))
+
+    def test_cleanup_warning_notifies_without_repeating_gameplay(self):
+        r = self.run_entry(refresh_fail=True, notify_on_success=True)
+        self.assertEqual(r['failed'], 0)
+        self.assertEqual(sum(e.startswith('maa|') for e in r['events']), 2)
+        self.assertTrue(all(a['Status'] == 'warning' for a in r['results']))
+        notices = [e for e in r['events'] if e.startswith('notify|')]
+        self.assertTrue(any('收尾异常' in e for e in notices))
+        self.assertFalse(any('全部成功' in e for e in notices))
+
+    def test_unknown_completion_notifies_without_repeating_gameplay(self):
+        r = self.run_entry(maa_status='log-error', notify_on_success=True)
+        self.assertEqual(sum(e.startswith('maa|') for e in r['events']), 2)
+        self.assertTrue(all(a['Status'] == 'unknown' for a in r['results']))
+        self.assertTrue(any('结果待确认' in e for e in r['events'] if e.startswith('notify|')))
+
+    def test_collect_restore_failure_is_reported_as_cleanup_warning(self):
+        r = self.run_entry(args=('-InfrastCollect',), restore_fail=True)
+        self.assertEqual(r['failed'], 0)
+        self.assertTrue(all(a['Status'] == 'warning' for a in r['results']))
+        self.assertTrue(any('收尾异常' in e for e in r['events'] if e.startswith('notify|')))
+
+    def test_mixed_failure_popup_keeps_unknown_distinct(self):
+        r = self.run_entry(maa_status={'one': 'log-error', 'two': 'stall'})
+        popup = next(e for e in r['events'] if e.startswith('popup|'))
+        self.assertIn('[待确认] one', popup)
+        self.assertIn('[失败] two', popup)
+        self.assertEqual(sum(e == 'maa|one' for e in r['events']), 1)
 
     def test_retry_reuses_pipeline_and_retains_first_failure(self):
         r = self.run_entry(fail_first=True)
@@ -169,6 +216,23 @@ class MasterEntryTest(unittest.TestCase):
     def test_daily_mode_preserves_shift_account_filter(self):
         r = self.run_entry(selected=["a2"])
         self.assertEqual([x["Account"] for x in r["results"]], ["two"])
+
+    def test_account_card_runs_only_selected_account_even_outside_schedule(self):
+        for flags, mode in (([], "farm"), (["-InfrastCollect"], "collect")):
+            with self.subTest(mode=mode):
+                r = self.run_entry(["-AccountId", "a2", *flags], selected=["a1"], disabled=True,
+                                   entry="run_account.ps1")
+                self.assertEqual(r["mode"], mode)
+                self.assertEqual([a["Account"] for a in r["results"]], ["two"])
+                self.assertIn("maa|two", r["events"])
+                self.assertNotIn("slot_switch.ps1|slot 1", r["events"])
+                self.assertEqual("plugin|collect|apply" in r["events"], mode == "collect")
+
+    def test_account_card_rejects_unknown_and_duplicate_id(self):
+        self.run_entry(["-AccountId", "deleted"], expected_exit=1)
+        accounts = [dict(id="same", label=slot, slot=slot) for slot in ("one", "two")]
+        self.run_entry(["-AccountId", "same", "-InfrastCollect"],
+                       accounts=accounts, expected_exit=1)
 
     def test_fast_switch_does_not_login_run_maa_or_refresh(self):
         r = self.run_entry(["-SwitchTo", "slot 1", "-NoLoginCheck"])

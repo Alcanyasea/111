@@ -6,7 +6,7 @@ macOS 风格约定（配色不变，只管形状与排版）：
 - 按钮 8px 圆角、ghost 描边式；破坏性操作用黑字细描边，不用彩色
 - 徽章 Pill 全圆角、中等字重
 """
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import QSize, Qt, QTimer
 from PySide6.QtGui import QColor, QLinearGradient, QPainter, QPen
 from PySide6.QtWidgets import (QApplication, QGraphicsDropShadowEffect,
                                QHBoxLayout, QLabel, QVBoxLayout, QWidget,
@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (QApplication, QGraphicsDropShadowEffect,
 from qfluentwidgets import BodyLabel, CardWidget, IconWidget, SubtitleLabel
 
 import theme
+from motion import press_feedback
 
 
 def _rgba(hex_color, alpha):
@@ -341,113 +342,58 @@ def inset_row():
     return w
 
 
+def _action_button(btn, kind, small, icon=None):
+    """统一操作按钮：实心主操作、淡色次操作、低强调工具按钮。"""
+    radius = 16 if small else 18
+    btn.setProperty("pressRadius", radius)
+    if icon:
+        btn.setIconSize(QSize(13, 13))
+
+    def sheet():
+        edge = "transparent"
+        if kind == "primary":
+            bg, fg = theme.PRIMARY_BG, theme.PRIMARY_FG
+            hover, down = theme.PRIMARY_HOVER, theme.PRIMARY_PRESSED
+        elif kind == "danger":
+            bg, fg = theme.ERR_TINT, theme.ERR
+            hover, down = (theme.mix(bg, fg, amount) for amount in (0.10, 0.20))
+        elif kind == "tinted":
+            bg = theme.mix(theme.CARD, theme.ACCENT, 0.13)
+            fg = theme.mix(theme.TEXT, theme.ACCENT, 0.40)
+            hover, down = (theme.mix(bg, theme.ACCENT, amount) for amount in (0.12, 0.24))
+        else:
+            bg, fg = theme.mix(theme.CARD, theme.TEXT, .065), theme.TEXT
+            hover, down = (theme.mix(theme.CARD, theme.TEXT, amount) for amount in (0.06, 0.12))
+        if icon:
+            btn.setIcon(icon.icon(color=fg))
+        size = theme.FS_CAPTION if small else theme.FS_BODY
+        x = 14 if small else 19
+        return (
+            "QPushButton {background:%s; color:%s; border:1px solid %s; border-radius:%dpx;"
+            "padding:4px %dpx; font-family:%s; %s}"
+            "QPushButton:hover {background:%s;} QPushButton:focus {border-color:%s;}"
+            "QPushButton:pressed {background:%s; padding:5px %dpx 3px;}"
+            "QPushButton:disabled {background:%s; color:%s; border:1px solid %s;}"
+            % (bg, fg, edge, radius, x, theme.FONT_FAMILY, theme.font_stack(size, "600"),
+               hover, theme.PRIMARY_FG if kind == "primary" else theme.ACCENT,
+               down, x, theme.BTN_DISABLED_BG, theme.BTN_DISABLED_FG,
+               theme.BTN_DISABLED_BORDER))
+    theme.bind(btn, sheet)
+    btn.setMinimumHeight(32 if small else 36)
+    btn.setCursor(Qt.CursorShape.PointingHandCursor)
+    return press_feedback(btn)
+
+
 def style_button(btn, kind="ghost", small=False):
-    """统一按钮质感：8px 圆角、半透明底描边式（macOS push button 变体）。
-
-    kind: ghost（常规）/ danger（破坏性：淡红底 + 红字，比红描边柔和，
-    悬停加深 —— 删除/清空这类操作一眼可辨又不刺眼）
-    small: 日志工具栏等次级操作用小一号规格。
-    颜色全部取自 theme 令牌并以配方绑定，明亮/暗夜切换即时重套。
-    """
-
-    def _qss():
-        if kind == "danger":
-            # 破坏性操作：淡红填充、无描边，悬停加深一档（比红描边柔和）
-            hover = _rgba(theme.ERR, 0.18) if theme.is_dark() \
-                else _rgba(theme.ERR, 0.12)
-            return (
-                "PushButton { background: %s; color: %s;"
-                " border: none; border-radius: %dpx; padding: %s;"
-                " font-family: %s; %s }"
-                "PushButton:hover { background: %s; }"
-                "PushButton:pressed { background: %s; }"
-                "PushButton:disabled { color: %s; background: %s; }"
-                % (theme.ERR_TINT, theme.ERR,
-                   theme.RADIUS_BTN, "4px 12px" if small else "6px 16px",
-                   theme.FONT_FAMILY,
-                   theme.font_stack(theme.FS_CAPTION if small else theme.FS_BODY,
-                                    "500"),
-                   hover, _rgba(theme.ERR, 0.24),
-                   theme.BTN_DISABLED_FG, theme.BTN_DISABLED_BG)
-            )
-        # 常规按钮：描边式 ghost，悬停提亮底色 + 描边加深一档
-        pad = "4px 14px" if small else "6px 16px"
-        return (
-            "PushButton { background: %s; color: %s;"
-            " border: 1px solid %s; border-radius: %dpx; padding: %s;"
-            " font-family: %s; %s }"
-            "PushButton:hover { background: %s; border-color: %s; }"
-            "PushButton:pressed { background: %s; }"
-            "PushButton:disabled { color: %s;"
-            " border-color: %s; background: %s; }"
-            % (theme.BTN_BG, theme.BTN_FG, theme.BTN_BORDER, theme.RADIUS_BTN, pad,
-               theme.FONT_FAMILY,
-               theme.font_stack(theme.FS_CAPTION if small else theme.FS_BODY,
-                                "500"),
-               theme.BTN_BG_HOVER, theme.BTN_BORDER_HOVER,
-               theme.BTN_BG_PRESSED,
-               theme.BTN_DISABLED_FG, theme.BTN_DISABLED_BORDER, theme.BTN_DISABLED_BG)
-        )
-
-    theme.bind(btn, _qss)
-    btn.setMinimumHeight(theme.BTN_H_SM if small else theme.BTN_H)
-    btn.setCursor(Qt.CursorShape.PointingHandCursor)
-    return btn
+    return _action_button(btn, kind, small)
 
 
-def style_primary_button(btn):
-    """主按钮：主题强调色实底（macOS Accent button 的柔和灰阶版）。
-
-    注意：实例 setStyleSheet 会整体替换 qfluentwidgets 的按钮 qss，
-    所以这里必须写全背景/悬停/按下/禁用各态，不能只写增量。
-    """
-    theme.bind(
-        btn,
-        lambda: "PrimaryPushButton { background: %s; color: %s;"
-                " border: none; border-radius: %dpx; padding: 6px 20px;"
-                " font-family: %s; %s }"
-                "PrimaryPushButton:hover { background: %s; }"
-                "PrimaryPushButton:pressed { background: %s; }"
-                "PrimaryPushButton:disabled { background: %s; color: %s; }"
-                % (theme.PRIMARY_BG, theme.PRIMARY_FG, theme.RADIUS_BTN,
-                   theme.FONT_FAMILY, theme.font_stack(theme.FS_BODY, "600"),
-                   theme.PRIMARY_HOVER, theme.PRIMARY_PRESSED,
-                   theme.PRIMARY_DISABLED_BG, theme.PRIMARY_DISABLED_FG))
-    btn.setMinimumHeight(theme.BTN_H)
-    btn.setCursor(Qt.CursorShape.PointingHandCursor)
-    return btn
+def style_primary_button(btn, small=False, *, icon=None):
+    return _action_button(btn, "primary", small, icon)
 
 
-def style_tinted_button(btn, small=False):
-    """轻强调按钮：主题强调色低透明度实底（macOS tinted push button 变体）。
-
-    介于 ghost（描边式）与 primary（实底深灰）之间：给卡片内唯一的主操作
-    用——比 ghost 有分量，又不会像 primary 那样在多张卡片上重复出现显得
-    沉重。色相取当前主题 ACCENT 调透明度（不引入新颜色，保持整套灰阶），
-    ACCENT 是 "#rrggbb" 字面量，直接拆出三通道。配方绑定随主题即时重套。
-    """
-
-    def _qss():
-        rgb = tuple(int(theme.ACCENT[i:i + 2], 16) for i in (1, 3, 5))
-        pad = "4px 14px" if small else "6px 18px"
-        return (
-            "PushButton { background: rgba(%d, %d, %d, 0.14); color: %s;"
-            " border: none; border-radius: %dpx; padding: %s;"
-            " font-family: %s; %s }"
-            "PushButton:hover { background: rgba(%d, %d, %d, 0.21); }"
-            "PushButton:pressed { background: rgba(%d, %d, %d, 0.28); }"
-            "PushButton:disabled { background: rgba(%d, %d, %d, 0.07);"
-            " color: %s; }"
-            % (rgb + (theme.TEXT, theme.RADIUS_BTN, pad, theme.FONT_FAMILY,
-                      theme.font_stack(
-                          theme.FS_CAPTION if small else theme.FS_BODY, "600"))
-               + rgb + rgb + rgb + (theme.TEXT_3,))
-        )
-
-    theme.bind(btn, _qss)
-    btn.setMinimumHeight(theme.BTN_H_SM if small else theme.BTN_H)
-    btn.setCursor(Qt.CursorShape.PointingHandCursor)
-    return btn
+def style_tinted_button(btn, small=False, *, icon=None):
+    return _action_button(btn, "tinted", small, icon)
 
 
 def empty_state(title, hint=None, icon=None):

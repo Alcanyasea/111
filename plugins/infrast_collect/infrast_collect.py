@@ -43,8 +43,11 @@ DEFAULT_CONFIG = Path(__file__).resolve().parents[2] / "config.json"
 # 插件公共工具（plugins\common.py）——此前本文件与其它四个插件各复制一份
 sys.path.insert(0, str(PLUGIN_DIR.parent))
 from common import (atomic_json_write as _atomic_json_write, find_account,
-                    load_config, log_file, maa_dir_for as _maa_dir,
+                    load_config, run_plugin_command, log_file, maa_dir_for as _maa_dir,
                     read_json as _read_json)
+
+from maa_compat import ensure_maa_stopped
+from maa_config_io import read_object, write_transaction
 
 # 收菜方案里停用的任务（开始唤醒 + 基建保留：要先进游戏才收得了菜）
 DISABLE_TASKS = ("RecruitTask", "FightTask", "MallTask", "AwardTask")
@@ -67,7 +70,7 @@ def _deepcopy(obj):
     return json.loads(json.dumps(obj))
 
 
-def write_collect_plan():
+def write_collect_plan(include_recycle=False):
     """生成收菜计划 JSON（字段结构与 MAA 官方 custom_infrast 示例一致）。
 
     制造站 3 间 + 贸易站 3 间全部 skip=true、operators 留空：进房间只收
@@ -104,7 +107,9 @@ def write_collect_plan():
             }
         ],
     }
-    path = PLUGIN_DIR / "collect_plan.json"
+    if include_recycle:
+        plan["plans"][0]["rooms"]["recycle"] = [{"skip": True, "operators": [], "sort": False, "autofill": False}]
+    path = PLUGIN_DIR / ("collect_plan_recycle.json" if include_recycle else "collect_plan.json")
     # changed 模式：内容与现有文件一致就不重写（之前每次 apply 都刷文件，
     # 造成 git 脏、mtime 变化，并覆盖用户对手工调整过的计划）
     if _read_json(path) != plan:
@@ -119,9 +124,12 @@ def apply_collect(maa_dir):
     连它也没有则视为配置损坏，报错交由上层告警。
     """
     gui_new = Path(maa_dir) / "config" / "gui.new.json"
-    data = _read_json(gui_new)
-    if not isinstance(data, dict):
-        return False, "读取 %s 失败" % gui_new
+    gui_json = gui_new.with_name("gui.json")
+    try:
+        data = read_object(gui_new)
+        gj = read_object(gui_json, optional=True)
+    except (OSError, ValueError) as exc:
+        return False, str(exc)
     cfgs = data.get("Configurations")
     if not isinstance(cfgs, dict) or not cfgs:
         return False, "gui.new.json 没有任何配置方案"
@@ -133,7 +141,16 @@ def apply_collect(maa_dir):
     if not isinstance(base, dict):
         return False, "找不到可作同步基准的配置方案（Default 缺失）"
 
-    plan_path = write_collect_plan()
+    base_queue = base.get("TaskQueue")
+    if not isinstance(base_queue, list):
+        return False, "收菜基准方案缺少 TaskQueue"
+    base_task = next((t for t in base_queue if isinstance(t, dict) and t.get("$type") == "InfrastTask"), {})
+    base_rooms = base_task.get("RoomList", [])
+    if not isinstance(base_rooms, list):
+        return False, "收菜基准方案的 InfrastTask.RoomList 必须是列表"
+    recycle_supported = any(isinstance(r, dict) and r.get("Room") == "Recycle" for r in base_rooms)
+    collect_rooms = COLLECT_ROOMS + (("Recycle",) if recycle_supported else ())
+    plan_path = write_collect_plan(include_recycle=recycle_supported)
 
     scheme = cfgs.get(COLLECT_SCHEME)
     created = False
@@ -184,15 +201,20 @@ def apply_collect(maa_dir):
     if not isinstance(rooms, list):
         rooms = []
         task["RoomList"] = rooms
-    for name in COLLECT_ROOMS:
+    for name in collect_rooms:
         hit = next((r for r in rooms if isinstance(r, dict) and r.get("Room") == name), None)
         if hit is None:
             rooms.insert(0, {"Room": name, "IsEnabled": True})
         elif hit.get("IsEnabled", True) is not True:
             hit["IsEnabled"] = True
     for r in rooms:
-        if isinstance(r, dict) and r.get("Room") not in COLLECT_ROOMS:
+        if isinstance(r, dict) and r.get("Room") not in collect_rooms:
             r["IsEnabled"] = False
+
+    # v6.20+ understands this switch; do not add an unknown field to older MAA
+    # configs where the engine already defaults to not continuing training.
+    if "ContinueTraining" in task:
+        task["ContinueTraining"] = False
 
     # 任务队列：开始唤醒 + 基建保留，其余一律停用（幂等，每次收菜前压一遍）
     for t in queue:
@@ -201,16 +223,14 @@ def apply_collect(maa_dir):
         ttype = t.get("$type")
         if ttype == "InfrastTask":
             t["IsEnable"] = True
-        elif ttype in ("StartUpTask",) + DISABLE_TASKS + IDLE_TASKS:
+        else:
             t["IsEnable"] = (ttype == "StartUpTask")
 
     if data.get("Current") != COLLECT_SCHEME:
         data["Current"] = COLLECT_SCHEME
-    _atomic_json_write(gui_new, data)
+    writes = [(gui_new, data)]
 
     # gui.json（旧版设置文件）：同步方案条目与 Current，缺失则从 Default 补
-    gui_json = Path(maa_dir) / "config" / "gui.json"
-    gj = _read_json(gui_json)
     if isinstance(gj, dict):
         gcfgs = gj.get("Configurations")
         if isinstance(gcfgs, dict):
@@ -223,8 +243,12 @@ def apply_collect(maa_dir):
                 gscheme["Infrast.InfrastMode"] = "Custom"
                 gscheme["Infrast.DefaultInfrast"] = "user_defined"
         gj["Current"] = COLLECT_SCHEME
-        _atomic_json_write(gui_json, gj)
+        writes.append((gui_json, gj))
 
+    try:
+        write_transaction(writes)
+    except OSError as exc:
+        return False, "MAA 配置备份或原子更新失败：%s" % exc
     note = "已创建「收菜」方案" if created else "「收菜」方案已就绪"
     return True, "%s并已切换（生产房间全 skip 不换班·宿舍自动换休，计划 %s）" % (
         note, plan_path.name)
@@ -232,12 +256,14 @@ def apply_collect(maa_dir):
 
 def restore_default(maa_dir):
     """把 Current 指针切回 Default（两份配置文件都改）。返回 (ok, message)。"""
-    changed, missing = [], []
+    changed, writes = [], []
     for name in ("gui.new.json", "gui.json"):
         path = Path(maa_dir) / "config" / name
-        data = _read_json(path)
-        if not isinstance(data, dict):
-            missing.append(name)
+        try:
+            data = read_object(path, optional=name == "gui.json")
+        except (OSError, ValueError) as exc:
+            return False, str(exc)
+        if data is None:
             continue
         cfgs = data.get("Configurations")
         has_default = isinstance(cfgs, dict) and isinstance(cfgs.get(FARM_SCHEME), dict)
@@ -245,17 +271,20 @@ def restore_default(maa_dir):
             if not has_default:
                 return False, "%s 没有 Default 方案，无法切回" % name
             data["Current"] = FARM_SCHEME
-            _atomic_json_write(path, data)
+            writes.append((path, data))
             changed.append(name)
-    if missing and not changed:
-        return False, "读取失败：%s" % "、".join(missing)
     if changed:
+        try:
+            ensure_maa_stopped(maa_dir)
+            write_transaction(writes, before_replace=lambda: ensure_maa_stopped(maa_dir))
+        except (OSError, ValueError) as exc:
+            return False, "MAA 配置恢复失败：%s" % exc
         return True, "Current 已切回 Default（%s）" % "、".join(changed)
     return True, "Current 本就是 Default，无需切换"
 
 
 def cmd_apply(args):
-    cfg = load_config(args.config)
+    cfg = load_config(args.config, required=True)
     acc = find_account(cfg, args.account)
     if acc is None:
         print("ERROR account not found: %s" % args.account)
@@ -263,11 +292,15 @@ def cmd_apply(args):
 
     server = args.server or acc.get("server") or "official"
     maa_dir = _maa_dir(cfg, server)
-    if not maa_dir or not Path(maa_dir).exists():
-        _log_file(cfg, "WARN 未找到 %s 的 MAA 目录：%s" % (server, maa_dir))
-        print("ERROR no maa dir")
+    if not maa_dir or not maa_dir.is_dir():
+        print("ERROR 未找到 %s 的 MAA 目录：%s" % (server, maa_dir or "未配置"))
         return 2
 
+    try:
+        ensure_maa_stopped(maa_dir)
+    except ValueError as exc:
+        print("ERROR %s" % exc)
+        return 2
     ok, msg = apply_collect(maa_dir)
     _log_file(cfg, "账号「%s」：%s" % (acc.get("label") or args.account, msg))
     print(("OK " if ok else "ERROR ") + msg)
@@ -275,7 +308,7 @@ def cmd_apply(args):
 
 
 def cmd_restore(args):
-    cfg = load_config(args.config)
+    cfg = load_config(args.config, required=True)
     results = []
     ok_all = True
     for server in ("official", "bilibili"):
@@ -303,7 +336,7 @@ def main(argv=None):
     r.add_argument("--config", default=str(DEFAULT_CONFIG))
     r.set_defaults(func=cmd_restore)
     args = p.parse_args(argv)
-    return args.func(args)
+    return run_plugin_command(args)
 
 
 if __name__ == "__main__":

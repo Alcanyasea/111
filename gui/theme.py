@@ -152,8 +152,8 @@ _DARK = {
 
 # ---- 配色方案（背景色调 × 明暗主题 的二维系统） ----
 #
-# 五套配色全部取自知名风格系统的官方色板（千万人检验过的审美）：
-#   github      GitHub Primer —— 清爽极简，开发者最熟悉的灰白蓝绿
+# 默认方案为雾银靛蓝，其余四套沿用各自的配色系统：
+#   github      雾银靛蓝 —— 保留默认方案的历史配置键，已有安装可直接换肤
 #   catppuccin  Catppuccin Latte/Frappé —— 奶油底柔彩，社区宠儿
 #   everforest  Everforest Light/Medium —— 柔和森林绿，护眼暖米底
 #   nord        Nord Snow Storm/Polar Night —— 冷冽蓝灰，Aurora 四色点缀
@@ -169,38 +169,38 @@ _DARK = {
 
 _PALETTES = {
     "github": {
-        "label": "清爽极简 · GitHub",
+        "label": "雾银靛蓝",
         "light": {
-            "BG": "#f6f8fa", "CARD": "#ffffff", "ROW_INSET": "#f6f8fa",
-            "BORDER": "#d1d9e0",
-            "TEXT": "#1f2328", "TEXT_2": "#59636e", "TEXT_3": "#818b98",
-            "ACCENT": "#0969da", "SWITCH_ON": "#0969da",
-            "SWITCH_ON_DARK": "#a5cdf1",
+            "BG": "#f5f5f8", "CARD": "#ffffff", "ROW_INSET": "#f5f5f8",
+            "BORDER": "#ddddE6",
+            "TEXT": "#20212b", "TEXT_2": "#555967", "TEXT_3": "#686c79",
+            "ACCENT": "#454eb5", "SWITCH_ON": "#454eb5",
+            "SWITCH_ON_DARK": "#b2b8fb",
             "OK": "#1a7f37", "OK_TINT": "#dafbe1",
-            "RUN": "#0969da", "RUN_TINT": "#ddf4ff",
+            "RUN": "#454eb5", "RUN_TINT": "#e7e9ff",
             "WAIT": "#9a6700", "WAIT_TINT": "#fff8c5",
             "ERR": "#d1242f", "ERR_TINT": "#ffebe9",
-            "PRIMARY_BG": "#0969da", "PRIMARY_FG": "#ffffff",
-            "PRIMARY_HOVER": "#218bff", "PRIMARY_PRESSED": "#0a5cb8",
-            "PRIMARY_DISABLED_BG": "rgba(9, 105, 218, 0.35)",
+            "PRIMARY_BG": "#454eb5", "PRIMARY_FG": "#ffffff",
+            "PRIMARY_HOVER": "#525dc1", "PRIMARY_PRESSED": "#363f99",
+            "PRIMARY_DISABLED_BG": "rgba(69, 78, 181, 0.35)",
             "PRIMARY_DISABLED_FG": "rgba(255, 255, 255, 0.75)",
-            "INFOBAR_BG": "#fbfcfd",
+            "INFOBAR_BG": "#f4f4fb",
         },
         "dark": {
-            "BG": "#0d1117", "CARD": "#161b22", "ROW_INSET": "#10151c",
-            "BORDER": "#30363d",
-            "TEXT": "#e6edf3", "TEXT_2": "#9198a1", "TEXT_3": "#6e7681",
-            "ACCENT": "#2f81f7", "SWITCH_ON": "#2f81f7",
-            "SWITCH_ON_DARK": "#1f6feb",
+            "BG": "#18191f", "CARD": "#25262f", "ROW_INSET": "#20212a",
+            "BORDER": "#3c3e4b",
+            "TEXT": "#f2f2f8", "TEXT_2": "#c4c5d3", "TEXT_3": "#a0a3b4",
+            "ACCENT": "#b3baff", "SWITCH_ON": "#b3baff",
+            "SWITCH_ON_DARK": "#707ad1",
             "OK": "#3fb950", "OK_TINT": "#0e2b1d",
-            "RUN": "#4493f8", "RUN_TINT": "#102a42",
+            "RUN": "#c6cbff", "RUN_TINT": "#333851",
             "WAIT": "#d29922", "WAIT_TINT": "#2d2410",
             "ERR": "#f85149", "ERR_TINT": "#3c1614",
-            "PRIMARY_BG": "#2f81f7", "PRIMARY_FG": "#ffffff",
-            "PRIMARY_HOVER": "#4493f8", "PRIMARY_PRESSED": "#1f6feb",
-            "PRIMARY_DISABLED_BG": "rgba(47, 129, 247, 0.35)",
+            "PRIMARY_BG": "#b3baff", "PRIMARY_FG": "#24274b",
+            "PRIMARY_HOVER": "#c6cbff", "PRIMARY_PRESSED": "#a1a9f0",
+            "PRIMARY_DISABLED_BG": "rgba(179, 186, 255, 0.35)",
             "PRIMARY_DISABLED_FG": "rgba(255, 255, 255, 0.75)",
-            "INFOBAR_BG": "#1c2431",
+            "INFOBAR_BG": "#2d303d",
         },
     },
     "catppuccin": {

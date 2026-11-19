@@ -100,6 +100,8 @@ $fightStagePy = Join-Path $root "plugins\fight_stage\fight_stage.py"
 $farmGuardPy = Join-Path $root "plugins\farm_guard\farm_guard.py"
 $fiammettaPy = Join-Path $root "plugins\fiammetta\fiammetta.py"
 $infrastCollectPy = Join-Path $root "plugins\infrast_collect\infrast_collect.py"
+$accountTasksPy = Join-Path $root "plugins\account_tasks\account_tasks.py"
+$combatReportPy = Join-Path $root "plugins\combat_report\combat_report.py"
 $notifyPy = Join-Path $root "plugins\notify\notify.py"
 $runHistoryDir = Join-Path $scriptDir "run_history"
 # 本轮运行历史元数据（Save-RunHistory 使用；MAIN 里按模式改写 $runMode）。
@@ -170,6 +172,17 @@ function Log($msg) {
 function Start-MuMu {
     Log "=== Starting MuMu ==="
     $script:StartMuMuError = "模拟器启动失败"
+    # 必须早于 ADB 地址同步、切号和配置插件；等 Run-MAA 才清理已经太晚。
+    # 两套 MAA 都可能仍在控制同一个模拟器，所以先一起接管。
+    try {
+        foreach ($dir in @($maaOfficialDir, $maaBilibiliDir) | Select-Object -Unique) {
+            Stop-StaleMaa $dir
+        }
+    } catch {
+        $script:StartMuMuError = 'MAA 运行环境准备失败：' + $_.Exception.Message
+        Log ('ERROR: ' + $script:StartMuMuError)
+        return $false
+    }
     $oldDevice = [string]$script:device
     & $adb kill-server 2>$null | Out-Null
     Start-Sleep 1
@@ -259,16 +272,42 @@ function Start-MuMu {
 
 function Stop-StaleMaa([string]$maaDir) {
     # 启动前清理：只杀「本 MAA 目录」下的残留实例（上次崩溃/异常遗留）。按进程
-    # 可执行文件路径的目录边界匹配，不按名字全局杀——用户手动开的别的 MAA（人工
+    # 可执行文件路径匹配，不按名字全局杀——用户手动开的别的 MAA（人工
     # 排障/查看）不能误杀；同目录的手动 MAA 与脚本会写同一份配置，必须清
-    $maaDirPrefix = $maaDir.TrimEnd([char[]]@('\', '/')) + '\'
-    Get-Process -Name "MAA" -ErrorAction SilentlyContinue | ForEach-Object {
+    if ([string]::IsNullOrWhiteSpace($maaDir)) { return }
+    $maaExe = [IO.Path]::GetFullPath((Join-Path $maaDir 'MAA.exe'))
+    foreach ($proc in @(Get-Process -Name "MAA" -ErrorAction SilentlyContinue)) {
         try {
-            $p = $_.Path
-            if ($p -and $p.StartsWith($maaDirPrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
-                Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue
+            # Path 读不到（权限/刚好退出）的实例不按名称误杀，插件仍会保守检查。
+            try { $p = $proc.Path } catch { continue }
+            if (-not $p) { continue }
+            $sameInstall = [IO.Path]::GetFullPath($p).Equals($maaExe, [StringComparison]::OrdinalIgnoreCase)
+            $processDir = Split-Path -Parent $p
+            if (-not $sameInstall -and (Test-Path -LiteralPath $maaDir -PathType Container) -and
+                (Test-Path -LiteralPath $processDir -PathType Container)) {
+                # 字符串不同也可能是同一目录的 junction/短路径。复用插件 Python
+                # 比较目录身份，不比较 exe 文件身份（另一安装可能硬链接同一 exe）。
+                if (-not $venvPython -or -not (Test-Path -LiteralPath $venvPython)) {
+                    throw '无法确认 MAA 目录身份：Python 运行时不可用'
+                }
+                $identity = & $venvPython -c 'import os,sys; print(int(os.path.samefile(sys.argv[1], sys.argv[2])))' $maaDir $processDir 2>$null
+                if ($LASTEXITCODE -ne 0 -or $identity -notin @('0', '1')) {
+                    throw '无法确认 MAA 目录身份'
+                }
+                $sameInstall = ($identity -eq '1')
             }
-        } catch { }   # Path 读不到（权限/刚好退出）的实例不碰
+            if (-not $sameInstall) { continue }
+            Log ('关闭已运行的 MAA：{0} (PID {1})' -f $p, $proc.Id)
+            try {
+                Stop-Process -InputObject $proc -Force -ErrorAction Stop
+            } catch {
+                if (-not $proc.HasExited) { throw }
+            }
+            # 终止请求返回不代表进程已退出；等句柄释放后才允许修改配置/再次启动。
+            if (-not $proc.WaitForExit(15000)) { throw "MAA 退出超时：$p" }
+        } finally {
+            if ($proc -is [Diagnostics.Process]) { $proc.Dispose() }
+        }
     }
 }
 

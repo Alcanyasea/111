@@ -57,18 +57,21 @@ DEFAULT_CONFIG = Path(__file__).resolve().parents[2] / "config.json"
 # 插件公共工具（plugins\common.py）——此前五个插件各复制一份、改一处漏四处
 sys.path.insert(0, str(PLUGIN_DIR.parent))
 from common import (atomic_json_write as _atomic_json_write, batch_name,
-                    find_account, load_config, log_file, maa_dir_for as _maa_dir)
+                    find_account, load_config, run_plugin_command, log_file, maa_dir_for as _maa_dir)
 
 
 def _log_file(cfg, msg):
     log_file(cfg, "基建插件", msg)
+
+from maa_compat import ensure_maa_stopped
+from maa_config_io import read_object, write_transaction
 
 BATCHES = ["4点", "16点"]
 # farm 换班要进的标准设施（与 MAA GUI 设施列表同序）。旧版基建收菜曾把 farm
 # 方案改成「只勾制造/贸易」，残留的禁用房间会让自定义换班跳过控制中枢/会客室
 # /办公室/发电站/加工站（2026-09-18 官服三号连坑的根因，当时只补回了 Dorm）
 STANDARD_ROOMS = ("Mfg", "Trade", "Control", "Power", "Reception",
-                  "Office", "Dorm", "Processing", "Training")
+                  "Office", "Dorm", "Processing")
 MANUFACTURE_PRODUCTS = ["Pure Gold", "Originium Shard", "Battle Record"]
 TRADING_PRODUCTS = ["LMD", "Orundum"]
 DEFAULT_MANUFACTURE_PRODUCT = "Pure Gold"
@@ -154,6 +157,9 @@ def default_batch(layout="333"):
         "dormitory": [[""] * 5 for _ in range(4)],
         "office": [""],
         "processing": [""],
+        "recycle": [""] * 2,
+        "training": {"operatorsA": [], "operatorsB": []},
+        "continue_training": False,
         # 菲亚梅塔心情恢复：按批次独立设置（换班开始前先恢复目标干员心情）
         "fiammetta": {"enable": False, "target": ""},
     }
@@ -254,6 +260,10 @@ def normalize(bs, batches=None):
             })
         return rows
 
+    def candidates(training, key):
+        values = training.get(key) if isinstance(training, dict) else None
+        return [str(value).strip() for value in values if str(value).strip()] if isinstance(values, list) else []
+
     names = list(batches if batches else BATCHES)
     for b in batches_src:
         if b not in names:
@@ -276,7 +286,13 @@ def normalize(bs, batches=None):
             "dormitory": multi(src, "dormitory", 4, 5),
             "office": single(src, "office", 1),
             "processing": single(src, "processing", 1),
+            "recycle": single(src, "recycle", 2),
+            "training": {key: candidates(src.get("training"), key) for key in ("operatorsA", "operatorsB")},
+            "continue_training": src.get("continue_training") is True,
         }
+        for key in ("training_empty", "training_skip", "recycle_empty", "recycle_skip"):
+            if src.get(key) is True:
+                out["batches"][b][key] = True
         fi = src.get("fiammetta")
         if not isinstance(fi, dict):
             fi = {}
@@ -369,6 +385,15 @@ def build_plan_document(bs, entries=None, title="自定义基建",
                 "dormitory": dorms,
             },
         }
+        if any(str(x).strip() for x in b["recycle"]):
+            plan["rooms"]["recycle"] = [_entry(b["recycle"])]
+        if any(b["training"].values()):
+            plan["rooms"]["training"] = [b["training"]]
+        for key in ("recycle", "training"):
+            if b.get(key + "_skip"):
+                plan["rooms"][key] = [{"skip": True}]
+            elif b.get(key + "_empty") and key not in plan["rooms"]:
+                plan["rooms"][key] = []
         drones = bs.get("drones") or {}
         if drones.get("enable"):
             plan["drones"] = {
@@ -388,6 +413,9 @@ def build_plan_document(bs, entries=None, title="自定义基建",
                     "target": target,
                     "order": "pre",
                 }
+        if b["continue_training"]:
+            # Console metadata only: MAA continues training via InfrastTask.ContinueTraining.
+            plan["metadata"] = {"maaConsole": {"continueTraining": True}}
         plans.append(plan)
     return {
         "author": "MAA 挂机控制台",
@@ -486,13 +514,13 @@ def _read_maa_json(path, log):
     """读 MAA 配置 JSON；损坏/被占用（MAA 运行中可能正在写该文件）时记 ERROR
     返回 None——由调用方按失败处理，而不是裸 traceback 中断启动链。"""
     try:
-        return json.loads(Path(path).read_text(encoding="utf-8"))
+        return read_object(path)
     except (OSError, ValueError) as e:
         log("ERROR: 读取 MAA 配置 %s 失败（%s）" % (path, e))
         return None
 
 
-def apply_maa_config(maa_dir, plan_path, plan_index=None, log=print):
+def apply_maa_config(maa_dir, plan_path, plan_index=None, log=print, continue_training=None, required_rooms=()):
     """把某套 MAA 当前配置的基建任务切到 Custom(plan) 或恢复 Rotation。
 
     修改 gui.new.json 的 InfrastTask（Mode/Filename/PlanSelect）与
@@ -513,14 +541,28 @@ def apply_maa_config(maa_dir, plan_path, plan_index=None, log=print):
     filename = str(plan_path) if plan_path else ""
     plan_select = -1 if plan_index is None else int(plan_index)
     changed = []
-
+    writes = []
+    state_path = Path(maa_dir) / "config" / "maa-console-training.json"
+    state = {"version": 1, "schemes": {}, "rooms": {}}
+    if state_path.exists():
+        state = _read_maa_json(state_path, log)
+        if not isinstance(state, dict) or state.get("version") != 1 or not isinstance(state.get("schemes"), dict) or not isinstance(state.get("rooms", {}), dict):
+            log("ERROR: 控制台继续训练恢复状态损坏，停止配置更新")
+            return None
+    if any(not isinstance(value, dict) or not isinstance(value.get("present"), bool)
+           or (value["present"] and not isinstance(value.get("value"), bool))
+           for value in state["schemes"].values()):
+        log("ERROR: 控制台继续训练恢复状态无效，停止配置更新")
+        return None
+    state_before = json.dumps(state, sort_keys=True)
     gui_new = Path(maa_dir) / "config" / "gui.new.json"
     if gui_new.exists():
         data = _read_maa_json(gui_new, log)
         if data is None:
             return None
         cur = data.get("Current") or "Default"
-        section = (data.get("Configurations") or {}).get(cur)
+        configs = data.get("Configurations")
+        section = configs.get(cur) if isinstance(configs, dict) else None
         found = False
         if isinstance(section, dict):
             queue = section.get("TaskQueue")
@@ -534,10 +576,57 @@ def apply_maa_config(maa_dir, plan_path, plan_index=None, log=print):
                     drop = {id(t) for t in infrast[1:]}
                     queue[:] = [t for t in queue if id(t) not in drop]
                     first = infrast[0]
+                    room_list = first.get("RoomList") if isinstance(first.get("RoomList"), list) else []
+                    available = {r.get("Room") for r in room_list if isinstance(r, dict)}
+                    missing_rooms = [room for room in required_rooms if room not in available]
+                    if missing_rooms:
+                        log("ERROR: MAA 当前基建任务的房间列表缺少所需设施 %s" % ", ".join(missing_rooms))
+                        return None
+                    originals = state["schemes"]
+                    room_originals = state.setdefault("rooms", {})
+                    if required_rooms:
+                        for room_name in required_rooms:
+                            if room_name not in room_originals:
+                                found = next((r for r in room_list if isinstance(r, dict) and r.get("Room") == room_name), None)
+                                room_originals[room_name] = {
+                                    "present": found is not None,
+                                    "enabled_present": isinstance(found, dict) and "IsEnabled" in found,
+                                    "value": (found or {}).get("IsEnabled")}
+                    for room in room_list:
+                        if isinstance(room, dict) and room.get("Room") in required_rooms:
+                            room["IsEnabled"] = True
+                    if continue_training is not None:
+                        if cur not in originals:
+                            originals[cur] = {"present": "ContinueTraining" in first,
+                                              "value": first.get("ContinueTraining")}
+                        first["ContinueTraining"] = bool(continue_training)
+                    elif cur in originals:
+                        original = originals.pop(cur)
+                        if original.get("present"):
+                            first["ContinueTraining"] = original.get("value")
+                        else:
+                            first.pop("ContinueTraining", None)
                     # 设施列表整表恢复：标准房间全部启用（含被旧版收菜/一键休整
                     # 残留禁用的房间）。自定义换班按这份清单过滤房间，只补 Dorm
                     # 不够——禁用的控制中枢/会客室等会让该房间的排班静默失效
                     normalize_room_list(first)
+                    if room_originals:
+                        for room_name, original in list(room_originals.items()):
+                            # A room requested by this account stays enabled;
+                            # restore every previously owned room that this
+                            # account does not request before the next run.
+                            if room_name in required_rooms:
+                                continue
+                            found = next((r for r in first.get("RoomList", []) if isinstance(r, dict) and r.get("Room") == room_name), None)
+                            if original.get("present"):
+                                if found is not None:
+                                    if original.get("enabled_present"):
+                                        found["IsEnabled"] = original.get("value")
+                                    else:
+                                        found.pop("IsEnabled", None)
+                            elif found is not None:
+                                first["RoomList"].remove(found)
+                            room_originals.pop(room_name, None)
                     if mode == "Custom":
                         # 精确换班期间不让已进驻的干员进入宿舍：MAA 宿舍补位
                         # 会按此开关用游戏内的「未进驻」筛选，已在其它设施上岗
@@ -548,10 +637,15 @@ def apply_maa_config(maa_dir, plan_path, plan_index=None, log=print):
                     first["PlanSelect"] = plan_select
                     found = True
         if found:
-            _atomic_json_write(gui_new, data)
+            writes.append((gui_new, data))
             changed.append("gui.new.json")
         else:
             log("WARN: gui.new.json 当前配置 %s 中未找到 InfrastTask" % cur)
+            if plan_path:
+                return []
+    else:
+        log("ERROR: 找不到 MAA 主配置 %s" % gui_new)
+        return None
 
     gui_json = Path(maa_dir) / "config" / "gui.json"
     if gui_json.exists():
@@ -559,17 +653,25 @@ def apply_maa_config(maa_dir, plan_path, plan_index=None, log=print):
         if data is None:
             return None
         cur = data.get("Current") or "Default"
-        section = (data.get("Configurations") or {}).get(cur)
+        configs = data.get("Configurations")
+        section = configs.get(cur) if isinstance(configs, dict) else None
         if isinstance(section, dict):
             section["Infrast.InfrastMode"] = mode
-            _atomic_json_write(gui_json, data)
+            writes.append((gui_json, data))
             changed.append("gui.json")
 
+    if json.dumps(state, sort_keys=True) != state_before:
+        writes.append((state_path, state))
+    try:
+        write_transaction(writes)
+    except OSError as exc:
+        log("ERROR: MAA 配置备份或原子更新失败：%s" % exc)
+        return None
     return changed
 
 
 def cmd_apply(args):
-    cfg = load_config(args.config)
+    cfg = load_config(args.config, required=True)
     acc = find_account(cfg, args.account)
     if acc is None:
         print("ERROR account not found: %s" % args.account)
@@ -588,6 +690,11 @@ def cmd_apply(args):
         # 时间点刚改过 / 批次名对不上 → 按当前时间重新判定，保证计划索引正确
         batch = current_batch(entries=entries)
 
+    maa_dir = _maa_dir(cfg, server)
+    if not maa_dir or not maa_dir.is_dir():
+        print("ERROR 未找到 %s 的 MAA 目录：%s" % (server, maa_dir or "未配置"))
+        return 2
+
     plan_path = None
     plan_index = None
     if enabled:
@@ -596,20 +703,36 @@ def cmd_apply(args):
         _log_file(cfg, "账号「%s」启用精确基建（%s批），计划已生成：%s"
                   % (label, batch, plan_path.name))
 
-    maa_dir = _maa_dir(cfg, server)
-    if not maa_dir or not maa_dir.exists():
-        _log_file(cfg, "WARN 未找到 %s 的 MAA 目录：%s，跳过配置写入"
-                  % (server, maa_dir))
-        print("WARN no maa dir")
-        return 0
+    try:
+        ensure_maa_stopped(maa_dir)
+    except ValueError as exc:
+        print("ERROR %s" % exc)
+        return 2
+    selected = bs["batches"].get(batch, {})
+    required_rooms = []
+    if enabled and (any(str(name).strip() for name in selected.get("recycle", [])) or selected.get("recycle_skip") or selected.get("recycle_empty")):
+        required_rooms.append("Recycle")
+    if enabled and (any(selected.get("training", {}).values()) or selected.get("continue_training") or selected.get("training_skip") or selected.get("training_empty")):
+        required_rooms.append("Training")
+    raw_batch = batch_data((acc.get("base_schedule") or {}).get("batches", {}), batch) or {}
+    continue_training = raw_batch.get("continue_training")
+    if not enabled and continue_training is not None:
+        continue_training = False
+    errors = []
+
+    def log_apply(message):
+        _log_file(cfg, message)
+        if message.startswith("ERROR:"):
+            errors.append(message[len("ERROR:"):].strip())
 
     changed = apply_maa_config(
         maa_dir, plan_path, plan_index=plan_index,
-        log=lambda m: _log_file(cfg, m))
+        log=log_apply,
+        continue_training=continue_training, required_rooms=required_rooms)
     if changed is None:
-        _log_file(cfg, "ERROR: MAA 配置读取失败（文件损坏或被 MAA 占用），"
-                  "账号「%s」按失败处理，等待整轮重试" % label)
-        print("ERROR maa config unreadable")
+        detail = "；".join(errors) or "MAA 基建配置应用失败，未返回具体原因"
+        _log_file(cfg, "ERROR: 账号「%s」基建配置未应用：%s" % (label, detail))
+        print("ERROR " + detail)
         return 1
     if enabled and "gui.new.json" not in changed:
         # 找不到 InfrastTask 时 apply_maa_config 只会 WARN，MAA 实际仍按原
@@ -632,7 +755,7 @@ def cmd_apply(args):
 
 
 def cmd_generate(args):
-    cfg = load_config(args.config)
+    cfg = load_config(args.config, required=True)
     acc = find_account(cfg, args.account)
     if acc is None:
         print("ERROR account not found: %s" % args.account)
@@ -791,7 +914,17 @@ def _convert_import_plan(plan, layout):
         "dormitory": dorm_rows(),
         "office": single("hire", 1),
         "processing": single("processing", 1),
+        "recycle": single("recycle", 2),
+        "training": {key: [str(x).strip() for x in (_first_entry(rooms.get("training")) or {}).get(key, []) if str(x).strip()] if isinstance((_first_entry(rooms.get("training")) or {}).get(key), list) else [] for key in ("operatorsA", "operatorsB")},
     }
+    for key in ("training", "recycle"):
+        if key in rooms and rooms[key] == []:
+            batch[key + "_empty"] = True
+        if (_first_entry(rooms.get(key)) or {}).get("skip") is True:
+            batch[key + "_skip"] = True
+    metadata = plan.get("metadata") or {}
+    console = metadata.get("maaConsole", {}) if isinstance(metadata, dict) else {}
+    batch["continue_training"] = isinstance(console, dict) and console.get("continueTraining") is True
     # 菲亚梅塔心情恢复（按批次）：该计划里启用就落到对应批次的设置上
     fia = plan.get("Fiammetta")
     if isinstance(fia, dict):
@@ -818,7 +951,7 @@ def _room_import_notes(plan):
         for i, e in enumerate(entries):
             if not isinstance(e, dict):
                 continue
-            if e.get("skip"):
+            if e.get("skip") and key not in ("training", "recycle"):
                 notes.append("「%s」%s 第 %d 个条目原为“不换班”(skip)，控制台不支持该字段，"
                              "将按留空/自动排班处理。" % (name, key, i + 1))
             for field in ("candidates", "groups", "use_operator_groups"):
@@ -991,7 +1124,7 @@ def main(argv=None):
     g.set_defaults(func=cmd_generate)
 
     args = p.parse_args(argv)
-    return args.func(args)
+    return run_plugin_command(args)
 
 
 if __name__ == "__main__":

@@ -91,6 +91,9 @@ def default_base_schedule(layout="333", batches=None):
             "dormitory": [[""] * 5 for _ in range(4)],
             "office": [""],
             "processing": [""],
+            "recycle": [""] * 2,
+            "training": {"operatorsA": [], "operatorsB": []},
+            "continue_training": False,
             # 菲亚梅塔心情恢复：按批次独立（换班前先恢复目标干员心情）
             "fiammetta": {"enable": False, "target": ""},
         }

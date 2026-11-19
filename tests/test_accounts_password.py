@@ -18,6 +18,7 @@ sys.path.insert(0, str(ROOT / "gui"))
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
 from core import secret  # noqa: E402
+from tests.test_support import appconfig  # noqa: E402
 from pages.accounts import CaptureDialog  # noqa: E402
 
 
@@ -77,6 +78,21 @@ class AccountPasswordFieldTest(unittest.TestCase):
         with patch("pages.accounts.appconfig.save"):
             dlg._apply_result()
         self.assertEqual(acc["password"], "new-pass")
+
+    def test_recapture_preserves_account_tasks_and_new_facilities(self):
+        acc = self._account("pw")
+        plan = {"enabled": True, "batches": {"4点": {
+            "recycle": ["芬", "克洛丝"],
+            "training": {"operatorsA": ["杜宾"], "operatorsB": ["银灰"]},
+        }}}
+        tasks = {"progress": {"enabled": True, "plans": [{"name": "银灰"}]}}
+        acc.update(base_schedule=plan, maa_tasks=tasks)
+        dlg = self._dialog(acc)
+        dlg._slot = "acc_x"
+        with patch.object(appconfig, 'save'):
+            dlg._apply_result()
+        self.assertEqual(acc['base_schedule'], plan)
+        self.assertEqual(acc['maa_tasks'], tasks)
 
 
 if __name__ == "__main__":

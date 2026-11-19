@@ -1,12 +1,12 @@
 # -*- coding: utf-8 -*-
-"""仪表盘：3 账号卡片 + 上次运行汇总条 + 班次计划 + 状态与更新合并卡片（1×2）。"""
+"""账号运行状态、班次计划和 MAA 连接状态组件。"""
 import re
 from datetime import datetime, timedelta
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QPainter, QPen
-from PySide6.QtWidgets import (QDialog, QFrame, QGridLayout, QHBoxLayout,
+from PySide6.QtWidgets import (QFrame, QGridLayout, QHBoxLayout,
                                QLabel, QVBoxLayout, QWidget)
 
 from qfluentwidgets import (BodyLabel, CheckBox, InfoBar, InfoBarPosition,
@@ -18,6 +18,7 @@ import theme
 from core import (adb, export_runner, logparse, maa_update, poller, runner,
                   scheduler, token_check)
 from pages.export_dialog import ExportDialog
+from sheets import SheetDialog
 from widgets import (Card, IconBadge, Pill, BusyStrip, apply_mono_font,
                      big_number, hline, inset_row, kv_row,
                      label as _styled_label,
@@ -122,7 +123,7 @@ class AccountCard(Card):
         )
 
     def set_token_status(self, st):
-        """DashboardPage 每个刷新周期把槽位 token 状态塞进来（只存，UI 在 refresh 里刷）。"""
+        """账号运行状态页每个刷新周期把槽位 token 状态塞进来（只存，UI 在 refresh 里刷）。"""
         self._token = st
 
     def _set_alert(self, on):
@@ -207,7 +208,10 @@ class AccountCard(Card):
             self.kv2_val.setText("已禁用")
             return
         today = (run["start"] or "").startswith(datetime.now().strftime("%Y-%m-%d"))
-        if result["ok"]:
+        special = {'warning': '已完成 · 收尾异常', 'unknown': '结果待确认'}.get(result.get('status'))
+        if special:
+            self.pill.set_state('wait', special)
+        elif result["ok"]:
             self.pill.set_state("ok", "今日已完成" if today else "上次完成")
         else:
             self.pill.set_state("fail", "失败")
@@ -215,7 +219,7 @@ class AccountCard(Card):
             self._set_kv1_big(str(result["dur"]))
         else:
             self.kv1_val.setText("—")
-        self.kv2_val.setText(fmt_ts(run["start"]) + (" ✓" if result["ok"] else " ✗"))
+        self.kv2_val.setText(fmt_ts(run["start"]) + (" · 待关注" if special else (" ✓" if result["ok"] else " ✗")))
 
 
 class _ScheduleCardBase(Card):
@@ -249,6 +253,7 @@ class _ScheduleCardBase(Card):
     def __init__(self, cfg):
         super().__init__(self.CARD_TITLE)
         self.cfg = cfg
+        self.scheduler_info = None
         self._row_widgets = []
         self._edits = {}
         self._apply_worker = None   # 计划任务同步的后台线程（改完行立即生效）
@@ -420,6 +425,7 @@ class _ScheduleCardBase(Card):
                             position=InfoBarPosition.TOP_RIGHT, duration=6000)
 
     def refresh_scheduler(self, info):
+        self.scheduler_info = info
         self.next_val.setText(scheduler.next_run_text(info))
         if not info.get("exists"):
             self.task_val.setText("未创建")
@@ -666,27 +672,35 @@ class ScheduleCard(_ScheduleCardBase):
                             duration=4000)
             return
         selected = {str(x) for x in (entry.get("accounts") or [])}
-        dlg = QDialog(self.window())
-        dlg.setWindowTitle("班次账号 - %s（%s）" % (
-            appconfig.batch_name(entry["time"]), entry["time"]))
-        dlg.setModal(True)
-        theme.bind(dlg, lambda: "QDialog { background: %s; }" % theme.BG)
-        v = QVBoxLayout(dlg)
-        v.setContentsMargins(20, 18, 20, 16)
-        v.setSpacing(10)
-        hint = BodyLabel(
-            "勾选该班次要运行的账号：全部勾选（或不勾）=「全部账号」，以后新增的号\n"
-            "也会跟着跑；只勾部分则该班次只跑这几个号，其余号在该班次不运行。")
-        hint.setWordWrap(True)
-        theme.bind(hint, lambda: "color: %s; %s"
-                   % (theme.TEXT_3, theme.font_stack(theme.FS_CAPTION)))
-        v.addWidget(hint)
+        dlg = SheetDialog(self.window(), title="班次账号 · %s（%s）" % (
+            appconfig.batch_name(entry["time"]), entry["time"]),
+            subtitle="全选或全不选时，会跟随账号列表，自动包含以后新增的账号。",
+            size=(550, min(490, 200 + len(accs) * 46)))
+        v = dlg.body
+        scroll = style_scroll_area(ScrollArea())
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        host = QWidget()
+        rows = QVBoxLayout(host)
+        rows.setContentsMargins(0, 0, 10, 0)
+        rows.setSpacing(5)
         boxes = []
         for a in accs:
+            line = QFrame()
+            line.setObjectName("batchAccount")
+            theme.bind(line, lambda: "QFrame#batchAccount {background:%s; border-radius:10px;}"
+                       % theme.ROW_INSET)
+            row = QHBoxLayout(line)
+            row.setContentsMargins(12, 6, 12, 6)
             cb = CheckBox(a.get("label") or a.get("id") or "?")
             cb.setChecked(not selected or str(a.get("id")) in selected)
-            v.addWidget(cb)
+            row.addWidget(cb, 1)
+            row.addWidget(_label("B 服" if a.get("server") == "bilibili" else "官服", color="TEXT_2"))
+            rows.addWidget(line)
             boxes.append(cb)
+        rows.addStretch()
+        scroll.setWidget(host)
+        v.addWidget(scroll, 1)
         btns = QHBoxLayout()
         btns.setSpacing(10)
         cancel_btn = style_button(PushButton("取消"))
@@ -697,7 +711,9 @@ class ScheduleCard(_ScheduleCardBase):
         v.addLayout(btns)
         ok_btn.clicked.connect(dlg.accept)
         cancel_btn.clicked.connect(dlg.reject)
-        if not dlg.exec():
+        accepted = dlg.exec()
+        dlg.deleteLater()
+        if not accepted:
             return
         checked = [str(a.get("id")) for a, cb in zip(accs, boxes) if cb.isChecked()]
         if len(checked) == len(accs):
@@ -796,18 +812,19 @@ class LastRunStrip(Card):
             ok = a.get("ok")
             skipped = a.get("skipped")
             dot = QLabel("●")
-            color = theme.TEXT_3 if skipped else (theme.OK if ok else theme.ERR)
+            special = {'warning': '成功但收尾异常', 'unknown': '结果待确认'}.get(a.get('status'))
+            color = theme.TEXT_3 if skipped else (theme.WAIT if special else (theme.OK if ok else theme.ERR))
             dot.setStyleSheet("color: %s; font-size: 11px; background: transparent;"
                               % color)
             tip = "%s · %s" % (a.get("name"), "跳过" if skipped
-                               else ("成功" if ok else "失败"))
+                               else (special or ("成功" if ok else "失败")))
             if a.get("dur") is not None:
                 tip += " · %g 分钟" % a["dur"]
             dot.setToolTip(tip)
             self.dots_layout.addWidget(dot)
         if accounts:
             passed = sum(1 for a in accounts if a.get("ok") and not a.get("skipped"))
-            failed = sum(1 for a in accounts if not a.get("ok") and not a.get("skipped"))
+            failed = sum(1 for a in accounts if not a.get("ok") and not a.get("skipped") and a.get('status') != 'unknown')
             skipped = sum(1 for a in accounts if a.get("skipped"))
             if failed:
                 text = ('<span style="color:%s">%d/%d 成功 · %d 失败</span>'
@@ -816,6 +833,10 @@ class LastRunStrip(Card):
                 text = "%d/%d 成功" % (passed, len(accounts))
             if skipped:
                 text += " · %d 跳过" % skipped
+            for status, label in (('warning', '收尾异常'), ('unknown', '待确认')):
+                count = sum(a.get('status') == status for a in accounts)
+                if count:
+                    text += ' · %d %s' % (count, label)
             self.passed_val.setText(text)
             self.dots_host.show()
             self.passed_val.show()
@@ -987,8 +1008,35 @@ class StatusCard(Card):
                 pill.set_state("wait", "未知")
 
 
-class DashboardPage(ScrollArea):
-    """仪表盘。export_done = 干员导出结束（含后台运行的情况）回主窗口提示。"""
+    def on_open_maa(self, cfg, key):
+        """打开对应 MAA 主程序（key: "official" / "bilibili"）。
+
+        更新完全交给 MAA：其 Update 配置为启动时自动检查并安装（含资源
+        热更），打开后等它自己更新完，关闭窗口即可。
+        """
+        if runner.is_running():
+            InfoBar.warning("挂机运行中", "挂机正在使用 MAA，请结束后再打开",
+                            parent=self.window(),
+                            position=InfoBarPosition.TOP_RIGHT, duration=4000)
+            return
+        if adb.maa_running():
+            InfoBar.info("MAA 已在运行", "两套 MAA 不能同时开：请先关闭已打开的 MAA 窗口",
+                         parent=self.window(),
+                         position=InfoBarPosition.TOP_RIGHT, duration=4000)
+            return
+        ok, msg = maa_update.open_maa(cfg, key)
+        if ok:
+            InfoBar.success(msg, "MAA 会自行检查并安装更新（含资源热更），完成后关闭 MAA 窗口即可",
+                            parent=self.window(),
+                            position=InfoBarPosition.TOP_RIGHT, duration=5000)
+        else:
+            InfoBar.warning(msg, "请检查「设置 → 模拟器与 MAA → 程序路径」里的 MAA 目录",
+                            parent=self.window(),
+                            position=InfoBarPosition.TOP_RIGHT, duration=6000)
+
+
+class AccountStatusPage(ScrollArea):
+    """账号运行状态。export_done = 干员导出结束（含后台运行的情况）回主窗口提示。"""
 
     export_done = Signal(bool, str)
 
@@ -1013,25 +1061,6 @@ class DashboardPage(ScrollArea):
         self.last_strip = LastRunStrip()
         root.addWidget(self.last_strip)
 
-        # 宽窗口双栏（3:2）：左 = 班次计划（列多、最宽），右 = 收菜计划；
-        # 连接状态/MAA 更新是横向 1×2 卡片，整宽放最下不再挤占侧栏
-        bottom = QHBoxLayout()
-        bottom.setSpacing(16)
-        self.schedule_card = ScheduleCard(cfg)
-        bottom.addWidget(self.schedule_card, 3)
-        # 收菜计划：基建收菜的每日定时（独立计划任务，与班次计划分开维护）
-        self.collect_card = CollectScheduleCard(cfg)
-        bottom.addWidget(self.collect_card, 2)
-        root.addLayout(bottom)
-
-        # 底部：连接状态 + MAA 版本 合并为一张 1×2 卡片
-        self.status_card = StatusCard()
-        self.status_card.open_official_btn.clicked.connect(
-            lambda: self.on_open_maa("official"))
-        self.status_card.open_bili_btn.clicked.connect(
-            lambda: self.on_open_maa("bilibili"))
-        root.addWidget(self.status_card)
-        self.status_card.refresh_versions(self.cfg)
         # 干员资料导出（core/export_runner 驱动 scripts/export_operbox.py）
         self._export_worker = None
         self._export_dialog = None
@@ -1041,7 +1070,6 @@ class DashboardPage(ScrollArea):
         self.acc_sig = None
         self._acc_cols = 2
         self.tick = 0
-        self.adb_ok = None
         # token 自检（官服账号）：启动 3 秒后补检（GUI 错过 4 点时兜底）+
         # 每天 4:00 定时全检；挂机运行中跳过——login_check 启动 MAA 前会对
         # 槽位做同源探测并写同一份状态文件，界面只负责读文件标红/恢复
@@ -1050,15 +1078,11 @@ class DashboardPage(ScrollArea):
         self._daily_check_timer.setSingleShot(True)
         self._daily_check_timer.timeout.connect(self._on_daily_token_check)
         self._arm_daily_token_check()
-        QTimer.singleShot(3000, lambda: self._start_token_check(force=False, announce="problems"))
+        QTimer.singleShot(3000, self, lambda: self._start_token_check(force=False, announce="problems"))
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.refresh)
         self.timer.start(5000)
         self.refresh()
-
-    def set_adb_state(self, ok):
-        """后台线程回报的 ADB 在线状态。"""
-        self.adb_ok = ok
 
     # ---------- token 自检 ----------
 
@@ -1097,7 +1121,7 @@ class DashboardPage(ScrollArea):
         if expired:
             InfoBar.warning(
                 "token 自检：%d 个账号 token 已失效" % len(expired),
-                "、".join(expired) + " —— 请在「账号管理」重新捕获登录数据",
+                "、".join(expired) + " —— 请在「账号 → 账号管理」重新捕获登录数据",
                 parent=self.window(), position=InfoBarPosition.TOP_RIGHT,
                 duration=10000)
         elif announce == "always" and summary.get("checked"):
@@ -1125,32 +1149,6 @@ class DashboardPage(ScrollArea):
             return w
         return None
 
-    def on_open_maa(self, key):
-        """打开对应 MAA 主程序（key: "official" / "bilibili"）。
-
-        更新完全交给 MAA：其 Update 配置为启动时自动检查并安装（含资源
-        热更），打开后等它自己更新完，关闭窗口即可。
-        """
-        if runner.is_running():
-            InfoBar.warning("挂机运行中", "挂机正在使用 MAA，请结束后再打开",
-                            parent=self.window(),
-                            position=InfoBarPosition.TOP_RIGHT, duration=4000)
-            return
-        if adb.maa_running():
-            InfoBar.info("MAA 已在运行", "两套 MAA 不能同时开：请先关闭已打开的 MAA 窗口",
-                         parent=self.window(),
-                         position=InfoBarPosition.TOP_RIGHT, duration=4000)
-            return
-        ok, msg = maa_update.open_maa(self.cfg, key)
-        if ok:
-            InfoBar.success(msg, "MAA 会自行检查并安装更新（含资源热更），完成后关闭 MAA 窗口即可",
-                            parent=self.window(),
-                            position=InfoBarPosition.TOP_RIGHT, duration=5000)
-        else:
-            InfoBar.warning(msg, "请检查「运行设置 → 程序路径」里的 MAA 目录",
-                            parent=self.window(),
-                            position=InfoBarPosition.TOP_RIGHT, duration=6000)
-
     # ---------- 干员资料导出 ----------
 
     def export_running(self):
@@ -1173,9 +1171,7 @@ class DashboardPage(ScrollArea):
     def _on_export_done(self, ok, summary):
         dlg = self._export_dialog
         if dlg is not None:
-            dlg.append("")
-            dlg.append("==== %s ====" % ("导出完成" if ok else "导出未全部成功"))
-            dlg.append(summary)
+            dlg.finish(ok, summary)
         self.export_done.emit(ok, summary)
 
     def detach_export_worker(self):
@@ -1238,11 +1234,6 @@ class DashboardPage(ScrollArea):
             card.set_token_status(token_map.get(card.acc.get("slot")))
             card.refresh(run, stage, enabled_map.get(card.acc["key"], True))
         self.last_strip.refresh(run)
-        self.status_card.refresh(self.cfg, self.adb_ok)
-        # 版本徽章随周期刷新：MAA 自己更新（或资源热更）后控制台显示跟着走，
-        # 不再是「只在控制台启动时读一次」——那是「打开 MAA 自更新」流程下
-        # 最容易产生的版本显示过期
-        self.status_card.refresh_versions(self.cfg)
         # 残留锁清理（上次运行中断）：clear_stale_lock 内部复核 PID 与内容，
         # 避免和 master.ps1 的抢锁写入竞态
         if runner.clear_stale_lock() is not None:
