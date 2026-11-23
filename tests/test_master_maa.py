@@ -197,6 +197,33 @@ $ok = Run-MAA (Join-Path $maaDir 'MAA.exe') $maaDir 'test'
         self.assertEqual(result['launches'], 1)
         self.assertEqual(result['kills'], 1, '接续的新进程也必须收尾')
 
+    def test_external_updater_restart_is_followed_without_launching_again(self):
+        result = self.run_case(r'''
+$script:MaaRestartGraceSec = 30
+$maaStallTimeoutSec = 100
+$updateLog = Join-Path $maaDir 'debug/pending-update-applier.log'
+$script:child = [pscustomobject]@{Id=222; HasExited=$false; Path=(Join-Path $maaDir 'MAA.exe'); StartTime=(Get-Date)}
+function Start-Process {
+    $script:launches++
+    $entry = "[2026-11-23 16:17:31.976] Parent PID: 111, root dir: $maaDir`n" +
+        "[2026-11-23 16:17:32.600] Relaunch succeeded.`n"
+    [IO.File]::WriteAllText($updateLog, $entry)
+    [pscustomobject]@{Id=111; HasExited=$true; StartTime=(Get-Date).AddSeconds(-5)}
+}
+function Get-CimInstance {
+    [pscustomobject]@{ProcessId=222; ParentProcessId=999; ExecutablePath=$script:child.Path}
+}
+function Get-Process { return $script:child }
+function Wait-Event {
+    if ($script:LastMaaActiveProcess.Id -eq 222) { [IO.File]::WriteAllText($signalFile, '') }
+}
+$ok = Run-MAA (Join-Path $maaDir 'MAA.exe') $maaDir 'test'
+@{ok=$ok; status=$script:LastMaaStatus; launches=$script:launches; kills=$script:kills} | ConvertTo-Json
+''')
+        self.assertTrue(result['ok'])
+        self.assertEqual(result['launches'], 1)
+        self.assertEqual(result['kills'], 1, '更新器重开的进程也必须纳入收尾')
+
     def test_unrelated_reopen_is_not_adopted_or_relaunched_over(self):
         result = self.run_case(r'''
 $maaStallTimeoutSec = 100
@@ -214,6 +241,47 @@ $ok = Run-MAA (Join-Path $maaDir 'MAA.exe') $maaDir 'test'
         self.assertEqual(result['status'], 'interrupted')
         self.assertEqual(result['launches'], 1)
         self.assertEqual(result['kills'], 0)
+
+    def test_stale_update_log_does_not_authorize_unrelated_reopen(self):
+        result = self.run_case(r'''
+$maaStallTimeoutSec = 100
+$updateLog = Join-Path $maaDir 'debug/pending-update-applier.log'
+$entry = "[2026-11-22 04:35:55.786] Parent PID: 111, root dir: $maaDir`n" +
+    "[2026-11-22 04:35:55.838] Relaunch succeeded.`n"
+[IO.File]::WriteAllText($updateLog, $entry)
+function Start-Process {
+    $script:launches++
+    [pscustomobject]@{Id=111; HasExited=$true; StartTime=(Get-Date).AddSeconds(-5)}
+}
+function Get-CimInstance {
+    [pscustomobject]@{ProcessId=222; ParentProcessId=999; ExecutablePath=(Join-Path $maaDir 'MAA.exe')}
+}
+$ok = Run-MAA (Join-Path $maaDir 'MAA.exe') $maaDir 'test'
+@{ok=$ok; status=$script:LastMaaStatus; launches=$script:launches; kills=$script:kills} | ConvertTo-Json
+''')
+        self.assertFalse(result['ok'])
+        self.assertEqual(result['status'], 'interrupted')
+        self.assertEqual(result['launches'], 1)
+        self.assertEqual(result['kills'], 0)
+
+    def test_interrupted_conflict_does_not_leave_maa_running(self):
+        result = self.run_case(r'''
+$script:maaRunning = $false
+function Stop-StaleMaa { $script:maaRunning = $false }
+function Start-Process {
+    $script:launches++
+    $script:maaRunning = $true
+    [pscustomobject]@{Id=111; HasExited=$true; StartTime=(Get-Date).AddSeconds(-5)}
+}
+function Get-CimInstance {
+    [pscustomobject]@{ProcessId=222; ParentProcessId=999; ExecutablePath=(Join-Path $maaDir 'MAA.exe')}
+}
+$ok = Run-MAA (Join-Path $maaDir 'MAA.exe') $maaDir 'test'
+@{ok=$ok; status=$script:LastMaaStatus; maaRunning=$script:maaRunning} | ConvertTo-Json
+''')
+        self.assertFalse(result['ok'])
+        self.assertEqual(result['status'], 'interrupted')
+        self.assertFalse(result['maaRunning'], '中断后必须清理同安装目录的冲突进程')
 
     def test_known_chain_error_is_not_downgraded_when_log_becomes_unreadable(self):
         result = self.run_case(r'''

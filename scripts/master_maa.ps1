@@ -22,8 +22,15 @@ function New-MaaLogState([string]$MaaDir) {
         # 元数据不会打开数据流；记录启动前的长度，旧错误不属于本次运行。
         $pos = (Get-Item -LiteralPath $path -ErrorAction Stop).Length
     }
+    $updatePath = Join-Path $MaaDir 'debug\pending-update-applier.log'
+    $updatePos = 0L
+    if (Test-Path -LiteralPath $updatePath) {
+        # 更新日志也只认本轮启动后的新增内容，旧的重开记录不能证明进程归属。
+        $updatePos = (Get-Item -LiteralPath $updatePath -ErrorAction Stop).Length
+    }
     return @{
         Path = $path; Position = $pos; ObservedLength = $pos; Carry = ''
+        UpdatePath = $updatePath; UpdatePosition = $updatePos
         Errors = [Collections.Generic.List[string]]::new()
         Timer = [Diagnostics.Stopwatch]::StartNew(); LastActivity = 0.0
         SawProgress = $false; ReadOK = $false; ReadFailures = 0
@@ -112,7 +119,7 @@ function Wait-MAADone($t, $maaDir, $maaProc, $State) {
             if ($null -eq $maaProc -or $maaProc.HasExited) { $deadCount++ } else { $deadCount = 0 }
             if ($deadCount -gt 0) {
                 if ($null -eq $deadAt) { $deadAt = $State.Timer.Elapsed.TotalSeconds }
-                $replacement = Find-MaaRestart $maaDir $maaProc
+                $replacement = Find-MaaRestart $maaDir $maaProc $State
                 if ($replacement.Conflict) { return 'interrupted' }
                 if ($replacement.Process) {
                     # 只有尚未执行任务时才能接续更新启动；保留同一次日志游标。
@@ -125,7 +132,11 @@ function Wait-MAADone($t, $maaDir, $maaProc, $State) {
                     $restartCount++
                     $deadCount = 0; $deadAt = $null
                     $State.LastActivity = $State.Timer.Elapsed.TotalSeconds
-                    Log 'MAA 启动阶段已重启，接续本轮派生进程，等待任务结果'
+                    if ($replacement.Updater) {
+                        Log 'MAA 自动更新已重开，接续更新后的进程，等待任务结果'
+                    } else {
+                        Log 'MAA 启动阶段已重启，接续本轮派生进程，等待任务结果'
+                    }
                 }
             } else { $deadAt = $null }
             if ($done) {
@@ -166,15 +177,56 @@ function Wait-MAADone($t, $maaDir, $maaProc, $State) {
     }
 }
 
-function Find-MaaRestart($MaaDir, $Previous) {
-    # 路径相同不够：手动重开不属于本轮。必须同时确认父进程和启动时间。
+function Test-MaaUpdaterRestart($State, $Previous) {
+    # 外部更新器会在重开后退出，不能只靠当前进程树确认父子关系。
+    # 用本轮游标之后的日志把「原 MAA -> 更新器 -> 重开」串起来；读不到证据时保持保守。
+    if ($null -eq $State -or $null -eq $Previous -or -not $Previous.Id -or
+        $null -eq $State.UpdatePath -or $State.UpdatePosition -lt 0 -or
+        -not (Test-Path -LiteralPath $State.UpdatePath -PathType Leaf)) {
+        return $false
+    }
+    $fs = $null
+    $reader = $null
+    $text = ''
+    try {
+        $fs = [IO.File]::Open($State.UpdatePath, [IO.FileMode]::Open, [IO.FileAccess]::Read,
+            [IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete)
+        $start = [long]$State.UpdatePosition
+        if ($fs.Length -lt $start) { $start = 0L }
+        if ($fs.Length -eq $start) { return $false }
+        [void]$fs.Seek($start, [IO.SeekOrigin]::Begin)
+        $reader = [IO.StreamReader]::new($fs, [Text.Encoding]::UTF8)
+        $text = $reader.ReadToEnd()
+    } catch {
+        return $false
+    } finally {
+        if ($reader) { $reader.Dispose() } elseif ($fs) { $fs.Dispose() }
+    }
+    $parent = [regex]::Match($text, '(?m)^\[[^\r\n\]]+\]\s+Parent PID:\s*' +
+        [regex]::Escape([string]$Previous.Id) + '\s*,')
+    if (-not $parent.Success) { return $false }
+    $afterParent = $text.Substring($parent.Index + $parent.Length)
+    # Relaunching 在创建进程前写入，覆盖“新进程已可见、成功日志尚未落盘”的短暂窗口。
+    return [regex]::IsMatch($afterParent,
+        '(?m)^\[[^\r\n\]]+\]\s+(?:Relaunching MAA:|Relaunch succeeded\.)')
+}
+
+function Find-MaaRestart($MaaDir, $Previous, $State) {
+    # 路径相同不够：手动重开不属于本轮。接受原进程的直接子进程，或有本轮
+    # 更新日志佐证的外部更新器重开；启动时间和安装目录仍必须同时匹配。
     $found = $null
+    $fromUpdater = $false
     try {
         $target = [IO.Path]::GetFullPath((Join-Path $MaaDir 'MAA.exe'))
         foreach ($item in @(Get-CimInstance Win32_Process -Filter "Name = 'MAA.exe'" -ErrorAction Stop)) {
             if (-not $item.ExecutablePath) { return @{Process=$null; Conflict=$true} }
             if (-not [IO.Path]::GetFullPath($item.ExecutablePath).Equals($target, [StringComparison]::OrdinalIgnoreCase)) { continue }
-            if (-not $Previous -or $item.ParentProcessId -ne $Previous.Id -or $found) {
+            $directRestart = $null -ne $Previous -and $item.ParentProcessId -eq $Previous.Id
+            $updaterRestart = $false
+            if ($null -ne $Previous -and -not $directRestart) {
+                $updaterRestart = Test-MaaUpdaterRestart $State $Previous
+            }
+            if ((-not $directRestart -and -not $updaterRestart) -or $found) {
                 return @{Process=$null; Conflict=$true}
             }
             $candidate = Get-Process -Id $item.ProcessId -ErrorAction Stop
@@ -183,8 +235,9 @@ function Find-MaaRestart($MaaDir, $Previous) {
                 return @{Process=$null; Conflict=$true}
             }
             $found = $candidate
+            $fromUpdater = $updaterRestart
         }
-        return @{Process=$found; Conflict=$false}
+        return @{Process=$found; Conflict=$false; Updater=$fromUpdater}
     } catch {
         return @{Process=$null; Conflict=$true}
     }
@@ -222,6 +275,18 @@ function Run-MAA($exe, $dir, $label) {
                     } finally {
                         if ($owned -is [Diagnostics.Process]) { $owned.Dispose() }
                     }
+                }
+                # 启动器退出后可能出现无法确认归属的同目录 MAA（例如自动更新重开）。
+                # Wait-MAADone 会保守返回 interrupted，但它不一定在已登记的句柄里；
+                # 不能只清 $maaProc，否则残留进程会阻碍配置恢复并串到下一账号。
+                # Stop-StaleMaa 严格按安装目录匹配，不会误杀其他目录的人工 MAA。
+                try {
+                    Stop-StaleMaa $dir
+                } catch {
+                    $detail = 'MAA 同目录残留清理异常：' + $_.Exception.Message
+                    $script:LastMaaCleanupWarning = (@($script:LastMaaCleanupWarning, $detail) |
+                        Where-Object { $_ }) -join '；'
+                    Log ('WARN: ' + $detail)
                 }
             }
             if ($script:LastMaaStatus -ne 'dead-early' -or $attempt -eq 1) { break }

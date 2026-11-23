@@ -31,8 +31,11 @@ function Run-Switch {
         Remove-Item -LiteralPath $heartbeat -Force -ErrorAction SilentlyContinue
         $arguments = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $path) + $ScriptArgs
         $commandLine = ($arguments | ForEach-Object { ConvertTo-ProcessArgument $_ }) -join ' '
+        # 不新建控制台：-WindowStyle Hidden 会先创建 conhost/Terminal 再隐藏，
+        # 每个子脚本启动时仍会闪黑窗。父进程（GUI/计划任务）已是隐藏控制台，
+        # 手动 bat 则复用用户已有的控制台；输出仍独立重定向，不污染主控日志。
         $proc = Start-Process -FilePath $pwshExe -ArgumentList $commandLine `
-            -WindowStyle Hidden -PassThru -RedirectStandardOutput $tmpOut `
+            -NoNewWindow -PassThru -RedirectStandardOutput $tmpOut `
             -RedirectStandardError $tmpErr -ErrorAction Stop
         if ($null -eq $proc) { throw '未获得子进程句柄' }
         $null = $proc.Handle

@@ -249,8 +249,9 @@ try {
 }
 
 # 7) scheduled task (optional) — 与 GUI 控制台同一个任务名、同一套动作定义：
-#    pwsh 绝对路径 + master.ps1。不走启动挂机.bat（bat 结尾的 pause 会让计划
-#    任务进程在挂机结束后永不退出），任务名/触发也与 GUI 保持一致便于管理
+#    pythonw 经 util.py 用 CREATE_NO_WINDOW 拉起 pwsh。仅 -WindowStyle Hidden
+#    在 Windows Terminal 作为默认终端时仍会弹窗；不走启动挂机.bat（bat 结尾的
+#    pause 会让计划任务进程在挂机结束后永不退出）。
 $ans = Read-Host "是否创建计划任务（每天 04:00 / 16:00 自动挂机，需管理员权限）？[Y/N]"
 if ($ans -match '^[Yy]') {
     try {
@@ -260,14 +261,20 @@ if ($ans -match '^[Yy]') {
             "$env:LOCALAPPDATA\Microsoft\WindowsApps\pwsh.exe"
         ) | Where-Object { Test-Path $_ } | Select-Object -First 1
         if (-not $pwshExe) { throw "未找到 PowerShell 7（pwsh）：安装包未内置便携版且本机未安装 PowerShell 7" }
-        $action = New-ScheduledTaskAction -Execute $pwshExe `
-            -Argument "-NoProfile -ExecutionPolicy Bypass -WindowStyle Minimized -File `"$target\scripts\master.ps1`""
+        if (-not (Test-Path $runtimePyw)) { throw "无窗口启动需要安装包内置的 pythonw.exe，但 $runtimePyw 不存在" }
+        $headlessLauncher = Join-Path $target "gui\core\util.py"
+        $action = New-ScheduledTaskAction -Execute $runtimePyw `
+            -Argument "`"$headlessLauncher`" `"$pwshExe`" -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$target\scripts\master.ps1`""
         $triggers = @(
             New-ScheduledTaskTrigger -Daily -At 04:00
             New-ScheduledTaskTrigger -Daily -At 16:00
         )
+        $settings = New-ScheduledTaskSettingsSet `
+            -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -Hidden `
+            -StartWhenAvailable -MultipleInstances IgnoreNew `
+            -ExecutionTimeLimit ([timespan]::Zero)
         Register-ScheduledTask -TaskName "MAA_明日方舟自动挂机" -Action $action `
-            -Trigger $triggers -Force | Out-Null
+            -Trigger $triggers -Settings $settings -Force | Out-Null
         Write-Ok "计划任务创建完成（单任务含两个触发时间，与控制台「班次计划」共用）"
     } catch {
         Write-Warn "计划任务创建失败（需管理员权限 + PowerShell 7）：$($_.Exception.Message)"

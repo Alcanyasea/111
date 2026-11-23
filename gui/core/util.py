@@ -8,6 +8,7 @@ accounts 各复制一份，且解码策略不一致（有的只试 GBK，有的 
 import json
 import os
 import subprocess
+import sys
 from pathlib import Path
 
 CREATE_NO_WINDOW = 0x08000000
@@ -85,3 +86,32 @@ def write_json(path, data):
     tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
     os.replace(tmp, path)
     return path
+
+
+def headless_main(argv=None):
+    """由 pythonw 执行，以 CREATE_NO_WINDOW 启动命令并等待、透传退出码。
+
+    Windows Terminal 设为默认终端时，计划任务直接执行 pwsh 即使带
+    -WindowStyle Hidden 也可能弹出 Terminal；从无控制台的 pythonw 创建
+    CREATE_NO_WINDOW 子进程才能避开这条窗口路径。只依赖标准库，便携运行时
+    和开发 venv 均可直接执行本文件。
+    """
+    args = list(sys.argv[1:] if argv is None else argv)
+    if not args:
+        return 2
+    try:
+        result = subprocess.run(
+            args,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            creationflags=CREATE_NO_WINDOW,
+            check=False,
+        )
+    except OSError:
+        return 1
+    return result.returncode
+
+
+if __name__ == "__main__":
+    raise SystemExit(headless_main())

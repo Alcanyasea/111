@@ -333,6 +333,12 @@ Save-RunHistory ''
 
 
 class ChildProcessTest(unittest.TestCase):
+    def test_child_reuses_parent_console_instead_of_creating_hidden_window(self):
+        source = (Path(__file__).resolve().parents[1]
+                  / "scripts" / "master_process.ps1").read_text(encoding="utf-8")
+        self.assertIn("-NoNewWindow -PassThru", source)
+        self.assertNotIn("-WindowStyle Hidden -PassThru", source)
+
     def test_timeout_kills_descendants_and_keeps_diagnostics(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

@@ -16,6 +16,7 @@ import json
 import os
 import re
 import shutil
+import sys
 import tempfile
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -29,6 +30,12 @@ COLLECT_TASK_NAME = "MAA_基建收菜"
 # 不再写死 D:\1：项目挪目录/装到别的盘后计划任务仍指向正确脚本
 MASTER_PS1 = str(Path(__file__).resolve().parents[2] / "scripts" / "master.ps1")
 SKIP_ONCE_PATH = Path(MASTER_PS1).with_name("skip_once.json")
+
+# 计划任务从 pythonw 进入，再由 util.headless_main 以 CREATE_NO_WINDOW 拉起
+# pwsh；单独使用 -WindowStyle Hidden 在 Windows Terminal 默认终端下仍会弹窗。
+# GUI 正式入口始终使用同目录的 pythonw（开发 venv / 安装包便携运行时）。
+PYTHONW_EXE = str(Path(sys.executable).with_name("pythonw.exe"))
+HEADLESS_LAUNCHER = str(Path(__file__).resolve().with_name("util.py"))
 
 
 _PS_DATE_RE = re.compile(r"/Date\((\d+)\)/")
@@ -180,7 +187,7 @@ def _enabled_times(entries):
 
 
 def _apply_task(name, times, master_args):
-    """注册/更新单个计划任务：pwsh 直跑 master.ps1（master_args 为模式参数）。
+    """注册/更新单个计划任务：pythonw 无窗口启动 pwsh + master.ps1。
 
     times 为已校验的 HH:MM 列表；全部被禁用/无时间时不创建任务，任务已存在
     则只禁用（触发保留但灰置，重新启用时由下一次 apply 按最新配置重写）——
@@ -196,18 +203,25 @@ def _apply_task(name, times, master_args):
         "$ErrorActionPreference='Stop';"
         "$name = '%s';"
         "$action = New-ScheduledTaskAction -Execute '%s'"
-        # -File 路径加双引号：项目目录含空格时任务计划程序照样能启动
-        "  -Argument '-NoProfile -ExecutionPolicy Bypass -WindowStyle Minimized -File \"%s\"%s';"
+        # pythonw 执行 util.py，再由后者创建无窗口 pwsh；所有路径均加双引号。
+        "  -Argument '\"%s\" \"%s\" -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File \"%s\"%s';"
         "$triggers = @(%s | ForEach-Object {"
         "  New-ScheduledTaskTrigger -Daily -At ([datetime]::Parse($_)) });"
+        # Do not stop a run when AC power briefly disconnects.  The 16:00
+        # failure was exactly this setting: MAA had finished and written its
+        # signal, then Task Scheduler terminated the master during cleanup.
+        "$settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries "
+        "  -DontStopIfGoingOnBatteries -Hidden -StartWhenAvailable "
+        "  -MultipleInstances IgnoreNew -ExecutionTimeLimit ([timespan]::Zero);"
         "$t = Get-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue;"
         "if (%s) {"
-        "  if ($t) { Set-ScheduledTask -TaskName $name -Action $action -Trigger $triggers }"
-        "  else { Register-ScheduledTask -TaskName $name -Action $action -Trigger $triggers };"
+        "  if ($t) { Set-ScheduledTask -TaskName $name -Action $action -Trigger $triggers -Settings $settings }"
+        "  else { Register-ScheduledTask -TaskName $name -Action $action -Trigger $triggers -Settings $settings };"
         "  Enable-ScheduledTask -TaskName $name"
         "} elseif ($t) { Disable-ScheduledTask -TaskName $name };"
         "'APPLIED'"
-    ) % (name, pwsh_exe(), MASTER_PS1, extra, times_ps, en_ps)
+    ) % (name, PYTHONW_EXE, HEADLESS_LAUNCHER, pwsh_exe(), MASTER_PS1,
+         extra, times_ps, en_ps)
     code, out, err = _ps(script, timeout=APPLY_TIMEOUT)
     err_text = decode_console(err).strip()
     if code != 0 or "APPLIED" not in decode_console(out):

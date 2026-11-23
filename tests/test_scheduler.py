@@ -4,11 +4,12 @@ import re
 import sys
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "gui"))
 
-from core import scheduler  # noqa: E402
+from core import scheduler, util  # noqa: E402
 
 
 class SchedulerRenderTest(unittest.TestCase):
@@ -39,7 +40,14 @@ class SchedulerRenderTest(unittest.TestCase):
                       "master.ps1 路径必须加引号且来自推导常量")
         m = re.search(r"-Execute '([^']+)'", s)
         self.assertIsNotNone(m)
-        self.assertTrue(m.group(1).endswith("pwsh.exe"))
+        self.assertTrue(m.group(1).endswith("pythonw.exe"))
+        self.assertIn('"%s"' % scheduler.HEADLESS_LAUNCHER, s)
+        self.assertIn('"%s"' % scheduler.pwsh_exe(), s)
+        self.assertIn("-WindowStyle Hidden", s)
+        self.assertIn("-DontStopIfGoingOnBatteries", s)
+        self.assertIn("-AllowStartIfOnBatteries", s)
+        self.assertIn("-ExecutionTimeLimit ([timespan]::Zero)", s)
+        self.assertIn("-Settings $settings", s)
         self.assertIn("04:00", s)
         self.assertIn("16:00", s)
 
@@ -147,6 +155,33 @@ class SchedulerEnabledDefaultTest(unittest.TestCase):
                                  {"time": "04:00", "enabled": False}]}})
         self.assertNotIn("04:00", script)
         self.assertIn("if ($false)", script)
+
+
+class HeadlessLauncherTest(unittest.TestCase):
+    """计划任务的 pythonw 入口：不实际启动任何子进程。"""
+
+    def test_runs_child_without_window_and_returns_exit_code(self):
+        completed = mock.Mock(returncode=7)
+        with mock.patch.object(util.subprocess, "run", return_value=completed) as run:
+            code = util.headless_main(["pwsh.exe", "-File", "a b.ps1"])
+        self.assertEqual(code, 7)
+        run.assert_called_once_with(
+            ["pwsh.exe", "-File", "a b.ps1"],
+            stdin=util.subprocess.DEVNULL,
+            stdout=util.subprocess.DEVNULL,
+            stderr=util.subprocess.DEVNULL,
+            creationflags=util.CREATE_NO_WINDOW,
+            check=False,
+        )
+
+    def test_missing_command_is_rejected_without_spawning(self):
+        with mock.patch.object(util.subprocess, "run") as run:
+            self.assertEqual(util.headless_main([]), 2)
+        run.assert_not_called()
+
+    def test_start_failure_returns_nonzero(self):
+        with mock.patch.object(util.subprocess, "run", side_effect=OSError):
+            self.assertEqual(util.headless_main(["missing.exe"]), 1)
 
 
 if __name__ == "__main__":
